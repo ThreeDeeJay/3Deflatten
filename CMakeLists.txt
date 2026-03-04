@@ -57,16 +57,23 @@ target_include_directories(strmbase PUBLIC
 
 target_compile_definitions(strmbase PUBLIC
     WIN32_LEAN_AND_MEAN
-    NOMINMAX
+    # Do NOT define NOMINMAX for strmbase: the baseclasses rely on the Windows
+    # min/max macros and do not include <algorithm> themselves.
+    # NOMINMAX is defined only on our own filter sources below.
     _CRT_SECURE_NO_WARNINGS
     UNICODE
     _UNICODE
-    # Suppress noisy warnings in the base-class headers
     _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
 )
 
-# The baseclasses use some features that need /W3, not /W4
-target_compile_options(strmbase PRIVATE /W3 /wd4996 /wd4267 /wd4244)
+# /FI"algorithm" force-includes <algorithm> so std::min/std::max are always
+# available even in translation units that don't include it explicitly.
+# Also suppress the many warnings the old baseclasses generate under MSVC.
+target_compile_options(strmbase PRIVATE
+    /W3
+    /wd4996 /wd4267 /wd4244 /wd4312 /wd4311 /wd4302
+    /FI"algorithm"
+)
 
 # ── ONNX Runtime ──────────────────────────────────────────────────────────────
 find_package(onnxruntime CONFIG REQUIRED)
