@@ -5,5 +5,13 @@
   "dependencies": [
     "onnxruntime",
     "directxtk"
-  ]
+  ],
+  "features": {
+    "cuda": {
+      "description": "Enable NVIDIA CUDA execution provider (requires CUDA Toolkit installed at build time). DirectML (DX12) and CPU are always available as fallbacks.",
+      "dependencies": [
+        { "name": "onnxruntime", "features": ["cuda"] }
+      ]
+    }
+  }
 }

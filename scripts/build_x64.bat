@@ -4,12 +4,15 @@ echo ============================================================
 echo  3Deflatten ^| Build x64 (Release)
 echo ============================================================
 echo.
-echo NOTE: vcpkg dependencies required before first build:
+echo NOTE: vcpkg dependency required before first build:
 echo   vcpkg install onnxruntime:x64-windows directxtk:x64-windows
 echo.
-echo   Optional - for NVIDIA GPU acceleration, install CUDA Toolkit first:
-echo   https://developer.nvidia.com/cuda-downloads
-echo   Then reinstall: vcpkg install onnxruntime[cuda]:x64-windows
+echo   For NVIDIA CUDA acceleration (faster than DirectML for AI inference):
+echo     1. Install CUDA Toolkit: https://developer.nvidia.com/cuda-downloads
+echo     2. vcpkg install onnxruntime[cuda]:x64-windows directxtk:x64-windows
+echo     3. Add -DCMAKE_C_FLAGS="/DORT_ENABLE_CUDA" to the cmake call below
+echo.
+echo   Without CUDA: filter auto-selects DirectML (DX12) then CPU.
 echo.
 
 if "%VCPKG_ROOT%"=="" (

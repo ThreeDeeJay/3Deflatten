@@ -88,6 +88,19 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 }
 
 // ── BuildSessionOptions ───────────────────────────────────────────────────────
+// Probe whether CUDA runtime DLLs are present on this machine at all.
+// This avoids a hard crash / long timeout when CUDA EP is compiled in
+// but the user has no NVIDIA driver installed.
+static bool CUDARuntimeAvailable() {
+    // Try loading the CUDA runtime DLL (ships with NVIDIA driver >= 410.x).
+    // We don't need to call anything – presence alone is sufficient.
+    HMODULE h = LoadLibraryExW(L"nvcuda.dll", nullptr,
+                                LOAD_LIBRARY_AS_DATAFILE);
+    if (h) { FreeLibrary(h); return true; }
+    LOG_INFO("nvcuda.dll not found – CUDA EP will be skipped");
+    return false;
+}
+
 void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                                           std::wstring& outInfo) {
     m_sessionOpts = Ort::SessionOptions();
@@ -100,20 +113,40 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
     auto tryEP = [&](GPUProvider ep) -> bool {
         try {
             if (ep == GPUProvider::CUDA) {
+#ifdef ORT_ENABLE_CUDA
+                // Runtime-probe first so we fail fast without ORT's own
+                // long timeout when nvcuda.dll is absent.
+                if (!CUDARuntimeAvailable()) return false;
                 OrtCUDAProviderOptions cuda{};
-                cuda.device_id = 0;
+                cuda.device_id                 = 0;
+                cuda.cudnn_conv_algo_search     = OrtCudnnConvAlgoSearchExhaustive;
+                cuda.do_copy_in_default_stream  = 1;
                 m_sessionOpts.AppendExecutionProvider_CUDA(cuda);
                 outInfo = L"NVIDIA CUDA";
-                LOG_INFO("Execution provider: CUDA");
+                LOG_INFO("Execution provider: CUDA (cuDNN exhaustive search)");
                 return true;
+#else
+                LOG_INFO("CUDA EP not compiled in – skipping");
+                return false;
+#endif
             } else if (ep == GPUProvider::DirectML) {
+                // DirectML ships with Windows 10 1903+ (directml.dll).
+                // On older Windows it may be absent; probe before calling.
+                HMODULE hDML = LoadLibraryExW(L"directml.dll", nullptr,
+                                               LOAD_LIBRARY_AS_DATAFILE);
+                if (!hDML) {
+                    LOG_WARN("directml.dll not found – DirectML EP skipped");
+                    return false;
+                }
+                FreeLibrary(hDML);
                 m_sessionOpts.AppendExecutionProvider_DML(0);
                 outInfo = L"DirectML (DX12 GPU)";
                 LOG_INFO("Execution provider: DirectML");
                 return true;
             }
         } catch (const Ort::Exception& e) {
-            LOG_WARN("EP init failed: ", e.what());
+            LOG_WARN("EP init failed (", ep == GPUProvider::CUDA ? "CUDA" : "DML",
+                     "): ", e.what());
         }
         return false;
     };
@@ -130,8 +163,8 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
         return;
     }
     if (provider == GPUProvider::Auto) {
-        if (tryEP(GPUProvider::CUDA))    return;
-        if (tryEP(GPUProvider::DirectML)) return;
+        if (tryEP(GPUProvider::CUDA))     return;  // fastest if available
+        if (tryEP(GPUProvider::DirectML)) return;  // DX12 GPU fallback
         outInfo = L"CPU (fallback)";
         LOG_INFO("Execution provider: CPU (auto fallback)");
     }
