@@ -26,14 +26,20 @@ jobs:
             vcpkg_triplet: x86-windows
 
     env:
-      VCPKG_ROOT:            ${{ github.workspace }}\vcpkg
+      # Use the vcpkg that is pre-installed on every windows-latest runner.
+      # VCPKG_INSTALLATION_ROOT is set by the runner to its location
+      # (typically C:\vcpkg).  No cloning or bootstrapping needed.
+      VCPKG_ROOT:            ${{ env.VCPKG_INSTALLATION_ROOT }}
       VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
+      # Use the GitHub Actions cache as vcpkg's binary source so pre-built
+      # packages are restored on subsequent runs instead of recompiled.
       VCPKG_BINARY_SOURCES:  "clear;x-gha,readwrite"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Expose the cache URL/token that vcpkg's x-gha binary source needs.
       - name: Export Actions cache env vars for vcpkg
         uses: actions/github-script@v7
         with:
@@ -41,31 +47,21 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL',     process.env.ACTIONS_CACHE_URL     || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
+      # Cache the installed/ directory by triplet + vcpkg.json hash.
+      # On a hit the install step below completes in seconds.
       - name: Cache vcpkg installed packages
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}\vcpkg\installed
+          path: ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
           key:  vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
             vcpkg-${{ matrix.vcpkg_triplet }}-
 
-      - name: Bootstrap vcpkg
-        run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
-          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
-        shell: pwsh
-
-      # IMPORTANT: vcpkg.json puts vcpkg in manifest mode.
-      # In manifest mode, `vcpkg install` reads vcpkg.json automatically.
-      # Passing individual package names on the command line is an error.
-      # VCPKG_BINARY_SOURCES=x-gha restores pre-built packages from the
-      # Actions cache, making subsequent runs take ~3 min instead of ~2 hrs.
+      # vcpkg.json puts vcpkg in manifest mode: `vcpkg install` reads the
+      # manifest automatically -- no package names on the command line.
       - name: Install vcpkg dependencies
-        run: |
-          & "$env:VCPKG_ROOT\vcpkg.exe" install `
-            --triplet ${{ matrix.vcpkg_triplet }} `
-            --no-print-usage
-        shell: pwsh
+        run: vcpkg install --triplet ${{ matrix.vcpkg_triplet }} --no-print-usage
+        shell: cmd
         working-directory: ${{ github.workspace }}
 
       - name: Set up MSVC (${{ matrix.arch }})
@@ -74,17 +70,17 @@ jobs:
           arch: ${{ matrix.arch }}
 
       - name: Configure CMake (${{ matrix.arch }})
-        run: |
-          cmake -B build `
-            -A ${{ matrix.cmake_arch }} `
-            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
-            "-DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}" `
-            -DCMAKE_BUILD_TYPE=${{ matrix.config }}
-        shell: pwsh
+        run: >
+          cmake -B build
+          -A ${{ matrix.cmake_arch }}
+          -DCMAKE_TOOLCHAIN_FILE="%VCPKG_INSTALLATION_ROOT%\scripts\buildsystems\vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+        shell: cmd
 
       - name: Build (${{ matrix.arch }})
         run: cmake --build build --config ${{ matrix.config }} --parallel
-        shell: pwsh
+        shell: cmd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -117,12 +113,12 @@ jobs:
 
       - name: Create release zip
         run: |
-          Copy-Item README.md                 release/
-          Copy-Item LICENSE                   release/
-          Copy-Item scripts/register.bat      release/
-          Copy-Item scripts/download_model.py release/
-          Compress-Archive -Path release/* -DestinationPath 3Deflatten-release.zip
-        shell: pwsh
+          copy README.md                 release\
+          copy LICENSE                   release\
+          copy scripts\register.bat      release\
+          copy scripts\download_model.py release\
+          powershell Compress-Archive -Path release\* -DestinationPath 3Deflatten-release.zip
+        shell: cmd
 
       - name: Upload release zip
         uses: actions/upload-artifact@v4
