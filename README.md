@@ -39,11 +39,15 @@ Licensed under the **GNU General Public License v3**.
 ### 2. Install ONNX Runtime via vcpkg
 
 ```cmd
-vcpkg install onnxruntime[cuda]:x64-windows directxtk:x64-windows
+vcpkg install onnxruntime:x64-windows directxtk:x64-windows
 vcpkg install onnxruntime:x86-windows directxtk:x86-windows
 ```
 
-> **Note:** DirectML support is included in the Windows onnxruntime package automatically — no separate feature flag is needed.
+> **CUDA (optional):** If you have the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) installed, you can get faster inference by instead running:
+> ```cmd
+> vcpkg install onnxruntime[cuda]:x64-windows
+> ```
+> Without CUDA, the filter automatically falls back to DirectML (any DX12 GPU) then CPU — no code changes needed.
 
 ### 3. Download the depth model
 

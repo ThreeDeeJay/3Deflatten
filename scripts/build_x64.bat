@@ -5,8 +5,11 @@ echo  3Deflatten ^| Build x64 (Release)
 echo ============================================================
 echo.
 echo NOTE: vcpkg dependencies required before first build:
-echo   vcpkg install onnxruntime[cuda]:x64-windows directxtk:x64-windows
-echo   (DirectML support is included in onnxruntime automatically on Windows)
+echo   vcpkg install onnxruntime:x64-windows directxtk:x64-windows
+echo.
+echo   Optional - for NVIDIA GPU acceleration, install CUDA Toolkit first:
+echo   https://developer.nvidia.com/cuda-downloads
+echo   Then reinstall: vcpkg install onnxruntime[cuda]:x64-windows
 echo.
 
 if "%VCPKG_ROOT%"=="" (

@@ -6,7 +6,10 @@ echo ============================================================
 echo.
 echo NOTE: vcpkg dependencies required before first build:
 echo   vcpkg install onnxruntime:x86-windows directxtk:x86-windows
-echo   (DirectML support is included in onnxruntime automatically on Windows)
+echo.
+echo   Optional - for NVIDIA GPU acceleration, install CUDA Toolkit first:
+echo   https://developer.nvidia.com/cuda-downloads
+echo   Then reinstall: vcpkg install onnxruntime[cuda]:x86-windows
 echo.
 
 if "%VCPKG_ROOT%"=="" (
