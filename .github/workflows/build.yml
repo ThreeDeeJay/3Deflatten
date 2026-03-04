@@ -26,52 +26,106 @@ jobs:
             vcpkg_triplet: x86-windows
 
     env:
-      VCPKG_ROOT:              ${{ github.workspace }}\vcpkg
-      VCPKG_DEFAULT_TRIPLET:   ${{ matrix.vcpkg_triplet }}
-      # Binary caching: store built packages in the Actions cache.
-      # This is the key that makes subsequent runs take ~3 min instead of ~2 hr.
-      VCPKG_BINARY_SOURCES:    "clear;x-gha,readwrite"
+      VCPKG_ROOT:            ${{ github.workspace }}\vcpkg
+      VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
+      VCPKG_BINARY_SOURCES:  "clear;x-gha,readwrite"
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Enable vcpkg binary caching via GitHub Actions cache ──────────────
-      - name: Export GitHub Actions cache env vars for vcpkg
+      - name: Export Actions cache env vars for vcpkg
         uses: actions/github-script@v7
         with:
           script: |
-            core.exportVariable('ACTIONS_CACHE_URL',    process.env.ACTIONS_CACHE_URL    || '');
+            core.exportVariable('ACTIONS_CACHE_URL',     process.env.ACTIONS_CACHE_URL     || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-      # ── 3. Cache the vcpkg install tree by triplet + vcpkg.json hash ─────────
-      #    This caches the final installed/ directory so vcpkg skips the build
-      #    entirely on cache hit. The key includes a hash of vcpkg.json so it
-      #    invalidates automatically when you add/remove dependencies.
       - name: Cache vcpkg installed packages
-        id:   vcpkg-cache
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}\vcpkg\installed
-          key:  vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('vcpkg-configuration.json', '.github/vcpkg-baseline') }}
+          key:  vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
             vcpkg-${{ matrix.vcpkg_triplet }}-
 
-      # ── 4. Bootstrap vcpkg ───────────────────────────────────────────────────
       - name: Bootstrap vcpkg
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
         shell: pwsh
 
-      # ── 5. Install vcpkg dependencies ────────────────────────────────────────
-      #    Thanks to VCPKG_BINARY_SOURCES=x-gha, packages already built in a
-      #    previous run are restored from cache instead of recompiled.
+      # IMPORTANT: vcpkg.json puts vcpkg in manifest mode.
+      # In manifest mode, `vcpkg install` reads vcpkg.json automatically.
+      # Passing individual package names on the command line is an error.
+      # VCPKG_BINARY_SOURCES=x-gha restores pre-built packages from the
+      # Actions cache, making subsequent runs take ~3 min instead of ~2 hrs.
       - name: Install vcpkg dependencies
-        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         run: |
           & "$env:VCPKG_ROOT\vcpkg.exe" install `
-            onnxruntime:${{ matrix.vcpkg_triplet }} `
-            directxtk:${{ matrix.vcpkg_triplet }}
+            --triplet ${{ matrix.vcpkg_triplet }} `
+            --no-print-usage
         shell: pwsh
+        working-directory: ${{ github.workspace }}
+
+      - name: Set up MSVC (${{ matrix.arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Configure CMake (${{ matrix.arch }})
+        run: |
+          cmake -B build `
+            -A ${{ matrix.cmake_arch }} `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            "-DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}" `
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+        shell: pwsh
+
+      - name: Build (${{ matrix.arch }})
+        run: cmake --build build --config ${{ matrix.config }} --parallel
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3Deflatten_${{ matrix.arch }}_${{ matrix.config }}
+          path: build/${{ matrix.config }}/3Deflatten_${{ matrix.arch }}.ax
+          if-no-files-found: error
+
+  package:
+    name: Package release
+    needs: build
+    runs-on: windows-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x64_Release
+          path: release/
+
+      - name: Download x86 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x86_Release
+          path: release/
+
+      - name: Create release zip
+        run: |
+          Copy-Item README.md                 release/
+          Copy-Item LICENSE                   release/
+          Copy-Item scripts/register.bat      release/
+          Copy-Item scripts/download_model.py release/
+          Compress-Archive -Path release/* -DestinationPath 3Deflatten-release.zip
+        shell: pwsh
+
+      - name: Upload release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3Deflatten-release
+          path: 3Deflatten-release.zip
