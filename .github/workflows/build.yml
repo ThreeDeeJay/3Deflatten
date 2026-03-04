@@ -26,10 +26,10 @@ jobs:
             vcpkg_triplet: x86-windows
 
     env:
-      # Use the vcpkg that is pre-installed on every windows-latest runner.
-      # VCPKG_INSTALLATION_ROOT is set by the runner to its location
-      # (typically C:\vcpkg).  No cloning or bootstrapping needed.
-      VCPKG_ROOT:            ${{ env.VCPKG_INSTALLATION_ROOT }}
+      # C:\vcpkg is the fixed location of the pre-installed vcpkg on
+      # windows-latest runners. VCPKG_INSTALLATION_ROOT cannot be referenced
+      # here because the env context is not available in job-level env blocks.
+      VCPKG_ROOT:            C:\vcpkg
       VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
       # Use the GitHub Actions cache as vcpkg's binary source so pre-built
       # packages are restored on subsequent runs instead of recompiled.
@@ -48,11 +48,10 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       # Cache the installed/ directory by triplet + vcpkg.json hash.
-      # On a hit the install step below completes in seconds.
       - name: Cache vcpkg installed packages
         uses: actions/cache@v4
         with:
-          path: ${{ env.VCPKG_INSTALLATION_ROOT }}\installed
+          path: C:\vcpkg\installed
           key:  vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
             vcpkg-${{ matrix.vcpkg_triplet }}-
@@ -73,7 +72,7 @@ jobs:
         run: >
           cmake -B build
           -A ${{ matrix.cmake_arch }}
-          -DCMAKE_TOOLCHAIN_FILE="%VCPKG_INSTALLATION_ROOT%\scripts\buildsystems\vcpkg.cmake"
+          -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
           -DCMAKE_BUILD_TYPE=${{ matrix.config }}
         shell: cmd
