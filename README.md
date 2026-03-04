@@ -39,9 +39,11 @@ Licensed under the **GNU General Public License v3**.
 ### 2. Install ONNX Runtime via vcpkg
 
 ```cmd
-vcpkg install onnxruntime[cuda,directml]:x64-windows
-vcpkg install onnxruntime[directml]:x86-windows
+vcpkg install onnxruntime[cuda]:x64-windows directxtk:x64-windows
+vcpkg install onnxruntime:x86-windows directxtk:x86-windows
 ```
+
+> **Note:** DirectML support is included in the Windows onnxruntime package automatically — no separate feature flag is needed.
 
 ### 3. Download the depth model
 

@@ -3,6 +3,11 @@ setlocal
 echo ============================================================
 echo  3Deflatten ^| Build x86 / Win32 (Release)
 echo ============================================================
+echo.
+echo NOTE: vcpkg dependencies required before first build:
+echo   vcpkg install onnxruntime:x86-windows directxtk:x86-windows
+echo   (DirectML support is included in onnxruntime automatically on Windows)
+echo.
 
 if "%VCPKG_ROOT%"=="" (
     echo ERROR: VCPKG_ROOT is not set.

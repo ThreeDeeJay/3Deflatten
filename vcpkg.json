@@ -5,7 +5,7 @@
   "dependencies": [
     {
       "name": "onnxruntime",
-      "features": ["cuda", "directml"]
+      "features": ["cuda"]
     },
     "directxtk"
   ]
