@@ -1,127 +1,144 @@
-#Based on template from: https://github.com/ThreeDeeJay/GitHub-Actions-build-templates/blob/main/Windows-CMake.yml
 name: Build
-
-env:
-  GH_TOKEN: ${{github.token}}
-  Branch: ${{github.ref_name}}
-  Platform: Any CPU #Win32|x86|x64 - Check .sln file for available ones
-  Configuration: Release
-  Artifacts: build/Release
-  Title: ${{github.event.repository.name}}
-  Executable: ${{github.event.repository.name}}.exe # *
-#  DXSDK_DIR: C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\
 
 on:
   push:
-    Branches: $Branch
+    branches: [ main, master ]
   pull_request:
-    Branches: $Branch
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  Windows:
-    runs-on: windows-2022
+  build:
+    name: ${{ matrix.arch }} ${{ matrix.config }}
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:   [ x64, x86 ]
+        config: [ Release ]
+        include:
+          - arch: x64
+            cmake_arch:    x64
+            vcpkg_triplet: x64-windows
+          - arch: x86
+            cmake_arch:    Win32
+            vcpkg_triplet: x86-windows
+
+    env:
+      VCPKG_ROOT:              ${{ github.workspace }}\vcpkg
+      VCPKG_DEFAULT_TRIPLET:   ${{ matrix.vcpkg_triplet }}
+      # Binary caching: store built packages in the Actions cache.
+      # This is the key that makes subsequent runs take ~3 min instead of ~2 hr.
+      VCPKG_BINARY_SOURCES:    "clear;x-gha,readwrite"
+
     steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Clone repo and submodules
-      run: git clone https://${{github.repository_owner}}:${{github.token}}@github.com/${{github.repository}}.git "${{github.workspace}}" --branch ${{env.Branch}} --recurse-submodules #--depth 1 - Fetches entire commit history but breaks commit count
+      # ── 2. Enable vcpkg binary caching via GitHub Actions cache ──────────────
+      - name: Export GitHub Actions cache env vars for vcpkg
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL',    process.env.ACTIONS_CACHE_URL    || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-    - name: Get current date, commit hash and count
-      run: |
-        echo "FirstCommitHash=$(git rev-list --max-parents=0 HEAD --first-parent)" >> $env:GITHUB_ENV
-        echo "CommitHash=$(git rev-parse HEAD)" >> $env:GITHUB_ENV
-        echo "CommitHashShort=$(git rev-parse --short=7 HEAD)" >> $env:GITHUB_ENV
-        echo "CommitCount=$(git rev-list --count HEAD)" >> $env:GITHUB_ENV
-        echo "CommitDate=$(git show -s --date=format:'%Y-%m-%d' --format=%cd)" >> $env:GITHUB_ENV
+      # ── 3. Cache the vcpkg install tree by triplet + vcpkg.json hash ─────────
+      #    This caches the final installed/ directory so vcpkg skips the build
+      #    entirely on cache hit. The key includes a hash of vcpkg.json so it
+      #    invalidates automatically when you add/remove dependencies.
+      - name: Cache vcpkg installed packages
+        id:   vcpkg-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg\installed
+          key:  vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}-${{ hashFiles('vcpkg-configuration.json', '.github/vcpkg-baseline') }}
+          restore-keys: |
+            vcpkg-${{ matrix.vcpkg_triplet }}-
 
-#    - name: Cache DirectX SDK
-#      id: DXSDK_Jun10
-#      uses: actions/cache@v4
-#      with:
-#        path: ${{env.DXSDK_DIR}}
-#        key: DXSDK_Jun10
-#    - name: Install DirectX SDK
-#      if: steps.DXSDK_Jun10.outputs.cache-hit != 'true'
-#      shell: powershell
-#      run: |
-#        Invoke-WebRequest -Method Get -Uri https://download.microsoft.com/download/a/e/7/ae743f1f-632b-4809-87a9-aa1bb3458e31/DXSDK_Jun10.exe -OutFile DXSDK_Jun10.exe -UseBasicParsing
-#        Start-Process -Wait ./DXSDK_Jun10.exe -ArgumentList "/U"
-#    - name: Set DXSDK_DIR
-#      run: echo "DXSDK_DIR=C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\" >> $env:GITHUB_ENV
-# NOTE: STORING CACHE REQUIRES THE RUN TO SUCCEED, SO IF IT'S FAILING, TRY TEMPORARILY REMOVING ALL THE STEPS BELOW THIS LINE
+      # ── 4. Bootstrap vcpkg ───────────────────────────────────────────────────
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+        shell: pwsh
 
-    - name: Install Python 3.14
-      shell: powershell
-      run: |
-        Invoke-WebRequest -Method Get -Uri https://www.python.org/ftp/python/3.14.3/python-3.14.3-amd64.exe -OutFile Python.exe -UseBasicParsing
-        Start-Process -Wait ./Python.exe -ArgumentList "/quiet", "InstallAllUsers=1", "PrependPath=1"
-        python --version
-        $Env:Path = "C:\Program Files\Python314;" + $Env:Path
-        python --version
+      # ── 5. Install vcpkg dependencies ────────────────────────────────────────
+      #    Thanks to VCPKG_BINARY_SOURCES=x-gha, packages already built in a
+      #    previous run are restored from cache instead of recompiled.
+      - name: Install vcpkg dependencies
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" install `
+            onnxruntime:${{ matrix.vcpkg_triplet }} `
+            directxtk:${{ matrix.vcpkg_triplet }}
+        shell: pwsh
 
-    - name: Download the depth model
-      shell: powershell
-      run: |
-        pip install huggingface_hub
-        python scripts\download_model.py
+      # ── 6. Set up MSVC via Developer Command Prompt ──────────────────────────
+      - name: Set up MSVC ${{ matrix.arch }}
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
 
-    - name: Install CUDA
-      uses: Jimver/cuda-toolkit@v0.2.30
+      # ── 7. Configure CMake ───────────────────────────────────────────────────
+      - name: Configure CMake (${{ matrix.arch }})
+        run: |
+          cmake -B build `
+            -A ${{ matrix.cmake_arch }} `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            "-DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}" `
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+        shell: pwsh
 
-    - name: Install vcpkg
-      uses: lukka/run-vcpkg@v11.5
-      with:
-        vcpkgGitCommitId: c2aeddd80357b17592e59ad965d2adf65a19b22f
-    - name: Install dependencies
-      run: |
-        vcpkg install
+      # ── 8. Build ──────────────────────────────────────────────────────────────
+      - name: Build (${{ matrix.arch }})
+        run: cmake --build build --config ${{ matrix.config }} --parallel
+        shell: pwsh
 
-    - name: Build
-      run: |
-        scripts\build_x64.bat
-        scripts\build_x86.bat
+      # ── 9. Upload .ax artifact ───────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3Deflatten_${{ matrix.arch }}_${{ matrix.config }}
+          path: build/${{ matrix.config }}/3Deflatten_${{ matrix.arch }}.ax
+          if-no-files-found: error
 
-    - name: List files
-      run: ls -R
+  # ── Combine both architectures into one release artifact ───────────────────
+  package:
+    name: Package release
+    needs: build
+    runs-on: windows-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
 
-#    - name: Deploy - vcpkg
-#      shell: cmd
-#      run: |
-#        If exist "vcpkg\installed\${{env.Platform}}-windows\bin\*.dll" (copy "vcpkg\installed\${{env.Platform}}-windows\bin\*.dll" "${{env.Artifacts}}")
-#        If exist "vcpkg_installed\${{env.Platform}}-windows\bin\*.dll" (copy "vcpkg_installed\${{env.Platform}}-windows\bin\*.dll" "${{env.Artifacts}}")
-#        If exist "vcpkg\installed\${{env.Platform}}-windows\debug\bin\*.dll" (copy "vcpkg\installed\${{env.Platform}}-windows\debug\bin\*.dll" "${{env.Artifacts}}")
-#        If exist "vcpkg_installed\${{env.Platform}}-windows\debug\bin\*.dll" (copy "vcpkg_installed\${{env.Platform}}-windows\debug\bin\*.dll" "${{env.Artifacts}}")
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Upload artifacts to GitHub
-      uses: actions/upload-artifact@v4
-      with:
-        name: "${{env.Title}}_r${{env.CommitCount}}@${{env.CommitHashShort}}"
-        path: "${{github.workspace}}/${{env.Artifacts}}/"
+      - name: Download x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x64_Release
+          path: release/
 
-    - name: Compress artifacts
-      if: github.event_name == 'push'
-      run: |
-        mkdir Release
-        7z a "Release/${{env.Title}}.zip" "${{github.workspace}}/${{env.Artifacts}}/*" -mx=9
-        cp "Release/${{env.Title}}.zip" "Release/${{env.Title}}_r${{env.CommitCount}}@${{env.CommitHashShort}}.zip"
+      - name: Download x86 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x86_Release
+          path: release/
 
-    - name: Purge tag - latest-${{env.Branch}}
-      if: github.event_name == 'push'
-      run: |
-        gh release delete latest-${{env.Branch}} --repo ${{github.repository}} --cleanup-tag --yes || true
+      - name: Create release zip
+        run: |
+          Copy-Item README.md   release/
+          Copy-Item LICENSE     release/
+          Copy-Item scripts/register.bat release/
+          Copy-Item scripts/download_model.py release/
+          Compress-Archive -Path release/* -DestinationPath 3Deflatten-release.zip
+        shell: pwsh
 
-    - name: Release - archive-${{env.Branch}}
-      if: github.event_name == 'push'
-      run: |
-        gh release create archive-${{env.Branch}} --repo ${{github.repository}} --target ${{env.FirstCommitHash}} --latest=false --prerelease --title "${{env.Title}} ${{env.Branch}} build archive" --notes "Latest build: https://github.com/${{github.repository}}/releases/latest-${{env.Branch}}
-        Build logs: https://github.com/${{github.repository}}/actions" || true
-        gh release edit archive-${{env.Branch}} --repo ${{github.repository}} --target ${{env.FirstCommitHash}} --latest=false --prerelease --title "${{env.Title}} ${{env.Branch}} build archive" --notes "Latest build: https://github.com/${{github.repository}}/releases/latest-${{env.Branch}}
-        Build logs: https://github.com/${{github.repository}}/actions" || true
-        gh release upload archive-${{env.Branch}} --repo ${{github.repository}} --clobber "Release/${{env.Title}}_r${{env.CommitCount}}@${{env.CommitHashShort}}.zip"
-
-    - name: Release - latest-${{env.Branch}}
-      if: github.event_name == 'push'
-      run: |
-        gh release create latest-${{env.Branch}} --repo ${{github.repository}} --target ${{env.CommitHash}} --generate-notes --latest=true --title "${{env.Title}} r${{env.CommitCount}}@${{env.CommitHashShort}}" --notes "Build archive: https://github.com/${{github.repository}}/releases/tag/archive-${{env.Branch}}
-        Build log: https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"
-        gh release upload latest-${{env.Branch}} --repo ${{github.repository}} --clobber "Release/${{env.Title}}.zip"
+      - name: Upload release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3Deflatten-release
+          path: 3Deflatten-release.zip

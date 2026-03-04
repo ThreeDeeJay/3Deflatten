@@ -4,15 +4,20 @@ echo ============================================================
 echo  3Deflatten ^| Build x64 (Release)
 echo ============================================================
 echo.
-echo NOTE: vcpkg dependency required before first build:
-echo   vcpkg install onnxruntime:x64-windows directxtk:x64-windows
+echo Prerequisites:
+echo   1. Visual Studio 2022 with C++ workload
+echo   2. CMake 3.20+  (https://cmake.org)
+echo   3. Git           (needed by FetchContent for strmbase)
+echo   4. vcpkg with VCPKG_ROOT set:
+echo        vcpkg install onnxruntime:x64-windows directxtk:x64-windows
 echo.
-echo   For NVIDIA CUDA acceleration (faster than DirectML for AI inference):
+echo   NOTE: strmbase (DirectShow base classes) is fetched and built
+echo   automatically by CMake -- no manual setup required.
+echo.
+echo   For NVIDIA CUDA acceleration (optional, faster AI inference):
 echo     1. Install CUDA Toolkit: https://developer.nvidia.com/cuda-downloads
-echo     2. vcpkg install onnxruntime[cuda]:x64-windows directxtk:x64-windows
-echo     3. Add -DCMAKE_C_FLAGS="/DORT_ENABLE_CUDA" to the cmake call below
-echo.
-echo   Without CUDA: filter auto-selects DirectML (DX12) then CPU.
+echo     2. vcpkg install onnxruntime[cuda]:x64-windows
+echo     3. Re-run this script
 echo.
 
 if "%VCPKG_ROOT%"=="" (

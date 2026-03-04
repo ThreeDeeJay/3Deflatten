@@ -1,5 +1,7 @@
 # 3Deflatten
 
+![Build](https://github.com/YOUR_USERNAME/3Deflatten/actions/workflows/build.yml/badge.svg)
+
 **Real-time AI 2D-to-3D DirectShow video filter for Windows (32-bit & 64-bit)**
 
 3Deflatten is a DirectShow `.ax` filter that intercepts any video stream, estimates per-frame depth using a GPU-accelerated ONNX AI model (Depth Anything V2), and outputs a full-resolution **Side-by-Side (SBS)** or **Top-and-Bottom (TAB)** stereoscopic frame suitable for 3D displays, HMDs, and media players.
@@ -29,14 +31,14 @@ Licensed under the **GNU General Public License v3**.
 
 - **Visual Studio 2022** (MSVC 17+, C++17)
 - **CMake 3.20+**
+- **Git** — required by CMake's `FetchContent` to auto-download the DirectShow base classes
 - **vcpkg** with `VCPKG_ROOT` environment variable set
 - **Windows 10 SDK 10.0.19041+** (provides `fxc.exe` for shader compilation)
-- `strmbase.lib` — build from Windows SDK samples at:
-  `C:\Program Files (x86)\Windows Kits\10\Samples\multimedia\directshow\baseclasses`
 - **Python 3.8+** (to download the AI model)
-- NVIDIA driver ≥ 520 *or* DirectX 12 GPU for GPU-accelerated inference
 
-### 2. Install ONNX Runtime via vcpkg
+> **Note on strmbase:** The DirectShow base classes are fetched from Microsoft's [Windows-classic-samples](https://github.com/microsoft/Windows-classic-samples) repo and compiled automatically by CMake — no manual SDK samples step required.
+
+### 2. Install vcpkg dependencies
 
 ```cmd
 vcpkg install onnxruntime:x64-windows directxtk:x64-windows

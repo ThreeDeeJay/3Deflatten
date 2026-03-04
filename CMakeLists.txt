@@ -4,72 +4,111 @@ project(3Deflatten VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ── Platform target ──────────────────────────────────────────────────────────
+include(FetchContent)
+
+# ── Platform target ───────────────────────────────────────────────────────────
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(ARCH_SUFFIX "x64")
 else()
     set(ARCH_SUFFIX "x86")
 endif()
 
-# ── Windows SDK / DirectShow base classes ────────────────────────────────────
-# Requires Windows 10 SDK (10.0.19041.0 or newer).
-# strmbase.lib ships with the WDK/SDK samples – build it first or provide path.
+# ── Windows SDK include/lib dirs ──────────────────────────────────────────────
+# Needed for d3d11.lib, dxgi.lib, strmiids.lib, etc.
 set(WINSDK_LIB_DIR
     "$ENV{WindowsSdkDir}Lib/$ENV{WindowsSDKVersion}/um/${ARCH_SUFFIX}"
-    CACHE PATH "Windows SDK lib directory")
+    CACHE PATH "Windows SDK UM lib directory")
 
-find_library(STRMBASE_LIB
-    NAMES strmbase strmbasd
-    HINTS
-        "${WINSDK_LIB_DIR}"
-        "$ENV{DXSDK_DIR}Lib/${ARCH_SUFFIX}"
-        "${CMAKE_SOURCE_DIR}/lib/${ARCH_SUFFIX}"
-    REQUIRED)
+set(WINSDK_INC_DIR
+    "$ENV{WindowsSdkDir}Include/$ENV{WindowsSDKVersion}"
+    CACHE PATH "Windows SDK include root")
 
-# ── ONNX Runtime ─────────────────────────────────────────────────────────────
+# ── DirectShow base classes (strmbase) – built from source ───────────────────
+# Fetches the Microsoft Windows-classic-samples repo (shallow, sparse).
+# The baseclasses folder is at:
+#   Samples/Win7Samples/multimedia/directshow/baseclasses/
+FetchContent_Declare(
+    win_classic_samples
+    GIT_REPOSITORY https://github.com/microsoft/Windows-classic-samples.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+    GIT_SPARSE_CHECKOUT_PATTERNS
+        "Samples/Win7Samples/multimedia/directshow/baseclasses"
+    SOURCE_SUBDIR  "Samples/Win7Samples/multimedia/directshow/baseclasses"
+)
+# We only need to populate (download), not add_subdirectory – it has no CMakeLists.
+FetchContent_Populate(win_classic_samples)
+
+set(BASECLASSES_DIR
+    "${win_classic_samples_SOURCE_DIR}/Samples/Win7Samples/multimedia/directshow/baseclasses")
+
+# Compile the DirectShow base classes as a static library target.
+file(GLOB STRMBASE_SOURCES "${BASECLASSES_DIR}/*.cpp")
+# Remove dllentry.cpp – it defines DllMain which conflicts with ours.
+list(FILTER STRMBASE_SOURCES EXCLUDE REGEX "dllentry\\.cpp$")
+
+add_library(strmbase STATIC ${STRMBASE_SOURCES})
+
+target_include_directories(strmbase PUBLIC
+    "${BASECLASSES_DIR}"
+    "${WINSDK_INC_DIR}/um"
+    "${WINSDK_INC_DIR}/shared"
+)
+
+target_compile_definitions(strmbase PUBLIC
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _CRT_SECURE_NO_WARNINGS
+    UNICODE
+    _UNICODE
+    # Suppress noisy warnings in the base-class headers
+    _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
+)
+
+# The baseclasses use some features that need /W3, not /W4
+target_compile_options(strmbase PRIVATE /W3 /wd4996 /wd4267 /wd4244)
+
+# ── ONNX Runtime ──────────────────────────────────────────────────────────────
 find_package(onnxruntime CONFIG REQUIRED)
 
-# ── DirectX 11 ───────────────────────────────────────────────────────────────
-find_library(D3D11_LIB d3d11 HINTS "${WINSDK_LIB_DIR}" REQUIRED)
-find_library(DXGI_LIB  dxgi  HINTS "${WINSDK_LIB_DIR}" REQUIRED)
-find_library(D3DCOMPILER_LIB d3dcompiler HINTS "${WINSDK_LIB_DIR}" REQUIRED)
-
-# ── Shader compilation ───────────────────────────────────────────────────────
+# ── Shader compilation ────────────────────────────────────────────────────────
 find_program(FXC fxc
-    HINTS "$ENV{WindowsSdkDir}bin/$ENV{WindowsSDKVersion}/${ARCH_SUFFIX}"
-          "$ENV{WindowsSdkDir}bin/x64")
+    HINTS
+        "$ENV{WindowsSdkDir}bin/$ENV{WindowsSDKVersion}/${ARCH_SUFFIX}"
+        "$ENV{WindowsSdkDir}bin/$ENV{WindowsSDKVersion}/x64"
+        "$ENV{WindowsSdkDir}bin/x64")
 
 if(FXC)
     add_custom_command(
         OUTPUT  "${CMAKE_BINARY_DIR}/stereo_warp_ps.h"
         COMMAND "${FXC}"
-                /T ps_5_0 /E PS_StereoWarp /Fh
-                "${CMAKE_BINARY_DIR}/stereo_warp_ps.h"
+                /T ps_5_0 /E PS_StereoWarp
+                /Fh "${CMAKE_BINARY_DIR}/stereo_warp_ps.h"
                 /Vn g_psStereoWarp
                 "${CMAKE_SOURCE_DIR}/shaders/stereo_warp.hlsl"
         DEPENDS "${CMAKE_SOURCE_DIR}/shaders/stereo_warp.hlsl"
-        COMMENT "Compiling stereo_warp.hlsl (PS)")
+        COMMENT "Compiling stereo_warp.hlsl (PS_StereoWarp)")
 
     add_custom_command(
         OUTPUT  "${CMAKE_BINARY_DIR}/stereo_warp_vs.h"
         COMMAND "${FXC}"
-                /T vs_5_0 /E VS_FullScreen /Fh
-                "${CMAKE_BINARY_DIR}/stereo_warp_vs.h"
+                /T vs_5_0 /E VS_FullScreen
+                /Fh "${CMAKE_BINARY_DIR}/stereo_warp_vs.h"
                 /Vn g_vsStereoWarp
                 "${CMAKE_SOURCE_DIR}/shaders/stereo_warp.hlsl"
         DEPENDS "${CMAKE_SOURCE_DIR}/shaders/stereo_warp.hlsl"
-        COMMENT "Compiling stereo_warp.hlsl (VS)")
+        COMMENT "Compiling stereo_warp.hlsl (VS_FullScreen)")
 
     set(SHADER_OUTPUTS
         "${CMAKE_BINARY_DIR}/stereo_warp_ps.h"
         "${CMAKE_BINARY_DIR}/stereo_warp_vs.h")
     add_compile_definitions(USE_PRECOMPILED_SHADERS)
 else()
-    message(WARNING "fxc not found – shaders will be compiled at runtime via D3DCompile")
+    message(STATUS "fxc not found – shaders compiled at runtime via D3DCompile")
     set(SHADER_OUTPUTS "")
 endif()
 
-# ── Source files ─────────────────────────────────────────────────────────────
+# ── Filter DLL source files ───────────────────────────────────────────────────
 set(SOURCES
     src/dllmain.cpp
     src/filter.cpp
@@ -92,7 +131,7 @@ set(HEADERS
     src/resource.h
 )
 
-# ── Filter DLL ───────────────────────────────────────────────────────────────
+# ── Filter DLL ────────────────────────────────────────────────────────────────
 add_library(3Deflatten SHARED ${SOURCES} ${HEADERS})
 
 set_target_properties(3Deflatten PROPERTIES
@@ -103,8 +142,9 @@ set_target_properties(3Deflatten PROPERTIES
 
 target_include_directories(3Deflatten PRIVATE
     src
-    "${CMAKE_BINARY_DIR}"
-    "${WINSDK_LIB_DIR}/../../Include"
+    "${CMAKE_BINARY_DIR}"               # for compiled shader headers
+    "${WINSDK_INC_DIR}/um"
+    "${WINSDK_INC_DIR}/shared"
 )
 
 target_compile_definitions(3Deflatten PRIVATE
@@ -116,12 +156,14 @@ target_compile_definitions(3Deflatten PRIVATE
     _UNICODE
 )
 
+target_compile_options(3Deflatten PRIVATE /W4 /wd4996 /wd4267 /wd4244)
+
 target_link_libraries(3Deflatten PRIVATE
-    ${STRMBASE_LIB}
+    strmbase                    # built from source above
     onnxruntime::onnxruntime
-    ${D3D11_LIB}
-    ${DXGI_LIB}
-    ${D3DCOMPILER_LIB}
+    d3d11.lib
+    dxgi.lib
+    d3dcompiler.lib
     winmm.lib
     strmiids.lib
     ole32.lib
