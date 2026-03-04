@@ -50,7 +50,7 @@ jobs:
 #      run: echo "DXSDK_DIR=C:\Program Files (x86)\Microsoft DirectX SDK (June 2010)\" >> $env:GITHUB_ENV
 # NOTE: STORING CACHE REQUIRES THE RUN TO SUCCEED, SO IF IT'S FAILING, TRY TEMPORARILY REMOVING ALL THE STEPS BELOW THIS LINE
 
-    - name: Install Python 2.6
+    - name: Install Python 3.14
       shell: powershell
       run: |
         Invoke-WebRequest -Method Get -Uri https://www.python.org/ftp/python/3.14.3/python-3.14.3-amd64.exe -OutFile Python.exe -UseBasicParsing
@@ -64,6 +64,9 @@ jobs:
       run: |
         pip install huggingface_hub
         python scripts\download_model.py
+
+    - name: Install CUDA
+      uses: Jimver/cuda-toolkit@v0.2.30
 
     - name: Install vcpkg
       uses: lukka/run-vcpkg@v11.5
