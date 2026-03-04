@@ -1,0 +1,15 @@
+build_x86/
+build_x64/
+*.ax
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+*.log
+__pycache__/
+*.pyc
+.vs/
+*.user
+*.suo
+.cache/

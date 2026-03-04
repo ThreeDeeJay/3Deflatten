@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// 3Deflatten – CLSID / IID definitions
+#pragma once
+#include <initguid.h>
+
+// Filter CLSID  {4D455F30-1A2B-4C3D-8E4F-5A6B7C8D9E0F}
+DEFINE_GUID(CLSID_3Deflatten,
+    0x4d455f30, 0x1a2b, 0x4c3d,
+    0x8e, 0x4f, 0x5a, 0x6b, 0x7c, 0x8d, 0x9e, 0x0f);
+
+// Property-page CLSID  {4D455F31-1A2B-4C3D-8E4F-5A6B7C8D9E0F}
+DEFINE_GUID(CLSID_3DeflattenProp,
+    0x4d455f31, 0x1a2b, 0x4c3d,
+    0x8e, 0x4f, 0x5a, 0x6b, 0x7c, 0x8d, 0x9e, 0x0f);
+
+// I3Deflatten interface IID  {4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F}
+DEFINE_GUID(IID_I3Deflatten,
+    0x4d455f32, 0x1a2b, 0x4c3d,
+    0x8e, 0x4f, 0x5a, 0x6b, 0x7c, 0x8d, 0x9e, 0x0f);

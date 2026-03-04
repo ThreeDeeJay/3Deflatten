@@ -1,0 +1,12 @@
+{
+  "name": "3deflatten",
+  "version": "1.0.0",
+  "description": "DirectShow 2D-to-3D AI depth filter",
+  "dependencies": [
+    {
+      "name": "onnxruntime",
+      "features": ["cuda", "directml"]
+    },
+    "directxtk"
+  ]
+}

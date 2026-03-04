@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#include <windows.h>
+#include "resource.h"
+
+STRINGTABLE
+BEGIN
+    IDS_PROP_TITLE  "3Deflatten Settings"
+END
+
+IDD_PROP_PAGE DIALOGEX 0, 0, 320, 270
+STYLE DS_SETFONT | DS_MODALFRAME | WS_CHILD | WS_VISIBLE | WS_CAPTION
+FONT 8, "MS Shell Dlg", 0, 0, 0x0
+BEGIN
+    LTEXT           "Convergence (depth at screen plane):", -1, 7, 8, 200, 10
+    CONTROL         "", IDC_CONV_SLIDER, "msctls_trackbar32",
+                    TBS_HORZ | WS_CHILD | WS_VISIBLE, 7, 20, 230, 16
+    LTEXT           "0.50", IDC_CONV_LABEL, 244, 20, 60, 16
+
+    LTEXT           "Separation (stereo strength):", -1, 7, 44, 200, 10
+    CONTROL         "", IDC_SEP_SLIDER, "msctls_trackbar32",
+                    TBS_HORZ | WS_CHILD | WS_VISIBLE, 7, 56, 230, 16
+    LTEXT           "0.0300", IDC_SEP_LABEL, 244, 56, 60, 16
+
+    LTEXT           "Output Mode:", -1, 7, 80, 60, 10
+    COMBOBOX        IDC_MODE_COMBO, 70, 78, 160, 80,
+                    CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    LTEXT           "GPU Provider:", -1, 7, 100, 60, 10
+    COMBOBOX        IDC_GPU_COMBO, 70, 98, 160, 80,
+                    CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    AUTOCHECKBOX    "Flip Depth (invert near/far)", IDC_FLIP_CHECK,
+                    7, 120, 200, 12
+
+    GROUPBOX        "Depth Model", -1, 7, 140, 306, 66
+    LTEXT           "Path:", -1, 14, 156, 22, 10
+    EDITTEXT        IDC_MODEL_PATH, 38, 154, 214, 12,
+                    ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP
+    PUSHBUTTON      "Browse...", IDC_BROWSE_BTN, 256, 154, 50, 14
+    PUSHBUTTON      "Reload Model", IDC_RELOAD_BTN, 14, 174, 80, 14
+
+    GROUPBOX        "GPU / Inference Info", -1, 7, 216, 306, 40
+    LTEXT           "", IDC_GPU_INFO, 14, 230, 292, 18
+END
