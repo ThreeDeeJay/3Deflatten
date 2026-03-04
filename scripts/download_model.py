@@ -10,6 +10,8 @@ The model will be saved to:
     %APPDATA%\3Deflatten\models\depth_anything_v2_small.onnx
 
 3Deflatten will find it automatically on next use.
+
+Source: https://huggingface.co/onnx-community/depth-anything-v2-small
 """
 import os
 import sys
@@ -17,8 +19,8 @@ import pathlib
 import shutil
 
 
-REPO_ID        = "depth-anything/Depth-Anything-V2-Small"
-MODEL_FILENAME = "depth_anything_v2_vits.onnx"
+REPO_ID        = "onnx-community/depth-anything-v2-small"
+MODEL_FILENAME = "onnx/model.onnx"
 CANONICAL_NAME = "depth_anything_v2_small.onnx"
 
 
@@ -46,8 +48,9 @@ def main() -> None:
         print("\nNothing to do.")
         return
 
-    print(f"Downloading {MODEL_FILENAME} from Hugging Face …")
+    print(f"Downloading {CANONICAL_NAME} from Hugging Face ...")
     print(f"  Repo : {REPO_ID}")
+    print(f"  File : {MODEL_FILENAME}")
     print(f"  Dest : {dest_dir}\n")
 
     try:
