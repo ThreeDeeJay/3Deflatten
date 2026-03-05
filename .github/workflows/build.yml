@@ -26,20 +26,18 @@ jobs:
             vcpkg_triplet: x86-windows
 
     env:
-      # C:\vcpkg is the fixed location of the pre-installed vcpkg on
-      # windows-latest runners. VCPKG_INSTALLATION_ROOT cannot be referenced
-      # here because the env context is not available in job-level env blocks.
       VCPKG_ROOT:            C:\vcpkg
       VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
-      # Use the GitHub Actions cache as vcpkg's binary source so pre-built
-      # packages are restored on subsequent runs instead of recompiled.
+      # In manifest mode vcpkg installs packages to <source>/vcpkg_installed/
+      # (not C:\vcpkg\installed).  Pin this to a known path so we can cache it.
+      VCPKG_INSTALLED_DIR:   ${{ github.workspace }}\vcpkg_installed
+      # Use the GitHub Actions cache as vcpkg's binary source.
       VCPKG_BINARY_SOURCES:  "clear;x-gha,readwrite"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Expose the cache URL/token that vcpkg's x-gha binary source needs.
       - name: Export Actions cache env vars for vcpkg
         uses: actions/github-script@v7
         with:
@@ -47,32 +45,25 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL',     process.env.ACTIONS_CACHE_URL     || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-      # Cache the installed/ directory by triplet + vcpkg.json hash.
+      # Cache the manifest-mode install dir.
+      # save-always: true ensures the cache is written even when a later step
+      # fails, so the next run benefits from whatever was downloaded this run.
       - name: Cache vcpkg installed packages
         uses: actions/cache@v4
         with:
-          path: C:\vcpkg\installed
+          path: ${{ github.workspace }}\vcpkg_installed
           key:  vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
             vcpkg-${{ matrix.vcpkg_triplet }}-
+          save-always: true
 
-      # vcpkg.json puts vcpkg in manifest mode: `vcpkg install` reads the
-      # manifest automatically -- no package names on the command line.
+      # Manifest mode: `vcpkg install` reads vcpkg.json -- no package args.
+      # VCPKG_INSTALLED_DIR is passed so vcpkg writes to our cached path.
       - name: Install vcpkg dependencies
-        run: vcpkg install --triplet ${{ matrix.vcpkg_triplet }} --no-print-usage
+        run: >
+          C:\vcpkg\vcpkg.exe install
+          --triplet ${{ matrix.vcpkg_triplet }}
+          --no-print-usage
+          --x-install-root="${{ github.workspace }}\vcpkg_installed"
         shell: cmd
         working-directory: ${{ github.workspace }}
-
-      - name: Set up MSVC (${{ matrix.arch }})
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.arch }}
-
-      - name: Configure CMake (${{ matrix.arch }})
-        run: >
-          cmake -B build
-          -A ${{ matrix.cmake_arch }}
-          -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
-          -DCMAKE_BUILD_TYPE=${{ matrix.config }}
-        shell: cmd

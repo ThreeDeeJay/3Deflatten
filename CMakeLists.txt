@@ -76,7 +76,24 @@ target_compile_options(strmbase PRIVATE
 )
 
 # ── ONNX Runtime ──────────────────────────────────────────────────────────────
+# VCPKG_INSTALLED_DIR is set by the toolchain; fall back to the conventional
+# manifest-mode default if it is not explicitly provided.
+if(NOT DEFINED VCPKG_INSTALLED_DIR)
+    set(VCPKG_INSTALLED_DIR "${CMAKE_SOURCE_DIR}/vcpkg_installed")
+endif()
+
 find_package(onnxruntime CONFIG REQUIRED)
+
+# Belt-and-suspenders: explicitly add the vcpkg include tree so that the
+# onnxruntime headers are found even if the imported target's
+# INTERFACE_INCLUDE_DIRECTORIES are not propagated as expected.
+set(VCPKG_INC "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include")
+if(EXISTS "${VCPKG_INC}")
+    include_directories("${VCPKG_INC}")
+    message(STATUS "vcpkg include dir: ${VCPKG_INC}")
+else()
+    message(WARNING "vcpkg include dir not found: ${VCPKG_INC}")
+endif()
 
 # ── Shader compilation ────────────────────────────────────────────────────────
 find_program(FXC fxc

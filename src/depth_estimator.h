@@ -5,7 +5,14 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include <onnxruntime/core/session/onnxruntime_cxx_api.h>
+// vcpkg onnxruntime header – try both install layouts
+#if __has_include(<onnxruntime/core/session/onnxruntime_cxx_api.h>)
+#  include <onnxruntime/core/session/onnxruntime_cxx_api.h>
+#elif __has_include(<onnxruntime_cxx_api.h>)
+#  include <onnxruntime_cxx_api.h>
+#else
+#  error "Cannot find onnxruntime_cxx_api.h. Is onnxruntime installed via vcpkg?"
+#endif
 #include "ideflatten.h"
 
 struct DepthResult {
