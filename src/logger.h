@@ -9,6 +9,7 @@
 #include <sstream>
 #include <chrono>
 #include <iomanip>
+#include <cwchar>
 
 class Logger {
 public:
@@ -22,12 +23,22 @@ public:
 
     bool IsEnabled() const { return m_enabled; }
 
+    // Convert wstring to string so it can be streamed into ostringstream.
+    static std::string to_log_str(const std::wstring& w) {
+        return std::string(w.begin(), w.end());
+    }
+    static std::string to_log_str(const wchar_t* w) {
+        return w ? std::string(w, w + std::wcslen(w)) : std::string();
+    }
+    template<typename T>
+    static T&& to_log_str(T&& v) { return std::forward<T>(v); }
+
     template<typename... Args>
     void Log(const char* level, Args&&... args) {
         if (!m_enabled) return;
         std::ostringstream oss;
         oss << Timestamp() << " [" << level << "] ";
-        (oss << ... << std::forward<Args>(args));
+        (oss << ... << to_log_str(std::forward<Args>(args)));
         oss << "\n";
         Write(oss.str());
     }

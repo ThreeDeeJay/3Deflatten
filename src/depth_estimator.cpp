@@ -135,11 +135,15 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 HMODULE hDML = LoadLibraryExW(L"directml.dll", nullptr,
                                                LOAD_LIBRARY_AS_DATAFILE);
                 if (!hDML) {
-                    LOG_WARN("directml.dll not found – DirectML EP skipped");
+                    LOG_WARN("directml.dll not found - DirectML EP skipped");
                     return false;
                 }
                 FreeLibrary(hDML);
-                m_sessionOpts.AppendExecutionProvider_DML(0);
+                // AppendExecutionProvider_DML() was removed in ORT 1.17+.
+                // Use the generic string-key API which works across all
+                // modern ORT versions.
+                m_sessionOpts.AppendExecutionProvider("DML",
+                    {{"device_id", "0"}});
                 outInfo = L"DirectML (DX12 GPU)";
                 LOG_INFO("Execution provider: DirectML");
                 return true;

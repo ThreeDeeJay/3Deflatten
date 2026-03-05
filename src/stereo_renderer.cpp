@@ -297,8 +297,6 @@ void StereoRenderer::RenderCPU(const BYTE* src, int srcW, int srcH,
                                  const DeflattenConfig& cfg,
                                  BYTE* dst, int dstStride) {
     const bool isSBS = (cfg.outputMode == OutputMode::SideBySide);
-    const int  dstW  = isSBS ? srcW*2 : srcW;
-    const int  dstH  = isSBS ? srcH   : srcH*2;
 
     for (int eye=0; eye<2; ++eye) {
         float eyeSign = (eye==0) ? 1.f : -1.f;
