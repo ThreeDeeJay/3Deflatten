@@ -91,6 +91,7 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 // Probe whether CUDA runtime DLLs are present on this machine at all.
 // This avoids a hard crash / long timeout when CUDA EP is compiled in
 // but the user has no NVIDIA driver installed.
+#ifdef ORT_ENABLE_CUDA
 static bool CUDARuntimeAvailable() {
     // Try loading the CUDA runtime DLL (ships with NVIDIA driver >= 410.x).
     // We don't need to call anything – presence alone is sufficient.
@@ -100,6 +101,7 @@ static bool CUDARuntimeAvailable() {
     LOG_INFO("nvcuda.dll not found – CUDA EP will be skipped");
     return false;
 }
+#endif // ORT_ENABLE_CUDA
 
 void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                                           std::wstring& outInfo) {

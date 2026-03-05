@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// 3Deflatten – verbose file logger
+// 3Deflatten - verbose file logger
 // Activated by environment variable: DEFLATTEN_LOG_FILE=<path>
 #pragma once
 #include <windows.h>
@@ -18,27 +18,32 @@ public:
         return s;
     }
 
-    // Call once during DLL attach; reads DEFLATTEN_LOG_FILE env var.
     void Init(const wchar_t* dllPath);
-
     bool IsEnabled() const { return m_enabled; }
 
-    // Convert wstring to string so it can be streamed into ostringstream.
-    static std::string to_log_str(const std::wstring& w) {
-        return std::string(w.begin(), w.end());
+    // stream_arg: writes one argument into oss, with special handling for
+    // wide strings (which ostringstream cannot accept directly).
+    static void stream_arg(std::ostringstream& oss, const std::wstring& w) {
+        oss << std::string(w.begin(), w.end());
     }
-    static std::string to_log_str(const wchar_t* w) {
-        return w ? std::string(w, w + std::wcslen(w)) : std::string();
+    static void stream_arg(std::ostringstream& oss, const wchar_t* w) {
+        if (w) oss << std::string(w, w + std::wcslen(w));
     }
     template<typename T>
-    static T&& to_log_str(T&& v) { return std::forward<T>(v); }
+    static void stream_arg(std::ostringstream& oss, const T& v) {
+        oss << v;
+    }
 
     template<typename... Args>
     void Log(const char* level, Args&&... args) {
         if (!m_enabled) return;
         std::ostringstream oss;
         oss << Timestamp() << " [" << level << "] ";
-        (oss << ... << to_log_str(std::forward<Args>(args)));
+        // Use comma-fold via an initializer list trick so each arg is
+        // dispatched through stream_arg (avoiding fold-with-<< which
+        // causes MSVC template deduction to bypass the wstring overloads).
+        int dummy[] = { 0, (stream_arg(oss, args), 0)... };
+        (void)dummy;
         oss << "\n";
         Write(oss.str());
     }
@@ -55,7 +60,6 @@ private:
     std::ofstream m_file;
 };
 
-// ── Convenience macros ────────────────────────────────────────────────────────
 #define LOG_INFO(...) Logger::Instance().Log("INFO ", __VA_ARGS__)
 #define LOG_WARN(...) Logger::Instance().Log("WARN ", __VA_ARGS__)
 #define LOG_ERR(...)  Logger::Instance().Log("ERROR", __VA_ARGS__)

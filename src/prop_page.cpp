@@ -76,14 +76,20 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             else                     swprintf_s(buf,L"%.4f", m_cfg.separation);
             SetDlgItemTextW(hwnd,
                 id==IDC_CONV_SLIDER ? IDC_CONV_LABEL : IDC_SEP_LABEL, buf);
-            CBasePropertyPage::SetDirty();
+            m_bDirty = TRUE;
+            if (m_pPageSite) {
+                m_pPageSite->OnStatusChange(PROPPAGESTATUS_DIRTY);
+            };
         }
         break;
     }
     case WM_COMMAND: {
         int ctl = LOWORD(wParam);
         if (ctl==IDC_MODE_COMBO||ctl==IDC_GPU_COMBO||ctl==IDC_FLIP_CHECK) {
-            ReadControls(); CBasePropertyPage::SetDirty();
+            ReadControls(); m_bDirty = TRUE;
+            if (m_pPageSite) {
+                m_pPageSite->OnStatusChange(PROPPAGESTATUS_DIRTY);
+            };
         }
         if (ctl==IDC_RELOAD_BTN && m_pFilter) {
             HRESULT hr = m_pFilter->ReloadModel();
@@ -104,7 +110,10 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             if (GetOpenFileNameW(&ofn)) {
                 SetDlgItemTextW(hwnd,IDC_MODEL_PATH,path);
                 if (m_pFilter) m_pFilter->SetModelPath(path);
-                CBasePropertyPage::SetDirty();
+                m_bDirty = TRUE;
+            if (m_pPageSite) {
+                m_pPageSite->OnStatusChange(PROPPAGESTATUS_DIRTY);
+            };
             }
         }
         break;
