@@ -164,9 +164,13 @@ set(HEADERS
 add_library(3Deflatten SHARED ${SOURCES} ${HEADERS})
 
 set_target_properties(3Deflatten PROPERTIES
-    OUTPUT_NAME "3Deflatten_${ARCH_SUFFIX}"
-    PREFIX      ""
-    SUFFIX      ".ax"
+    OUTPUT_NAME          "3Deflatten_${ARCH_SUFFIX}"
+    PREFIX               ""
+    SUFFIX               ".ax"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${AX_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${AX_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE "${AX_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_DEBUG   "${AX_OUTPUT_DIR}"
 )
 
 target_include_directories(3Deflatten PRIVATE

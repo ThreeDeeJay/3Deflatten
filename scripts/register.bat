@@ -2,8 +2,8 @@
 :: Run this script as Administrator
 setlocal
 
-set AX64=build_x64\Release\3Deflatten_x64.ax
-set AX86=build_x86\Release\3Deflatten_x86.ax
+set AX64=Win64\3Deflatten_x64.ax
+set AX86=Win32\3Deflatten_x86.ax
 
 echo ============================================================
 echo  3Deflatten ^| Register DirectShow Filters
@@ -45,7 +45,7 @@ echo ============================================================
 echo  Optional environment variables:
 echo ============================================================
 echo  DEFLATTEN_LOG_FILE    = C:\path\to\deflatten.log
-echo  DEFLATTEN_MODEL_PATH  = C:\path\to\depth_anything_v2_small.onnx
+echo  DEFLATTEN_MODEL_PATH  = C:\path\to\model.onnx
 echo ============================================================
 echo.
 pause

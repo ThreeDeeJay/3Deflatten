@@ -10,21 +10,62 @@ constexpr float DepthEstimator::MEAN[3];
 constexpr float DepthEstimator::STD[3];
 
 // ── Helper: locate default model ─────────────────────────────────────────────
+// Search order:
+//  1. DLL folder       (e.g. Win64\ or Win32\)
+//  2. DLL parent       (install root containing both Win32\ and Win64\)
+//  3. Host EXE folder
+//  4. %APPDATA%\3Deflatten\models\
+// In each folder the well-known name is tried first, then any *.onnx file.
+
+static std::wstring FirstOnnxIn(const std::filesystem::path& dir) {
+    auto named = dir / L"depth_anything_v2_small.onnx";
+    if (std::filesystem::exists(named)) return named.wstring();
+    std::error_code ec;
+    for (auto& e : std::filesystem::directory_iterator(dir, ec))
+        if (e.path().extension() == L".onnx")
+            return e.path().wstring();
+    return {};
+}
+
 static std::wstring FindDefaultModel() {
-    // 1. %APPDATA%\3Deflatten\models\depth_anything_v2_small.onnx
-    wchar_t appdata[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
-        auto p = std::filesystem::path(appdata)
-                 / L"3Deflatten" / L"models"
-                 / L"depth_anything_v2_small.onnx";
-        if (std::filesystem::exists(p)) return p.wstring();
+    namespace fs = std::filesystem;
+
+    // 1 & 2: DLL folder and its parent.
+    {
+        wchar_t dllPath[MAX_PATH] = {};
+        HMODULE hSelf = nullptr;
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&FindDefaultModel), &hSelf);
+        if (hSelf) GetModuleFileNameW(hSelf, dllPath, MAX_PATH);
+        if (dllPath[0]) {
+            fs::path dllDir = fs::path(dllPath).parent_path();
+            auto r = FirstOnnxIn(dllDir);
+            if (!r.empty()) return r;
+            r = FirstOnnxIn(dllDir.parent_path());
+            if (!r.empty()) return r;
+        }
     }
-    // 2. Alongside the running executable
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    auto p = std::filesystem::path(exePath).parent_path()
-             / L"depth_anything_v2_small.onnx";
-    if (std::filesystem::exists(p)) return p.wstring();
+
+    // 3: Host EXE folder.
+    {
+        wchar_t exePath[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        if (exePath[0]) {
+            auto r = FirstOnnxIn(fs::path(exePath).parent_path());
+            if (!r.empty()) return r;
+        }
+    }
+
+    // 4: %APPDATA%\3Deflatten\models\
+    {
+        wchar_t appdata[MAX_PATH] = {};
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
+            auto r = FirstOnnxIn(fs::path(appdata) / L"3Deflatten" / L"models");
+            if (!r.empty()) return r;
+        }
+    }
 
     return {};
 }
