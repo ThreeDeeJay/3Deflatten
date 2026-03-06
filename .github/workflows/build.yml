@@ -88,9 +88,6 @@ jobs:
       with:
         arch: ${{matrix.Settings.Platform}}
 
-    - name: List files
-      run: ls -R
-
     - name: Configure
       run: >
         cmake
@@ -150,9 +147,11 @@ jobs:
       - name: Deploy
         run: |
           mkdir "Release"
+          cp -r "Artifacts/Win32" "Release"
+          cp -r "Artifacts/Win64" "Release"
           cp "LICENSE" "Release/License.txt"
           cp "README.md" "Release/ReadMe.txt"
-  
+
       - name: Compress artifacts
         if: github.event_name == 'push'
         run: |
