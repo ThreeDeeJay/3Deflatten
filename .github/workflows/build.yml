@@ -149,6 +149,8 @@ jobs:
           mkdir "Release"
           cp -r "Artifacts/Win32" "Release"
           cp -r "Artifacts/Win64" "Release"
+          cp "scripts/register.bat" "Release/register.bat"
+          cp "scripts/download_model.py" "Release/download_model.py"
           cp "LICENSE" "Release/License.txt"
           cp "README.md" "Release/ReadMe.txt"
 
