@@ -88,15 +88,15 @@ jobs:
       with:
         arch: ${{matrix.Settings.Platform}}
 
+    - name: List files
+      run: ls -R
+
     - name: Configure
       run: >
         cmake
         -A "${{matrix.Settings.Platform}}"
         -B "${{github.workspace}}/build"
         -DCMAKE_BUILD_TYPE="${{matrix.Configuration}}"
-
-    - name: List files
-      run: ls -R
 
     - name: Configure
       run: >
