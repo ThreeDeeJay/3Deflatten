@@ -2,6 +2,9 @@
 :: Run this script as Administrator
 setlocal
 
+:: Always run relative to the script's own directory
+cd /d "%~dp0"
+
 set AX64=Win64\3Deflatten_x64.ax
 set AX86=Win32\3Deflatten_x86.ax
 
