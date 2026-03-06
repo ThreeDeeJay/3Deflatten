@@ -1,6 +1,6 @@
 # 3Deflatten
 
-![Build](https://github.com/YOUR_USERNAME/3Deflatten/actions/workflows/build.yml/badge.svg)
+![Build](https://github.com/ThreeDeeJay/3Deflatten/actions/workflows/build.yml/badge.svg)
 
 **Real-time AI 2D-to-3D DirectShow video filter for Windows (32-bit & 64-bit)**
 
