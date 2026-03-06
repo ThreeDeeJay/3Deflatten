@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""
+r"""
 Download Depth Anything V2 Small ONNX model to the default 3Deflatten search path.
 
 Requirements:
