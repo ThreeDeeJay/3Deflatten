@@ -104,7 +104,10 @@ jobs:
         -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
         -DVCPKG_TARGET_TRIPLET=${{matrix.Settings.Triplet}}
         -DVCPKG_INSTALLED_DIR=${{ github.workspace }}\vcpkg_installed
-#-DCMAKE_PREFIX_PATH=vcpkg\installed\x64-windows
+        -DCMAKE_PREFIX_PATH=vcpkg\installed\x64-windows
+
+    - name: List files
+      run: ls -R
 
     - name: Build
       run: >
