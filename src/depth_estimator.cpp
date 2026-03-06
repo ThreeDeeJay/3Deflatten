@@ -11,10 +11,10 @@ constexpr float DepthEstimator::STD[3];
 
 // ── Helper: locate default model ─────────────────────────────────────────────
 // Search order:
-//  1. DLL folder       (e.g. Win64\ or Win32\)
-//  2. DLL parent       (install root containing both Win32\ and Win64\)
+//  1. DLL folder       (e.g. Win64/ or Win32/)
+//  2. DLL parent       (install root containing both Win32/ and Win64/)
 //  3. Host EXE folder
-//  4. %APPDATA%\3Deflatten\models\
+//  4. %APPDATA%\3Deflatten\models
 // In each folder the well-known name is tried first, then any *.onnx file.
 
 static std::wstring FirstOnnxIn(const std::filesystem::path& dir) {
@@ -58,7 +58,7 @@ static std::wstring FindDefaultModel() {
         }
     }
 
-    // 4: %APPDATA%\3Deflatten\models\
+    // 4: %APPDATA%\3Deflatten\models
     {
         wchar_t appdata[MAX_PATH] = {};
         if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {

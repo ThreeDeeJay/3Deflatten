@@ -1,0 +1,44 @@
+@echo off
+:: Run this script as Administrator
+setlocal
+
+set AX64=Win64\3Deflatten_x64.ax
+set AX86=Win32\3Deflatten_x86.ax
+
+echo ============================================================
+echo  3Deflatten ^| Unregister DirectShow Filters
+echo  (Requires Administrator privileges)
+echo ============================================================
+echo.
+
+net session >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Please run this script as Administrator.
+    pause
+    exit /b 1
+)
+
+if exist "%AX64%" (
+    regsvr32 /s /u "%AX64%"
+    if errorlevel 1 (
+        echo [WARN] x64 unregistration failed.
+    ) else (
+        echo [OK]   Unregistered x64: %AX64%
+    )
+) else (
+    echo [SKIP] x64 file not found: %AX64%
+)
+
+if exist "%AX86%" (
+    %SystemRoot%\SysWOW64\regsvr32 /s /u "%AX86%"
+    if errorlevel 1 (
+        echo [WARN] x86 unregistration failed.
+    ) else (
+        echo [OK]   Unregistered x86: %AX86%
+    )
+) else (
+    echo [SKIP] x86 file not found: %AX86%
+)
+
+echo.
+pause
