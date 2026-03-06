@@ -116,9 +116,16 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 
         m_modelPath = path;
         m_loaded    = true;
-        LOG_INFO("Model loaded OK – input: ", m_inputName,
-                 "  output: ", m_outputName,
-                 "  provider: ", std::string(outInfo.begin(), outInfo.end()));
+        std::string shapeStr;
+        for (auto d : inShape) shapeStr += std::to_string(d) + " ";
+        LOG_INFO("Model loaded OK");
+        LOG_INFO("  path    : ", std::string(path.begin(), path.end()));
+        LOG_INFO("  input   : ", m_inputName, "  shape: [", shapeStr, "]");
+        LOG_INFO("  output  : ", m_outputName);
+        LOG_INFO("  dynamic : ", m_dynamicInput ? "yes" : "no");
+        if (!m_dynamicInput)
+            LOG_INFO("  fixed   : ", m_modelInputW, "x", m_modelInputH);
+        LOG_INFO("  provider: ", std::string(outInfo.begin(), outInfo.end()));
         return S_OK;
 
     } catch (const Ort::Exception& e) {
@@ -226,13 +233,24 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
                                   bool  flipDepth,
                                   float smoothAlpha,
                                   DepthResult& result) {
-    if (!m_loaded || !m_session) return E_FAIL;
+    if (!m_loaded || !m_session) {
+        LOG_ERR("Estimate called but model not loaded");
+        return E_FAIL;
+    }
 
     try {
         std::vector<float> inputTensor;
         int mw, mh;
         PreprocessFrame(srcData, srcWidth, srcHeight, srcStride,
                         isBGR, inputTensor, mw, mh);
+
+        if (m_estimateCount == 0)
+            LOG_INFO("First Estimate call:"
+                     " src=", srcWidth, "x", srcHeight,
+                     " isBGR=", isBGR ? "yes" : "no",
+                     " -> model input=", mw, "x", mh,
+                     " tensor_elems=", inputTensor.size());
+        ++m_estimateCount;
 
         std::array<int64_t, 4> shape{1, 3, (int64_t)mh, (int64_t)mw};
         auto memInfo = Ort::MemoryInfo::CreateCpu(
@@ -253,6 +271,9 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
         auto rawShape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
         int  rawH = (int)rawShape[rawShape.size() - 2];
         int  rawW = (int)rawShape[rawShape.size() - 1];
+        if (m_estimateCount == 1)
+            LOG_INFO("First ORT output: raw depth map=", rawW, "x", rawH,
+                     " -> resample to ", srcWidth, "x", srcHeight);
 
         std::vector<float> depth(srcWidth * srcHeight);
         PostprocessDepth(rawDepth, rawW, rawH,

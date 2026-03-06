@@ -63,4 +63,5 @@ private:
     bool m_isBGR = true;
 
     std::vector<BYTE> m_outBuf;
+    int                m_frameCount = 0;
 };

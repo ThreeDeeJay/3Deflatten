@@ -20,8 +20,17 @@ struct LoggerInit {
         wchar_t path[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, path, MAX_PATH);
         Logger::Instance().Init(path);
-        LOG_INFO("3Deflatten v1.0.0 loaded");
-        LOG_INFO("Build: " __DATE__ " " __TIME__);
+        if (Logger::Instance().IsEnabled()) {
+            wchar_t logPath[MAX_PATH] = {};
+            GetEnvironmentVariableW(L"DEFLATTEN_LOG_FILE", logPath, MAX_PATH);
+            LOG_INFO("================================================");
+            LOG_INFO("3Deflatten v1.0.0  build: " __DATE__ " " __TIME__);
+            LOG_INFO("Log file  : ", std::wstring(logPath));
+            LOG_INFO("Host EXE  : ", std::wstring(path));
+            LOG_INFO("================================================");
+            LOG_INFO("Set DEFLATTEN_LOG_FILE=<path> to enable logging");
+            LOG_INFO("Set DEFLATTEN_MODEL_PATH=<path.onnx> to force model");
+        }
     }
 } g_loggerInit;
 } // namespace

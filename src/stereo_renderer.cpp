@@ -80,10 +80,18 @@ HRESULT StereoRenderer::InitGPU() {
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
         0, levels, ARRAYSIZE(levels),
         D3D11_SDK_VERSION, &m_dev, &fl, &m_ctx);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        LOG_ERR("D3D11CreateDevice failed hr=0x", std::hex, (unsigned)hr, std::dec);
+        return hr;
+    }
+    LOG_INFO("D3D11 device created  feature_level=0x", std::hex, (unsigned)fl, std::dec);
 
     hr = CreateShaders();
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) {
+        LOG_ERR("CreateShaders failed hr=0x", std::hex, (unsigned)hr, std::dec);
+        return hr;
+    }
+    LOG_INFO("Shaders compiled/loaded OK");
 
     // Vertex buffer
     D3D11_BUFFER_DESC vbd{};
@@ -172,6 +180,12 @@ HRESULT StereoRenderer::CreateShaders() {
 HRESULT StereoRenderer::EnsureTextures(int srcW, int srcH, OutputMode mode) {
     if (m_lastSrcW==srcW && m_lastSrcH==srcH && m_lastMode==mode) return S_OK;
 
+    int dstW2 = (mode == OutputMode::SideBySide)  ? srcW*2 : srcW;
+    int dstH2 = (mode == OutputMode::TopAndBottom) ? srcH*2 : srcH;
+    LOG_INFO("EnsureTextures: src=", srcW, "x", srcH,
+             " dst=", dstW2, "x", dstH2,
+             " mode=", mode==OutputMode::SideBySide?"SBS":"TAB");
+
     m_srcTex.Reset();   m_srcSRV.Reset();
     m_depthTex.Reset(); m_depthSRV.Reset();
     m_rtTex.Reset();    m_rtv.Reset();
@@ -227,6 +241,13 @@ HRESULT StereoRenderer::Render(const BYTE* srcFrame, int srcW, int srcH,
                                 const float* depthMap,
                                 const DeflattenConfig& cfg,
                                 BYTE* dstFrame, int dstStride) {
+    if (m_renderCount == 0)
+        LOG_INFO("First Render: src=", srcW, "x", srcH,
+                 " path=", m_gpuOK ? "GPU (DX11)" : "CPU (software)",
+                 " conv=", cfg.convergence, " sep=", cfg.separation,
+                 " mode=", cfg.outputMode==OutputMode::SideBySide?"SBS":"TAB");
+    ++m_renderCount;
+
     if (m_gpuOK)
         RenderGPU(srcFrame,srcW,srcH,srcStride,depthMap,cfg,dstFrame,dstStride);
     else
@@ -239,8 +260,10 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
                                  const float* depthMap,
                                  const DeflattenConfig& cfg,
                                  BYTE* dstFrame, int dstStride) {
-    if (FAILED(EnsureTextures(srcW, srcH, cfg.outputMode))) {
-        LOG_WARN("EnsureTextures failed – CPU fallback");
+    HRESULT hrET = EnsureTextures(srcW, srcH, cfg.outputMode);
+    if (FAILED(hrET)) {
+        LOG_ERR("EnsureTextures failed hr=0x", std::hex, (unsigned)hrET, std::dec,
+                " -- CPU fallback");
         RenderCPU(srcFrame,srcW,srcH,srcStride,depthMap,cfg,dstFrame,dstStride);
         return;
     }

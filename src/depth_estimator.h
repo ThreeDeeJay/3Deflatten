@@ -63,7 +63,8 @@ private:
     std::unique_ptr<Ort::Session> m_session;
 
     std::wstring m_modelPath;
-    bool         m_loaded = false;
+    bool         m_loaded        = false;
+    int          m_estimateCount = 0;
 
     std::string  m_inputName;
     std::string  m_outputName;

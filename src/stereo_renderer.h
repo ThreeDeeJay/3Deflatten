@@ -68,7 +68,8 @@ private:
     int        m_lastSrcW = 0, m_lastSrcH = 0;
     OutputMode m_lastMode = OutputMode::SideBySide;
 
-    bool m_gpuOK = false;
+    bool m_gpuOK       = false;
+    int  m_renderCount = 0;
 
     // Constant buffer layout (must match stereo_warp.hlsl)
     struct alignas(16) CBStereo {
