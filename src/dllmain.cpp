@@ -8,15 +8,25 @@
 // Logger init is done via a static-storage object whose constructor runs
 // before any DirectShow factory code, giving us logging from the very start.
 #include <streams.h>
+#include <commctrl.h>
+#pragma comment(lib, "comctl32.lib")
 #include "filter.h"
 #include "prop_page.h"
 #include "guids.h"
 #include "logger.h"
 
-// ── Logger init ───────────────────────────────────────────────────────────────
+// ── Logger + common controls init ────────────────────────────────────────────
 namespace {
-struct LoggerInit {
-    LoggerInit() {
+struct DllInit {
+    DllInit() {
+        // Register trackbar/slider and other common control window classes.
+        // Without this the property page dialog renders blank because
+        // "msctls_trackbar32" is an unknown window class.
+        INITCOMMONCONTROLSEX icc{};
+        icc.dwSize = sizeof(icc);
+        icc.dwICC  = ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
+        InitCommonControlsEx(&icc);
+
         wchar_t path[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, path, MAX_PATH);
         Logger::Instance().Init(path);
@@ -32,7 +42,7 @@ struct LoggerInit {
             LOG_INFO("Set DEFLATTEN_MODEL_PATH=<path.onnx> to force model");
         }
     }
-} g_loggerInit;
+} g_dllInit;
 } // namespace
 
 // ── Filter factory table (read by dllentry.cpp) ───────────────────────────────

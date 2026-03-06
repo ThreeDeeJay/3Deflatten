@@ -60,7 +60,9 @@ private:
     std::unique_ptr<StereoRenderer> m_stereo;
 
     int  m_inW = 0, m_inH = 0, m_inStride = 0;
-    bool m_isBGR = true;
+    bool m_isBGR  = true;
+    bool m_isNV12 = false;
+    bool m_isYUY2 = false;
 
     std::vector<BYTE> m_outBuf;
     int                m_frameCount = 0;

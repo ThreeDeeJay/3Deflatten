@@ -6,7 +6,6 @@
 #include <uuids.h>
 #include <algorithm>
 #include <chrono>
-#include <sstream>
 
 // ── Filter registration ───────────────────────────────────────────────────────
 static const AMOVIESETUP_MEDIATYPE sudPinTypes[] = {
@@ -16,23 +15,37 @@ static const AMOVIESETUP_MEDIATYPE sudPinTypes[] = {
     { &MEDIATYPE_Video, &MEDIASUBTYPE_YUY2   },
     { &MEDIATYPE_Video, &MEDIASUBTYPE_NV12   },
 };
-
 static const AMOVIESETUP_PIN sudPins[] = {
     { const_cast<LPWSTR>(L"Input"),  FALSE, FALSE, FALSE, FALSE,
       &CLSID_NULL, nullptr, ARRAYSIZE(sudPinTypes), sudPinTypes },
     { const_cast<LPWSTR>(L"Output"), FALSE, TRUE,  FALSE, FALSE,
       &CLSID_NULL, nullptr, ARRAYSIZE(sudPinTypes), sudPinTypes },
 };
-
 const AMOVIESETUP_FILTER sudFilter = {
     &CLSID_3Deflatten,
     L"3Deflatten (2D to 3D AI Depth)",
     MERIT_DO_NOT_USE,
-    ARRAYSIZE(sudPins),
-    sudPins
+    ARRAYSIZE(sudPins), sudPins
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+// BITMAPINFOHEADER lives inside VIDEOINFOHEADER / VIDEOINFOHEADER2, not at
+// the start of the format block.  Reading from Format() directly gives wrong
+// values (e.g. biWidth = rcSource.top = 0 for most decoders).
+static const BITMAPINFOHEADER* GetBMI(const CMediaType* pmt) {
+    if (!pmt || !pmt->Format() || pmt->FormatLength() == 0) return nullptr;
+    if (pmt->formattype == FORMAT_VideoInfo &&
+        pmt->FormatLength() >= sizeof(VIDEOINFOHEADER))
+        return &reinterpret_cast<const VIDEOINFOHEADER*>(pmt->Format())->bmiHeader;
+    if (pmt->formattype == FORMAT_VideoInfo2 &&
+        pmt->FormatLength() >= sizeof(VIDEOINFOHEADER2))
+        return &reinterpret_cast<const VIDEOINFOHEADER2*>(pmt->Format())->bmiHeader;
+    // Fallback: raw BITMAPINFOHEADER at offset 0 (legacy formats)
+    if (pmt->FormatLength() >= sizeof(BITMAPINFOHEADER))
+        return reinterpret_cast<const BITMAPINFOHEADER*>(pmt->Format());
+    return nullptr;
+}
+
 static std::string GuidToSubtypeName(const GUID& g) {
     if (g == MEDIASUBTYPE_RGB32)  return "RGB32";
     if (g == MEDIASUBTYPE_ARGB32) return "ARGB32";
@@ -43,25 +56,20 @@ static std::string GuidToSubtypeName(const GUID& g) {
     snprintf(buf, sizeof(buf),
         "{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
         g.Data1, g.Data2, g.Data3,
-        g.Data4[0], g.Data4[1], g.Data4[2], g.Data4[3],
-        g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7]);
+        g.Data4[0],g.Data4[1],g.Data4[2],g.Data4[3],
+        g.Data4[4],g.Data4[5],g.Data4[6],g.Data4[7]);
     return buf;
 }
-
 static std::string HRStr(HRESULT hr) {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "0x%08X", (unsigned)hr);
-    return buf;
+    char buf[32]; snprintf(buf, sizeof(buf), "0x%08X", (unsigned)hr); return buf;
 }
-
 static std::string MediaTypeDesc(const CMediaType* pmt) {
     if (!pmt) return "(null)";
     std::string s = GuidToSubtypeName(pmt->subtype);
-    auto* bmi = reinterpret_cast<const BITMAPINFOHEADER*>(pmt->Format());
-    if (bmi)
-        s += " " + std::to_string(bmi->biWidth) + "x"
-                 + std::to_string(abs(bmi->biHeight))
-                 + " bpp=" + std::to_string(bmi->biBitCount);
+    const auto* b = GetBMI(pmt);
+    if (b) s += " " + std::to_string(b->biWidth) + "x"
+                    + std::to_string(abs((int)b->biHeight))
+                    + " bpp=" + std::to_string(b->biBitCount);
     return s;
 }
 
@@ -87,19 +95,13 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
         m_modelPath = envModel;
         LOG_INFO("Model path from env: ", m_modelPath);
     }
-
     m_depth  = std::make_unique<DepthEstimator>();
     m_stereo = std::make_unique<StereoRenderer>();
-
-    LOG_INFO("C3DeflattenFilter constructed  convergence=", m_cfg.convergence,
-             " separation=", m_cfg.separation,
-             " mode=", m_cfg.outputMode==OutputMode::SideBySide?"SBS":"TAB",
-             " gpu=", (int)m_cfg.gpuProvider);
+    LOG_INFO("C3DeflattenFilter constructed");
     if (phr) *phr = S_OK;
 }
-
 C3DeflattenFilter::~C3DeflattenFilter() {
-    LOG_INFO("C3DeflattenFilter destroyed  frames_processed=", m_frameCount);
+    LOG_INFO("C3DeflattenFilter destroyed  frames=", m_frameCount);
 }
 
 STDMETHODIMP C3DeflattenFilter::NonDelegatingQueryInterface(REFIID riid,
@@ -114,71 +116,73 @@ STDMETHODIMP C3DeflattenFilter::NonDelegatingQueryInterface(REFIID riid,
 // ── CheckInputType ────────────────────────────────────────────────────────────
 HRESULT C3DeflattenFilter::CheckInputType(const CMediaType* pmt) {
     if (pmt->majortype != MEDIATYPE_Video) {
-        LOG_DBG("CheckInputType REJECTED (not video): ",
+        LOG_DBG("CheckInputType rejected (not video): ",
                 GuidToSubtypeName(pmt->subtype));
         return VFW_E_TYPE_NOT_ACCEPTED;
     }
     static const GUID* allowed[] = {
-        &MEDIASUBTYPE_RGB32,  &MEDIASUBTYPE_ARGB32,
-        &MEDIASUBTYPE_RGB24,  &MEDIASUBTYPE_YUY2,
-        &MEDIASUBTYPE_NV12,
+        &MEDIASUBTYPE_RGB32, &MEDIASUBTYPE_ARGB32, &MEDIASUBTYPE_RGB24,
+        &MEDIASUBTYPE_YUY2,  &MEDIASUBTYPE_NV12,
     };
     for (auto* g : allowed) {
         if (pmt->subtype == *g) {
-            LOG_DBG("CheckInputType ACCEPTED: ", MediaTypeDesc(pmt));
+            LOG_DBG("CheckInputType accepted: ", MediaTypeDesc(pmt));
             return S_OK;
         }
     }
-    LOG_WARN("CheckInputType REJECTED (unsupported subtype): ",
+    LOG_WARN("CheckInputType rejected (unsupported subtype): ",
              GuidToSubtypeName(pmt->subtype));
     return VFW_E_TYPE_NOT_ACCEPTED;
 }
 
-// ── GetMediaType ──────────────────────────────────────────────────────────────
-HRESULT C3DeflattenFilter::GetMediaType(int iPos, CMediaType* pmt) {
-    if (iPos < 0) return E_INVALIDARG;
-    if (iPos > 0) return VFW_S_NO_MORE_ITEMS;
-    if (!m_pInput || !m_pInput->IsConnected()) {
-        LOG_WARN("GetMediaType called but input not connected");
-        return E_UNEXPECTED;
-    }
-    CMediaType mtIn;
-    m_pInput->ConnectionMediaType(&mtIn);
-    HRESULT hr = BuildOutputMediaType(&mtIn, pmt);
-    LOG_DBG("GetMediaType[", iPos, "] in=", MediaTypeDesc(&mtIn),
-            " -> out=", MediaTypeDesc(pmt), " hr=", HRStr(hr));
-    return hr;
-}
-
+// ── BuildOutputMediaType ──────────────────────────────────────────────────────
 HRESULT C3DeflattenFilter::BuildOutputMediaType(const CMediaType* pmtIn,
                                                   CMediaType* pmtOut) {
-    *pmtOut = *pmtIn;
-    auto* bmiIn = reinterpret_cast<BITMAPINFOHEADER*>(pmtIn->Format());
+    const BITMAPINFOHEADER* bmiIn = GetBMI(pmtIn);
     if (!bmiIn) {
-        LOG_ERR("BuildOutputMediaType: no BITMAPINFOHEADER in input type");
+        LOG_ERR("BuildOutputMediaType: cannot extract BITMAPINFOHEADER "
+                "from format type ", GuidToSubtypeName(pmtIn->formattype));
         return E_FAIL;
     }
 
-    int inW = bmiIn->biWidth, inH = abs(bmiIn->biHeight);
+    int inW  = bmiIn->biWidth;
+    int inH  = abs((int)bmiIn->biHeight);
     int outW, outH;
     OutputDimensions(inW, inH, outW, outH);
 
-    auto* bmiOut = reinterpret_cast<BITMAPINFOHEADER*>(pmtOut->Format());
-    bmiOut->biWidth       = outW;
-    bmiOut->biHeight      = (bmiIn->biHeight < 0) ? -outH : outH;
-    pmtOut->subtype       = MEDIASUBTYPE_RGB32;
-    bmiOut->biBitCount    = 32;
-    bmiOut->biCompression = BI_RGB;
-    bmiOut->biSizeImage   = outW * outH * 4;
-    pmtOut->SetSampleSize(bmiOut->biSizeImage);
+    // Always output RGB32 / FORMAT_VideoInfo regardless of input format.
+    pmtOut->SetType(&MEDIATYPE_Video);
+    pmtOut->SetSubtype(&MEDIASUBTYPE_RGB32);
+    pmtOut->SetFormatType(&FORMAT_VideoInfo);
+    pmtOut->SetTemporalCompression(FALSE);
+    pmtOut->SetSampleSize(outW * outH * 4);
 
-    if (pmtOut->formattype == FORMAT_VideoInfo) {
-        auto* vih = reinterpret_cast<VIDEOINFOHEADER*>(pmtOut->Format());
-        vih->rcSource = {0, 0, outW, outH};
-        vih->rcTarget = vih->rcSource;
-        vih->dwBitRate = (DWORD)((double)vih->dwBitRate * outW * outH
-                                  / (inW * inH));
+    VIDEOINFOHEADER vih = {};
+    // Copy timing from input if available.
+    if (pmtIn->formattype == FORMAT_VideoInfo &&
+        pmtIn->FormatLength() >= sizeof(VIDEOINFOHEADER)) {
+        const auto* vIn = reinterpret_cast<const VIDEOINFOHEADER*>(pmtIn->Format());
+        vih.AvgTimePerFrame = vIn->AvgTimePerFrame;
+        vih.dwBitRate       = inW && inH
+            ? (DWORD)((double)vIn->dwBitRate * outW * outH / (inW * inH)) : 0;
+    } else if (pmtIn->formattype == FORMAT_VideoInfo2 &&
+               pmtIn->FormatLength() >= sizeof(VIDEOINFOHEADER2)) {
+        const auto* vIn = reinterpret_cast<const VIDEOINFOHEADER2*>(pmtIn->Format());
+        vih.AvgTimePerFrame = vIn->AvgTimePerFrame;
+        vih.dwBitRate       = inW && inH
+            ? (DWORD)((double)vIn->dwBitRate * outW * outH / (inW * inH)) : 0;
     }
+    vih.rcSource = { 0, 0, outW, outH };
+    vih.rcTarget = vih.rcSource;
+    vih.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    vih.bmiHeader.biWidth       = outW;
+    vih.bmiHeader.biHeight      = (bmiIn->biHeight < 0) ? -outH : outH;
+    vih.bmiHeader.biPlanes      = 1;
+    vih.bmiHeader.biBitCount    = 32;
+    vih.bmiHeader.biCompression = BI_RGB;
+    vih.bmiHeader.biSizeImage   = outW * outH * 4;
+
+    pmtOut->SetFormat(reinterpret_cast<BYTE*>(&vih), sizeof(vih));
     return S_OK;
 }
 
@@ -192,29 +196,39 @@ void C3DeflattenFilter::OutputDimensions(int inW, int inH,
     }
 }
 
+// ── GetMediaType ──────────────────────────────────────────────────────────────
+HRESULT C3DeflattenFilter::GetMediaType(int iPos, CMediaType* pmt) {
+    if (iPos < 0) return E_INVALIDARG;
+    if (iPos > 0) return VFW_S_NO_MORE_ITEMS;
+    if (!m_pInput || !m_pInput->IsConnected()) {
+        LOG_WARN("GetMediaType: input not connected");
+        return E_UNEXPECTED;
+    }
+    CMediaType mtIn;
+    m_pInput->ConnectionMediaType(&mtIn);
+    HRESULT hr = BuildOutputMediaType(&mtIn, pmt);
+    LOG_DBG("GetMediaType[", iPos, "] in=", MediaTypeDesc(&mtIn),
+            " -> out=", MediaTypeDesc(pmt), " hr=", HRStr(hr));
+    return hr;
+}
+
 // ── CheckTransform ────────────────────────────────────────────────────────────
 HRESULT C3DeflattenFilter::CheckTransform(const CMediaType* pmtIn,
                                            const CMediaType* pmtOut) {
     CMediaType proposed;
-    if (FAILED(BuildOutputMediaType(pmtIn, &proposed))) {
-        LOG_WARN("CheckTransform: BuildOutputMediaType failed for in=",
-                 MediaTypeDesc(pmtIn));
+    if (FAILED(BuildOutputMediaType(pmtIn, &proposed)))
         return VFW_E_TYPE_NOT_ACCEPTED;
-    }
-    auto* b1 = reinterpret_cast<BITMAPINFOHEADER*>(proposed.Format());
-    auto* b2 = reinterpret_cast<BITMAPINFOHEADER*>(pmtOut->Format());
+    const auto* b1 = GetBMI(&proposed);
+    const auto* b2 = GetBMI(pmtOut);
     if (!b1 || !b2) return VFW_E_TYPE_NOT_ACCEPTED;
-    if (b1->biWidth != b2->biWidth) {
-        LOG_WARN("CheckTransform: width mismatch proposed=", b1->biWidth,
-                 " offered=", b2->biWidth);
+    if (b1->biWidth  != b2->biWidth ||
+        abs((int)b1->biHeight) != abs((int)b2->biHeight)) {
+        LOG_WARN("CheckTransform: dimension mismatch proposed=",
+                 b1->biWidth, "x", abs((int)b1->biHeight),
+                 " offered=", b2->biWidth, "x", abs((int)b2->biHeight));
         return VFW_E_TYPE_NOT_ACCEPTED;
     }
-    if (abs(b1->biHeight) != abs(b2->biHeight)) {
-        LOG_WARN("CheckTransform: height mismatch proposed=", abs(b1->biHeight),
-                 " offered=", abs(b2->biHeight));
-        return VFW_E_TYPE_NOT_ACCEPTED;
-    }
-    LOG_DBG("CheckTransform OK  in=", MediaTypeDesc(pmtIn),
+    LOG_DBG("CheckTransform OK in=", MediaTypeDesc(pmtIn),
             " out=", MediaTypeDesc(pmtOut));
     return S_OK;
 }
@@ -225,16 +239,14 @@ HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
     ASSERT(m_pInput->IsConnected());
     CMediaType mtIn;
     m_pInput->ConnectionMediaType(&mtIn);
-    auto* bmi = reinterpret_cast<BITMAPINFOHEADER*>(mtIn.Format());
+    const auto* bmi = GetBMI(&mtIn);
     if (!bmi) return E_FAIL;
-
     int outW, outH;
-    OutputDimensions(bmi->biWidth, abs(bmi->biHeight), outW, outH);
-    pProps->cBuffers  = 1;
-    pProps->cbBuffer  = outW * outH * 4;
-    pProps->cbAlign   = 1;
-    pProps->cbPrefix  = 0;
-
+    OutputDimensions(bmi->biWidth, abs((int)bmi->biHeight), outW, outH);
+    pProps->cBuffers = 1;
+    pProps->cbBuffer = outW * outH * 4;
+    pProps->cbAlign  = 1;
+    pProps->cbPrefix = 0;
     ALLOCATOR_PROPERTIES actual;
     HRESULT hr = pAlloc->SetProperties(pProps, &actual);
     LOG_INFO("DecideBufferSize: ", outW, "x", outH,
@@ -248,115 +260,138 @@ HRESULT C3DeflattenFilter::StartStreaming() {
     m_frameCount = 0;
 
     HRESULT hr = m_stereo->Init();
-    if (FAILED(hr)) {
-        LOG_ERR("StereoRenderer::Init FAILED hr=", HRStr(hr));
-        return hr;
-    }
-    LOG_INFO("StereoRenderer::Init OK  gpuAvailable=",
-             m_stereo->IsGPUAvailable() ? "yes" : "no");
+    if (FAILED(hr)) { LOG_ERR("StereoRenderer::Init FAILED hr=", HRStr(hr)); return hr; }
+    LOG_INFO("StereoRenderer::Init OK  gpu=", m_stereo->IsGPUAvailable()?"yes":"no");
 
     if (!m_depth->IsLoaded()) {
-        LOG_INFO("Loading depth model  path='", m_modelPath,
-                 "'  provider=", (int)m_cfg.gpuProvider);
+        LOG_INFO("Loading depth model path='", m_modelPath,
+                 "' provider=", (int)m_cfg.gpuProvider);
         hr = m_depth->Load(m_modelPath, m_cfg.gpuProvider, m_gpuInfo);
-        if (FAILED(hr)) {
+        if (FAILED(hr))
             LOG_ERR("DepthEstimator::Load FAILED hr=", HRStr(hr),
-                    " -- frames will use flat depth map (no 3D effect)");
-        } else {
+                    " -- will use flat depth (no 3D effect)");
+        else
             LOG_INFO("DepthEstimator::Load OK  gpuInfo='", m_gpuInfo, "'");
-        }
-    } else {
-        LOG_INFO("Depth model already loaded  gpuInfo='", m_gpuInfo, "'");
     }
 
     if (m_pInput && m_pInput->IsConnected()) {
         CMediaType mtIn;
         m_pInput->ConnectionMediaType(&mtIn);
-        auto* bmi = reinterpret_cast<BITMAPINFOHEADER*>(mtIn.Format());
+        const auto* bmi = GetBMI(&mtIn);
         if (bmi) {
-            m_inW      = bmi->biWidth;
-            m_inH      = abs(bmi->biHeight);
-            m_inStride = ((m_inW * bmi->biBitCount + 31) / 32) * 4;
-            m_isBGR    = (mtIn.subtype == MEDIASUBTYPE_RGB32 ||
-                          mtIn.subtype == MEDIASUBTYPE_ARGB32 ||
-                          mtIn.subtype == MEDIASUBTYPE_RGB24);
-            LOG_INFO("Input media type: ", MediaTypeDesc(&mtIn),
+            m_inW   = bmi->biWidth;
+            m_inH   = abs((int)bmi->biHeight);
+            m_isBGR = (mtIn.subtype == MEDIASUBTYPE_RGB32  ||
+                       mtIn.subtype == MEDIASUBTYPE_ARGB32 ||
+                       mtIn.subtype == MEDIASUBTYPE_RGB24);
+            m_isNV12 = (mtIn.subtype == MEDIASUBTYPE_NV12);
+            m_isYUY2 = (mtIn.subtype == MEDIASUBTYPE_YUY2);
+
+            // NV12 stride = biWidth (aligned to 16 by most decoders).
+            // Do not use the biBitCount formula for planar formats.
+            if (m_isNV12) {
+                m_inStride = (m_inW + 15) & ~15;
+                // Verify against actual sample size if available.
+                // For NV12: size = stride*H + stride*(H/2) = stride*H*3/2
+            } else {
+                m_inStride = ((m_inW * bmi->biBitCount + 31) / 32) * 4;
+            }
+            LOG_INFO("Input type: ", MediaTypeDesc(&mtIn),
                      " stride=", m_inStride,
-                     " isBGR=", m_isBGR ? "yes" : "no");
+                     " isBGR=", m_isBGR?"yes":"no",
+                     " isNV12=", m_isNV12?"yes":"no");
         } else {
-            LOG_ERR("StartStreaming: no BITMAPINFOHEADER -- dimensions unknown");
+            LOG_ERR("StartStreaming: cannot read format from input media type");
+            return E_FAIL;
         }
-    } else {
-        LOG_ERR("StartStreaming: input pin not connected");
     }
 
     int outW, outH;
     OutputDimensions(m_inW, m_inH, outW, outH);
     m_outBuf.resize(outW * outH * 4, 0);
-
     LOG_INFO("Pipeline: ", m_inW, "x", m_inH, " -> ", outW, "x", outH,
              " mode=", m_cfg.outputMode==OutputMode::SideBySide?"SBS":"TAB",
-             " conv=", m_cfg.convergence,
-             " sep=", m_cfg.separation,
-             " smooth=", m_cfg.depthSmooth,
-             " flip=", m_cfg.flipDepth?"yes":"no");
+             " conv=", m_cfg.convergence, " sep=", m_cfg.separation,
+             " smooth=", m_cfg.depthSmooth, " flip=", m_cfg.flipDepth?"yes":"no");
     LOG_INFO("===== StartStreaming done =====");
     return S_OK;
 }
 
 HRESULT C3DeflattenFilter::StopStreaming() {
-    LOG_INFO("StopStreaming  frames_processed=", m_frameCount);
+    LOG_INFO("StopStreaming  frames=", m_frameCount);
     return S_OK;
+}
+
+// ── NV12 -> BGRA conversion ───────────────────────────────────────────────────
+static void NV12toBGRA(const BYTE* src, int w, int h, int stride,
+                        std::vector<BYTE>& dst) {
+    dst.resize(w * h * 4);
+    const BYTE* yPlane  = src;
+    const BYTE* uvPlane = src + stride * h;
+    auto clamp8 = [](int v) -> BYTE {
+        return (BYTE)(v < 0 ? 0 : v > 255 ? 255 : v);
+    };
+    for (int y = 0; y < h; ++y) {
+        const BYTE* yRow  = yPlane  + y * stride;
+        const BYTE* uvRow = uvPlane + (y / 2) * stride;
+        BYTE* out = dst.data() + y * w * 4;
+        for (int x = 0; x < w; ++x) {
+            int Y = yRow[x];
+            int U = uvRow[x & ~1];
+            int V = uvRow[(x & ~1) + 1];
+            int C = Y - 16, D = U - 128, E = V - 128;
+            out[0] = clamp8((298*C + 516*D + 128) >> 8);         // B
+            out[1] = clamp8((298*C - 100*D - 208*E + 128) >> 8); // G
+            out[2] = clamp8((298*C + 409*E + 128) >> 8);         // R
+            out[3] = 255;
+            out += 4;
+        }
+    }
 }
 
 // ── Transform ────────────────────────────────────────────────────────────────
 HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
     using Clock = std::chrono::steady_clock;
     auto t0 = Clock::now();
-
     ++m_frameCount;
-    const bool logThis = (m_frameCount == 1)
-                      || (m_frameCount == 2)
-                      || (m_frameCount % 100 == 0);
+    const bool logThis = (m_frameCount <= 2) || (m_frameCount % 100 == 0);
 
     if (logThis)
         LOG_DBG("Transform frame #", m_frameCount,
                 " inLen=", pIn->GetActualDataLength(),
                 " outSize=", pOut->GetSize());
 
-    BYTE* pSrc = nullptr;
-    BYTE* pDst = nullptr;
-    if (FAILED(pIn->GetPointer(&pSrc)) || !pSrc) {
-        LOG_ERR("Frame #", m_frameCount, ": GetPointer(in) failed");
-        return E_FAIL;
-    }
-    if (FAILED(pOut->GetPointer(&pDst)) || !pDst) {
-        LOG_ERR("Frame #", m_frameCount, ": GetPointer(out) failed");
+    BYTE *pSrc = nullptr, *pDst = nullptr;
+    if (FAILED(pIn->GetPointer(&pSrc))  || !pSrc ||
+        FAILED(pOut->GetPointer(&pDst)) || !pDst) {
+        LOG_ERR("Frame #", m_frameCount, ": GetPointer failed");
         return E_FAIL;
     }
 
-    // ── YUV->BGRA conversion ──────────────────────────────────────────────────
-    std::vector<BYTE> rgba;
+    // ── Convert to BGRA ───────────────────────────────────────────────────────
+    std::vector<BYTE> convBuf;
     const BYTE* rgbaPtr    = pSrc;
     int         rgbaStride = m_inStride;
 
-    CMediaType mtIn;
-    m_pInput->ConnectionMediaType(&mtIn);
-
-    if (mtIn.subtype == MEDIASUBTYPE_YUY2) {
-        if (logThis) LOG_DBG("Frame #", m_frameCount, ": converting YUY2->BGRA");
-        rgba.resize(m_inW * m_inH * 4);
+    if (m_isNV12) {
+        if (logThis) LOG_DBG("Frame #", m_frameCount, ": NV12->BGRA");
+        NV12toBGRA(pSrc, m_inW, m_inH, m_inStride, convBuf);
+        rgbaPtr    = convBuf.data();
+        rgbaStride = m_inW * 4;
+    } else if (m_isYUY2) {
+        if (logThis) LOG_DBG("Frame #", m_frameCount, ": YUY2->BGRA");
+        convBuf.resize(m_inW * m_inH * 4);
         auto clamp8 = [](int v) -> BYTE {
-            return (BYTE)std::max(0, std::min(255, v));
+            return (BYTE)(v < 0 ? 0 : v > 255 ? 255 : v);
         };
         for (int y = 0; y < m_inH; ++y) {
             const BYTE* row = pSrc + y * m_inStride;
-            BYTE* out = rgba.data() + y * m_inW * 4;
+            BYTE* out = convBuf.data() + y * m_inW * 4;
             for (int x = 0; x < m_inW; x += 2) {
                 int Y0 = row[x*2], Cb = row[x*2+1];
                 int Y1 = row[x*2+2], Cr = row[x*2+3];
                 auto yuv = [&](int Y) {
-                    int C = Y-16, D = Cb-128, E = Cr-128;
+                    int C=Y-16, D=Cb-128, E=Cr-128;
                     return std::tuple{
                         clamp8((298*C+409*E+128)>>8),
                         clamp8((298*C-100*D-208*E+128)>>8),
@@ -369,11 +404,8 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
                 out += 8;
             }
         }
-        rgbaPtr    = rgba.data();
+        rgbaPtr    = convBuf.data();
         rgbaStride = m_inW * 4;
-    } else if (mtIn.subtype == MEDIASUBTYPE_NV12) {
-        LOG_WARN("Frame #", m_frameCount,
-                 ": NV12 input not yet converted -- passing raw bytes");
     }
 
     // ── Depth estimation ──────────────────────────────────────────────────────
@@ -387,20 +419,19 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         auto td0 = Clock::now();
         haveDepth = SUCCEEDED(
             m_depth->Estimate(rgbaPtr, m_inW, m_inH, rgbaStride,
-                              m_isBGR, cfg.flipDepth == TRUE,
-                              cfg.depthSmooth, depthResult));
+                              m_isBGR || m_isNV12 || m_isYUY2,
+                              cfg.flipDepth == TRUE, cfg.depthSmooth,
+                              depthResult));
         auto tdMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             Clock::now() - td0).count();
         if (logThis)
-            LOG_DBG("Frame #", m_frameCount,
-                    ": depth inference ", haveDepth ? "OK" : "FAILED",
-                    " (", tdMs, " ms)");
+            LOG_DBG("Frame #", m_frameCount, ": depth ",
+                    haveDepth ? "OK" : "FAILED", " (", tdMs, " ms)");
         if (!haveDepth)
             LOG_WARN("Frame #", m_frameCount, ": depth estimation failed");
-    } else {
-        if (logThis)
-            LOG_WARN("Frame #", m_frameCount,
-                     ": depth model not loaded -- using flat depth (no 3D effect)");
+    } else if (logThis) {
+        LOG_WARN("Frame #", m_frameCount,
+                 ": depth model not loaded -- flat depth (no 3D effect)");
     }
 
     if (!haveDepth) {
@@ -427,7 +458,7 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
     LONG needed = outStride * outH;
     if (pOut->GetSize() < needed) {
         LOG_ERR("Frame #", m_frameCount,
-                ": output sample too small: have=", pOut->GetSize(),
+                ": output sample too small have=", pOut->GetSize(),
                 " need=", needed);
         return E_FAIL;
     }
@@ -440,15 +471,14 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
     pOut->SetSyncPoint(TRUE);
     pOut->SetDiscontinuity(pIn->IsDiscontinuity() == S_OK);
 
-    auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        Clock::now() - t0).count();
-
-    if (logThis)
+    if (logThis) {
+        auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            Clock::now() - t0).count();
         LOG_INFO("Frame #", m_frameCount,
-                 ": render=", trMs, "ms  total=", totalMs, "ms"
+                 ": render=", trMs, "ms  total=", totalMs, "ms",
                  "  depth=", haveDepth ? "AI" : "flat",
                  "  gpu=", m_stereo->IsGPUAvailable() ? "yes" : "no");
-
+    }
     return S_OK;
 }
 
@@ -466,7 +496,7 @@ STDMETHODIMP C3DeflattenFilter::SetConfig(const DeflattenConfig* p) {
              " mode=", (int)m_cfg.outputMode,
              " gpu=", (int)m_cfg.gpuProvider,
              " smooth=", m_cfg.depthSmooth,
-             " flip=", m_cfg.flipDepth ? "yes" : "no");
+             " flip=", m_cfg.flipDepth?"yes":"no");
     return S_OK;
 }
 STDMETHODIMP C3DeflattenFilter::GetModelPath(LPWSTR buf, UINT cch) {
@@ -486,17 +516,16 @@ STDMETHODIMP C3DeflattenFilter::GetGPUInfo(LPWSTR buf, UINT cch) {
     return S_OK;
 }
 STDMETHODIMP C3DeflattenFilter::ReloadModel() {
-    LOG_INFO("ReloadModel requested  path='", m_modelPath, "'");
+    LOG_INFO("ReloadModel path='", m_modelPath, "'");
     HRESULT hr = m_depth->Load(m_modelPath, m_cfg.gpuProvider, m_gpuInfo);
-    LOG_INFO("ReloadModel ", SUCCEEDED(hr) ? "OK" : "FAILED",
+    LOG_INFO("ReloadModel ", SUCCEEDED(hr)?"OK":"FAILED",
              " hr=", HRStr(hr), " gpuInfo='", m_gpuInfo, "'");
     return hr;
 }
-
 STDMETHODIMP C3DeflattenFilter::GetPages(CAUUID* pPages) {
     if (!pPages) return E_POINTER;
-    pPages->cElems = 1;
-    pPages->pElems = static_cast<GUID*>(CoTaskMemAlloc(sizeof(GUID)));
+    pPages->cElems  = 1;
+    pPages->pElems  = static_cast<GUID*>(CoTaskMemAlloc(sizeof(GUID)));
     if (!pPages->pElems) return E_OUTOFMEMORY;
     pPages->pElems[0] = CLSID_3DeflattenProp;
     return S_OK;
