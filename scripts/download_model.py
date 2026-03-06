@@ -35,9 +35,10 @@ def main() -> None:
     try:
         from huggingface_hub import hf_hub_download
     except ImportError:
-        print("ERROR: huggingface_hub is not installed.")
-        print("       pip install huggingface_hub")
-        sys.exit(1)
+        print("huggingface_hub not found -- installing it now...")
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "huggingface_hub"])
+        from huggingface_hub import hf_hub_download
 
     dest_dir = appdata_dir() / "3Deflatten" / "models"
     dest_dir.mkdir(parents=True, exist_ok=True)
