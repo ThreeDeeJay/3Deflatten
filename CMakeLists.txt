@@ -136,6 +136,11 @@ endif()
 set(SOURCES
     src/dllmain.cpp
     src/filter.cpp
+    # dllentry.cpp from baseclasses provides DllGetClassObject,
+    # DllCanUnloadNow, and DllEntryPoint.  We compile it as part of the
+    # filter (not strmbase) so its DllMain definition is the one that gets
+    # exported, while our dllmain.cpp's DllMain wraps it via DllEntryPoint.
+    "${BASECLASSES_DIR}/dllentry.cpp"
     src/depth_estimator.cpp
     src/stereo_renderer.cpp
     src/logger.cpp

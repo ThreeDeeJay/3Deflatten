@@ -1,6 +1,5 @@
 LIBRARY "3Deflatten"
 EXPORTS
-    DllMain             PRIVATE
     DllGetClassObject   PRIVATE
     DllCanUnloadNow     PRIVATE
     DllRegisterServer   PRIVATE
