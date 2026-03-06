@@ -96,13 +96,6 @@ jobs:
         cmake
         -A "${{matrix.Settings.Platform}}"
         -B "${{github.workspace}}/build"
-        -DCMAKE_BUILD_TYPE="${{matrix.Configuration}}"
-
-    - name: Configure
-      run: >
-        cmake
-        -A "${{matrix.Settings.Platform}}"
-        -B "${{github.workspace}}/build"
         -DCMAKE_BUILD_TYPE=${{matrix.Configuration}}
         -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
         -DVCPKG_TARGET_TRIPLET=${{matrix.Settings.Triplet}}
