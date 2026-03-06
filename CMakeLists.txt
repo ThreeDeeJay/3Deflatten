@@ -84,6 +84,17 @@ endif()
 
 find_package(onnxruntime CONFIG REQUIRED)
 
+# DirectML ships as its own vcpkg package in ORT >= 1.19.
+# OPTIONAL: if the package isn't present (e.g. building without GPU support)
+# the filter still compiles; the EP probe in depth_estimator.cpp will simply
+# fail at runtime and fall back to CPU.
+find_package(directml CONFIG QUIET)
+if(directml_FOUND)
+    message(STATUS "DirectML found – GPU acceleration via DX12 available")
+else()
+    message(STATUS "DirectML not found – only CPU inference will be available")
+endif()
+
 # Belt-and-suspenders: explicitly add the vcpkg include tree so that the
 # onnxruntime headers are found even if the imported target's
 # INTERFACE_INCLUDE_DIRECTORIES are not propagated as expected.
@@ -190,6 +201,7 @@ target_compile_options(3Deflatten PRIVATE /W4 /wd4996 /wd4267 /wd4244)
 target_link_libraries(3Deflatten PRIVATE
     strmbase                    # built from source above
     onnxruntime::onnxruntime
+    $<$<BOOL:${directml_FOUND}>:Microsoft::DirectML>
     d3d11.lib
     dxgi.lib
     d3dcompiler.lib

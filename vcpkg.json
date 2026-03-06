@@ -3,14 +3,15 @@
   "version": "1.0.0",
   "description": "DirectShow 2D-to-3D AI depth filter",
   "dependencies": [
-    { "name": "onnxruntime", "features": ["directml"] },
+    "onnxruntime",
+    "directml",
     "directxtk"
   ],
   "features": {
     "cuda": {
       "description": "Enable NVIDIA CUDA execution provider (requires CUDA Toolkit). DirectML and CPU are always available as fallbacks.",
       "dependencies": [
-        { "name": "onnxruntime", "features": ["cuda", "directml"] }
+        { "name": "onnxruntime", "features": ["cuda"] }
       ]
     }
   }
