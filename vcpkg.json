@@ -4,7 +4,6 @@
   "description": "DirectShow 2D-to-3D AI depth filter",
   "dependencies": [
     "onnxruntime",
-    "directml",
     "directxtk"
   ],
   "features": {
