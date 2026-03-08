@@ -66,6 +66,88 @@ static std::string MTDesc(const CMediaType* pmt) {
     return s;
 }
 
+// ── INI persistence ───────────────────────────────────────────────────────────
+// Stores/loads settings from 3Deflatten.ini next to the .ax file.
+// Using the Win32 private-profile API so the INI is plain, human-editable text.
+// File location: resolved from the .ax module's own path so it stays with the
+// filter regardless of working directory or COM host.
+
+std::wstring C3DeflattenFilter::GetIniPath() {
+    // Resolve HMODULE of this .ax by searching from the address of CreateInstance.
+    HMODULE hm = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&C3DeflattenFilter::CreateInstance), &hm);
+    wchar_t path[MAX_PATH] = {};
+    if (hm) GetModuleFileNameW(hm, path, MAX_PATH);
+    // Replace the filename part with 3Deflatten.ini
+    wchar_t* sl = wcsrchr(path, L'\\');
+    if (sl) wcscpy_s(sl + 1, MAX_PATH - (DWORD)(sl - path + 1), L"3Deflatten.ini");
+    else     wcscpy_s(path, L"3Deflatten.ini");
+    return path;
+}
+
+void C3DeflattenFilter::LoadIni() {
+    if (m_iniPath.empty()) m_iniPath = GetIniPath();
+    const wchar_t* p = m_iniPath.c_str();
+    const wchar_t* s = L"3Deflatten";
+
+    auto getF = [&](const wchar_t* key, float def) -> float {
+        wchar_t buf[64] = {};
+        GetPrivateProfileStringW(s, key, L"", buf, ARRAYSIZE(buf), p);
+        if (buf[0] == L'\0') return def;
+        return (float)_wtof(buf);
+    };
+    auto getI = [&](const wchar_t* key, int def) -> int {
+        return (int)GetPrivateProfileIntW(s, key, def, p);
+    };
+    auto getStr = [&](const wchar_t* key) -> std::wstring {
+        wchar_t buf[MAX_PATH] = {};
+        GetPrivateProfileStringW(s, key, L"", buf, ARRAYSIZE(buf), p);
+        return buf;
+    };
+
+    m_cfg.convergence = getF(L"convergence", 0.5f);
+    m_cfg.separation  = getF(L"separation",  0.03f);
+    m_cfg.depthSmooth = getF(L"depthSmooth", 0.4f);
+    m_cfg.outputMode  = (OutputMode)getI(L"outputMode",  (int)OutputMode::SideBySide);
+    m_cfg.gpuProvider = (GPUProvider)getI(L"gpuProvider", (int)GPUProvider::Auto);
+    m_cfg.flipDepth   = getI(L"flipDepth", 0) ? TRUE : FALSE;
+
+    std::wstring mp = getStr(L"modelPath");
+    if (!mp.empty()) m_modelPath = mp;
+
+    LOG_INFO("LoadIni: '", m_iniPath, "'",
+             " conv=", m_cfg.convergence, " sep=", m_cfg.separation,
+             " smooth=", m_cfg.depthSmooth, " flip=", m_cfg.flipDepth?"y":"n",
+             " mode=", (int)m_cfg.outputMode, " gpu=", (int)m_cfg.gpuProvider);
+}
+
+void C3DeflattenFilter::SaveIni() const {
+    const wchar_t* p = m_iniPath.c_str();
+    const wchar_t* s = L"3Deflatten";
+
+    auto setF = [&](const wchar_t* key, float v) {
+        wchar_t buf[32]; swprintf_s(buf, L"%.6g", v);
+        WritePrivateProfileStringW(s, key, buf, p);
+    };
+    auto setI = [&](const wchar_t* key, int v) {
+        wchar_t buf[16]; swprintf_s(buf, L"%d", v);
+        WritePrivateProfileStringW(s, key, buf, p);
+    };
+
+    setF(L"convergence",  m_cfg.convergence);
+    setF(L"separation",   m_cfg.separation);
+    setF(L"depthSmooth",  m_cfg.depthSmooth);
+    setI(L"outputMode",   (int)m_cfg.outputMode);
+    setI(L"gpuProvider",  (int)m_cfg.gpuProvider);
+    setI(L"flipDepth",    m_cfg.flipDepth ? 1 : 0);
+    WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
+
+    LOG_INFO("SaveIni: '", m_iniPath, "'");
+}
+
 // ── CreateInstance ────────────────────────────────────────────────────────────
 CUnknown* WINAPI C3DeflattenFilter::CreateInstance(LPUNKNOWN pUnk, HRESULT* phr) {
     LOG_INFO("CreateInstance");
@@ -85,6 +167,13 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     wchar_t envModel[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"DEFLATTEN_MODEL_PATH", envModel, MAX_PATH))
         m_modelPath = envModel;
+
+    // Load persisted settings from INI (overrides defaults above).
+    // modelPath from INI is only used if DEFLATTEN_MODEL_PATH env var is not set.
+    m_iniPath = GetIniPath();
+    LoadIni();
+    // Env var wins over INI model path
+    if (envModel[0]) m_modelPath = envModel;
 
     m_depth  = std::make_unique<DepthEstimator>();
     m_stereo = std::make_unique<StereoRenderer>();
@@ -476,10 +565,11 @@ STDMETHODIMP C3DeflattenFilter::GetConfig(DeflattenConfig* p) {
 }
 STDMETHODIMP C3DeflattenFilter::SetConfig(const DeflattenConfig* p) {
     if(!p)return E_POINTER;
-    CAutoLock lk(&m_csConfig); m_cfg=*p;
+    { CAutoLock lk(&m_csConfig); m_cfg=*p; }
     LOG_INFO("SetConfig: conv=",m_cfg.convergence," sep=",m_cfg.separation,
              " mode=",(int)m_cfg.outputMode," gpu=",(int)m_cfg.gpuProvider,
              " smooth=",m_cfg.depthSmooth," flip=",m_cfg.flipDepth?"y":"n");
+    SaveIni();
     return S_OK;
 }
 STDMETHODIMP C3DeflattenFilter::GetModelPath(LPWSTR buf, UINT cch) {
@@ -489,7 +579,9 @@ STDMETHODIMP C3DeflattenFilter::GetModelPath(LPWSTR buf, UINT cch) {
 STDMETHODIMP C3DeflattenFilter::SetModelPath(LPCWSTR path) {
     if(!path)return E_POINTER;
     m_modelPath=path;
-    LOG_INFO("SetModelPath: '",m_modelPath,"'"); return S_OK;
+    LOG_INFO("SetModelPath: '",m_modelPath,"'");
+    SaveIni();
+    return S_OK;
 }
 STDMETHODIMP C3DeflattenFilter::GetGPUInfo(LPWSTR buf, UINT cch) {
     if(!buf)return E_POINTER;

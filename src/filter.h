@@ -54,6 +54,15 @@ private:
     void    OutputDimensions(int inW, int inH, int& outW, int& outH) const;
     HRESULT BuildOutputMediaType(const CMediaType* pmtIn, CMediaType* pmtOut);
 
+    // ── INI persistence ───────────────────────────────────────────────────────
+    // Reads/writes 3Deflatten.ini next to the .ax file.
+    // LoadIni() is called from the constructor; SaveIni() from SetConfig().
+    static std::wstring GetIniPath();
+    void LoadIni();
+    void SaveIni() const;
+
+    std::wstring     m_iniPath;
+
     CCritSec         m_csConfig;
     DeflattenConfig  m_cfg{};
     std::wstring     m_modelPath;

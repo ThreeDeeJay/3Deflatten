@@ -559,9 +559,20 @@ void DepthEstimator::PreprocessFrame(const BYTE* src,
                                       std::vector<float>& tensor,
                                       int& mw, int& mh) {
     if (m_dynamicInput) {
-        const int base = 14;
-        mw = std::min(((w + base - 1) / base) * base, 1022);
-        mh = std::min(((h + base - 1) / base) * base, 1022);
+        // Fit the longer side to 1022 (Depth Anything V2 max) and scale the
+        // shorter side proportionally, then snap BOTH to the nearest multiple
+        // of 14 (patch size).  Without this both dimensions were clamped to
+        // 1022 independently, turning 16:9 footage into a 1:1 square tensor
+        // and distorting all geometry in the depth output.
+        const int maxDim = 1022;
+        const int base   = 14;
+        float scale = std::min((float)maxDim / w, (float)maxDim / h);
+        // Round to nearest multiple of 14, minimum 14
+        mw = std::max(base, (int)std::round(w * scale / base) * base);
+        mh = std::max(base, (int)std::round(h * scale / base) * base);
+        // Clamp in case rounding pushed past maxDim
+        mw = std::min(mw, maxDim);
+        mh = std::min(mh, maxDim);
     } else {
         mw = (int)m_modelInputW;
         mh = (int)m_modelInputH;
@@ -654,6 +665,9 @@ void DepthEstimator::BilinearResize(const float* src, int sw, int sh,
 }
 
 // ── TemporalSmooth ────────────────────────────────────────────────────────────
+// alpha = 0.0 → pass current frame through unchanged (no smoothing)
+// alpha = 0.9 → heavily weighted towards previous frame (strong smoothing)
+// The old code had the alpha convention inverted (0.4 meant 60% old, 40% new).
 void DepthEstimator::TemporalSmooth(std::vector<float>& cur, float alpha) {
     int n = (int)cur.size();
     if ((int)m_prevDepth.size() != n) {
@@ -661,6 +675,6 @@ void DepthEstimator::TemporalSmooth(std::vector<float>& cur, float alpha) {
         return;
     }
     for (int i = 0; i < n; ++i)
-        cur[i] = alpha * cur[i] + (1.f - alpha) * m_prevDepth[i];
+        cur[i] = (1.f - alpha) * cur[i] + alpha * m_prevDepth[i];
     m_prevDepth = cur;
 }
