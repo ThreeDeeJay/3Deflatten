@@ -83,6 +83,9 @@ jobs:
       shell: cmd
       working-directory: ${{ github.workspace }}
 
+    - name: List files
+      run: ls -R
+
     - name: Set up MSVC
       uses: ilammy/msvc-dev-cmd@v1
       with:
