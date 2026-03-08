@@ -83,6 +83,9 @@ jobs:
       shell: cmd
       working-directory: ${{ github.workspace }}
 
+    - name: Install NuGet dependencies
+      run: dotnet add package Microsoft.ML.OnnxRuntime.Gpu 
+
     - name: List files
       run: ls -R
 
