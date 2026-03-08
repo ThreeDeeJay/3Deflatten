@@ -226,7 +226,6 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 trt.trt_fp16_enable           = 1;   // ~2x faster on RTX cards
                 trt.trt_engine_cache_enable   = 1;
                 trt.trt_engine_cache_path     = m_trtCacheDir.c_str();
-                trt.trt_timing_cache_enable   = 1;
                 trt.trt_dump_subgraphs        = 0;
                 m_sessionOpts.AppendExecutionProvider_TensorRT(trt);
 
