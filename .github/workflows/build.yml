@@ -79,4 +79,65 @@ jobs:
         shell: cmd
         working-directory: ${{ github.workspace }}
 
+      - name: Set up MSVC (${{ matrix.arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
 
+      - name: Configure CMake (${{ matrix.arch }})
+        run: >
+          cmake -B build
+          -A ${{ matrix.cmake_arch }}
+          -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
+          "-DVCPKG_INSTALLED_DIR=${{ github.workspace }}\vcpkg_installed"
+          -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+        shell: cmd
+
+      - name: Build (${{ matrix.arch }})
+        run: cmake --build build --config ${{ matrix.config }} --parallel
+        shell: cmd
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3Deflatten_${{ matrix.arch }}_${{ matrix.config }}
+          path: build/${{ matrix.ax_dir }}/3Deflatten_${{ matrix.arch }}.ax
+          if-no-files-found: error
+
+  package:
+    name: Package release
+    needs: build
+    runs-on: windows-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x64_Release
+          path: release/
+
+      - name: Download x86 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x86_Release
+          path: release/
+
+      - name: Create release zip
+        run: |
+          copy README.md                 release\
+          copy LICENSE                   release\
+          copy scripts\register.bat      release\
+          copy scripts\download_model.py release\
+          powershell Compress-Archive -Path release\* -DestinationPath 3Deflatten-release.zip
+        shell: cmd
+
+      - name: Upload release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3Deflatten-release
+          path: 3Deflatten-release.zip
