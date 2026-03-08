@@ -1,143 +1,183 @@
+#Based on template from: https://github.com/ThreeDeeJay/GitHub-Actions-build-templates/blob/main/Windows-CMake.yml
 name: Build
+
+env:
+  GH_TOKEN: ${{github.token}}
+  Branch: ${{github.ref_name}}
+  Artifacts: build/Release
+  Title: ${{github.event.repository.name}}
 
 on:
   push:
-    branches: [ main, master ]
+    Branches: $Branch
   pull_request:
-    branches: [ main, master ]
+    Branches: $Branch
   workflow_dispatch:
 
 jobs:
-  build:
-    name: ${{ matrix.arch }} ${{ matrix.config }}
-    runs-on: windows-latest
-
+  Build:
+    name: ${{matrix.Settings.Name}}-${{matrix.Configuration}}
+    runs-on: windows-2025
     strategy:
-      fail-fast: false
       matrix:
-        arch:   [ x64, x86 ]
-        config: [ Release ]
-        include:
-          - arch: x64
-            cmake_arch:    x64
-            vcpkg_triplet: x64-windows
-            ax_dir:        Win64
-          - arch: x86
-            cmake_arch:    Win32
-            vcpkg_triplet: x86-windows
-            ax_dir:        Win32
-
+        Configuration: [Release] #[Release, Debug]
+        Settings:
+        - {
+            Name: "Win32",
+            Platform: "Win32",
+            Architecture: "x86",
+            Triplet: "x86-windows"
+          }
+        - {
+            Name: "Win64",
+            Platform: "x64",
+            Architecture: "x64",
+            Triplet: "x64-windows"
+          }
     env:
       VCPKG_ROOT:            C:\vcpkg
-      VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
-      # In manifest mode vcpkg installs packages to <source>/vcpkg_installed/
-      # (not C:\vcpkg\installed).  Pin this to a known path so we can cache it.
-      VCPKG_INSTALLED_DIR:   ${{ github.workspace }}\vcpkg_installed
-      # Use the GitHub Actions cache as vcpkg's binary source.
+      VCPKG_DEFAULT_TRIPLET: ${{matrix.Settings.Triplet}}
+      VCPKG_INSTALLED_DIR:   ${{github.workspace}}\vcpkg_installed
       VCPKG_BINARY_SOURCES:  "clear;x-gha,readwrite"
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Export Actions cache env vars for vcpkg
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL',     process.env.ACTIONS_CACHE_URL     || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+    - name: Clone repo and submodules
+      run: >
+        git
+        clone https://${{github.repository_owner}}:${{github.token}}@github.com/${{github.repository}}.git
+        "${{github.workspace}}"
+        --branch ${{env.Branch}}
+        --recurse-submodules
 
-      # Cache FetchContent downloads: ORT DirectML NuGet + strmbase git clone.
-      # Key is the CMakeLists hash so it invalidates when dependencies change.
-      - name: Cache FetchContent downloads
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}\build\_deps
-          key: fetchcontent-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt') }}
-          save-always: true
+    - name: Get current date, commit hash and count
+      run: |
+        echo "FirstCommitHash=$(git rev-list --max-parents=0 HEAD --first-parent)" >> $env:GITHUB_ENV
+        echo "CommitHash=$(git rev-parse HEAD)" >> $env:GITHUB_ENV
+        echo "CommitHashShort=$(git rev-parse --short=7 HEAD)" >> $env:GITHUB_ENV
+        echo "CommitCount=$(git rev-list --count HEAD)" >> $env:GITHUB_ENV
+        echo "CommitDate=$(git show -s --date=format:'%Y-%m-%d' --format=%cd)" >> $env:GITHUB_ENV
 
-      # Cache the manifest-mode install dir.
-      # save-always: true ensures the cache is written even when a later step
-      # fails, so the next run benefits from whatever was downloaded this run.
-      - name: Cache vcpkg installed packages
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}\vcpkg_installed
-          key:  vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-${{ matrix.vcpkg_triplet }}-
-          save-always: true
+    - name: Export Actions cache env vars for vcpkg
+      uses: actions/github-script@v7
+      with:
+        script: |
+          core.exportVariable('ACTIONS_CACHE_URL',     process.env.ACTIONS_CACHE_URL     || '');
+          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-      # Manifest mode: `vcpkg install` reads vcpkg.json -- no package args.
-      # VCPKG_INSTALLED_DIR is passed so vcpkg writes to our cached path.
-      - name: Install vcpkg dependencies
-        run: >
-          C:\vcpkg\vcpkg.exe install
-          --triplet ${{ matrix.vcpkg_triplet }}
-          --no-print-usage
-          --x-install-root="${{ github.workspace }}\vcpkg_installed"
-        shell: cmd
-        working-directory: ${{ github.workspace }}
+    - name: Cache vcpkg installed packages
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}\vcpkg_installed
+        key:  vcpkg-${{matrix.Settings.Triplet}}-${{ hashFiles('vcpkg.json') }}
+        restore-keys: |
+          vcpkg-${{matrix.Settings.Triplet}}-
+        save-always: true
 
-      - name: Set up MSVC (${{ matrix.arch }})
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.arch }}
+    - name: Install vcpkg dependencies
+      run: >
+        C:\vcpkg\vcpkg.exe install
+        --triplet ${{matrix.Settings.Triplet}}
+        --no-print-usage
+        --x-install-root="${{github.workspace}}\vcpkg_installed"
+      shell: cmd
+      working-directory: ${{ github.workspace }}
 
-      - name: Configure CMake (${{ matrix.arch }})
-        run: >
-          cmake -B build
-          -A ${{ matrix.cmake_arch }}
-          -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
-          "-DVCPKG_INSTALLED_DIR=${{ github.workspace }}\vcpkg_installed"
-          -DCMAKE_BUILD_TYPE=${{ matrix.config }}
-        shell: cmd
+    - name: Set up MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: ${{matrix.Settings.Platform}}
 
-      - name: Build (${{ matrix.arch }})
-        run: cmake --build build --config ${{ matrix.config }} --parallel
-        shell: cmd
+    - name: Configure
+      run: >
+        cmake
+        -A "${{matrix.Settings.Platform}}"
+        -B "${{github.workspace}}/build"
+        -DCMAKE_BUILD_TYPE=${{matrix.Configuration}}
+        -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+        -DVCPKG_TARGET_TRIPLET=${{matrix.Settings.Triplet}}
+        -DVCPKG_INSTALLED_DIR=${{github.workspace}}\vcpkg_installed
+        -DCMAKE_PREFIX_PATH=vcpkg_installed\${{matrix.Settings.Triplet}}\share
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: 3Deflatten_${{ matrix.arch }}_${{ matrix.config }}
-          path: build/${{ matrix.ax_dir }}/3Deflatten_${{ matrix.arch }}.ax
-          if-no-files-found: error
+    - name: Build
+      run: >
+        cmake
+        --build "${{github.workspace}}/build"
+        --config "${{matrix.Configuration}}"
+        --parallel
 
-  package:
-    name: Package release
-    needs: build
+    - name: List files
+      run: ls -R
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{env.Title}}-${{matrix.Settings.Name}}-${{matrix.Configuration}}
+        path: "${{github.workspace}}/${{env.Artifacts}}/"
+
+  Release:
+    name: Release
     runs-on: windows-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-
+    needs: Build
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Download x64 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: 3Deflatten_x64_Release
-          path: release/
+      - name: Clone repo and submodules
+        run: git clone https://${{github.repository_owner}}:${{github.token}}@github.com/${{github.repository}}.git "${{github.workspace}}" --branch ${{env.Branch}} --recurse-submodules
 
-      - name: Download x86 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: 3Deflatten_x86_Release
-          path: release/
-
-      - name: Create release zip
+      - name: Get current date, commit hash and count
         run: |
-          copy README.md                 release\
-          copy LICENSE                   release\
-          copy scripts\register.bat      release\
-          copy scripts\download_model.py release\
-          powershell Compress-Archive -Path release\* -DestinationPath 3Deflatten-release.zip
-        shell: cmd
+          echo "FirstCommitHash=$(git rev-list --max-parents=0 HEAD --first-parent)" >> $env:GITHUB_ENV
+          echo "CommitHash=$(git rev-parse HEAD)" >> $env:GITHUB_ENV
+          echo "CommitHashShort=$(git rev-parse --short=7 HEAD)" >> $env:GITHUB_ENV
+          echo "CommitCount=$(git rev-list --count HEAD)" >> $env:GITHUB_ENV
+          echo "CommitDate=$(git show -s --date=format:'%Y-%m-%d' --format=%cd)" >> $env:GITHUB_ENV
 
-      - name: Upload release zip
-        uses: actions/upload-artifact@v4
+      - name: Download Artifacts - Win32
+        uses: actions/download-artifact@v4
         with:
-          name: 3Deflatten-release
-          path: 3Deflatten-release.zip
+          name: ${{env.Title}}-Win32-Release
+          path: Artifacts/Win32/
+
+      - name: Download Artifacts - Win64
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{env.Title}}-Win64-Release
+          path: Artifacts/Win64/
+
+      - name: Deploy
+        run: |
+          mkdir "Release"
+          cp -r "Artifacts/Win32" "Release"
+          cp -r "Artifacts/Win64" "Release"
+          cp "scripts/register.bat" "Release/register.bat"
+          cp "scripts/unregister.bat" "Release/unregister.bat"
+          cp "scripts/download_model.py" "Release/download_model.py"
+          cp "LICENSE" "Release/License.txt"
+          cp "README.md" "Release/ReadMe.txt"
+
+      - name: Compress artifacts
+        if: github.event_name == 'push'
+        run: |
+          7z a "Release/${{env.Title}}.zip" "${{github.workspace}}/Release/*" -mx=9
+          cp "Release/${{env.Title}}.zip" "Release/${{env.Title}}_r${{env.CommitCount}}@${{env.CommitHashShort}}.zip"
+  
+      - name: Purge tag - latest-${{env.Branch}}
+        if: github.event_name == 'push'
+        run: |
+          gh release delete latest-${{env.Branch}} --repo ${{github.repository}} --cleanup-tag --yes || true
+  
+      - name: Release - archive-${{env.Branch}}
+        if: github.event_name == 'push'
+        run: |
+          gh release create archive-${{env.Branch}} --repo ${{github.repository}} --target ${{env.FirstCommitHash}} --latest=false --prerelease --title "${{env.Title}} ${{env.Branch}} build archive" --notes "Latest build: https://github.com/${{github.repository}}/releases/latest-${{env.Branch}}
+          Build logs: https://github.com/${{github.repository}}/actions" || true
+          gh release edit archive-${{env.Branch}} --repo ${{github.repository}} --target ${{env.FirstCommitHash}} --latest=false --prerelease --title "${{env.Title}} ${{env.Branch}} build archive" --notes "Latest build: https://github.com/${{github.repository}}/releases/latest-${{env.Branch}}
+          Build logs: https://github.com/${{github.repository}}/actions" || true
+          gh release upload archive-${{env.Branch}} --repo ${{github.repository}} --clobber "Release/${{env.Title}}_r${{env.CommitCount}}@${{env.CommitHashShort}}.zip"
+  
+      - name: Release - latest-${{env.Branch}}
+        if: github.event_name == 'push'
+        run: |
+          gh release create latest-${{env.Branch}} --repo ${{github.repository}} --target ${{env.CommitHash}} --generate-notes --latest=true --title "${{env.Title}} r${{env.CommitCount}}@${{env.CommitHashShort}}" --notes "Build archive: https://github.com/${{github.repository}}/releases/tag/archive-${{env.Branch}}
+          Build log: https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"
+          gh release upload latest-${{env.Branch}} --repo ${{github.repository}} --clobber "Release/${{env.Title}}.zip"
