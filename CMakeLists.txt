@@ -75,6 +75,45 @@ set(ORT_BACKEND "DirectML" CACHE STRING "ORT inference backend: DirectML or GPU"
 set_property(CACHE ORT_BACKEND PROPERTY STRINGS "DirectML" "GPU")
 message(STATUS "ORT backend: ${ORT_BACKEND}")
 
+# ── Helper macro: resolve ORT paths from an extracted NuGet/zip directory ────
+# NuGet packages (.nupkg are zips) are extracted by FetchContent directly into
+# SOURCE_DIR with no wrapper folder, so the layout is always:
+#   SOURCE_DIR/build/native/include/
+#   SOURCE_DIR/build/native/lib/<arch>/onnxruntime.lib
+#   SOURCE_DIR/runtimes/win-<arch>/native/onnxruntime.dll
+# However the lib sub-arch folder name has varied across package versions
+# (x64, x86, arm64).  We glob to be safe rather than hardcoding it.
+macro(ort_resolve_nuget_paths SOURCE_VAR ARCH_RID)
+    set(_ORT_SRC "${${SOURCE_VAR}}")
+    # headers are stable
+    set(ORT_INC "${_ORT_SRC}/build/native/include")
+    # find the import lib by glob
+    file(GLOB_RECURSE _ORT_LIB_CANDIDATES "${_ORT_SRC}/build/native/lib/*.lib")
+    if(NOT _ORT_LIB_CANDIDATES)
+        # some versions put the lib directly under runtimes/
+        file(GLOB_RECURSE _ORT_LIB_CANDIDATES "${_ORT_SRC}/runtimes/*.lib")
+    endif()
+    list(FILTER _ORT_LIB_CANDIDATES INCLUDE REGEX "onnxruntime\.lib$")
+    if(_ORT_LIB_CANDIDATES)
+        list(GET _ORT_LIB_CANDIDATES 0 ORT_LIB)
+        message(STATUS "ORT import lib: ${ORT_LIB}")
+    else()
+        # leave ORT_LIB pointing at the expected path so the fatal check below fires
+        set(ORT_LIB "${_ORT_SRC}/build/native/lib/${ARCH_RID}/onnxruntime.lib")
+    endif()
+    # DLL
+    set(ORT_DLL "${_ORT_SRC}/runtimes/win-${ARCH_RID}/native/onnxruntime.dll")
+    if(NOT EXISTS "${ORT_DLL}")
+        # flat layout fallback
+        file(GLOB_RECURSE _ORT_DLL_CANDIDATES "${_ORT_SRC}/runtimes/*.dll")
+        list(FILTER _ORT_DLL_CANDIDATES INCLUDE REGEX "onnxruntime\.dll$")
+        list(FILTER _ORT_DLL_CANDIDATES EXCLUDE REGEX "providers")
+        if(_ORT_DLL_CANDIDATES)
+            list(GET _ORT_DLL_CANDIDATES 0 ORT_DLL)
+        endif()
+    endif()
+endmacro()
+
 if(ORT_BACKEND STREQUAL "GPU")
     # ── GPU backend (TensorRT + CUDA + CPU) ───────────────────────────────────
     if(NOT ARCH_SUFFIX STREQUAL "x64")
@@ -134,16 +173,13 @@ elseif(ARCH_SUFFIX STREQUAL "x64")
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     FetchContent_MakeAvailable(ort_nuget)
-
-    set(ORT_INC  "${ort_nuget_SOURCE_DIR}/build/native/include")
-    set(ORT_LIB  "${ort_nuget_SOURCE_DIR}/build/native/lib/x64/onnxruntime.lib")
-    set(ORT_DLL  "${ort_nuget_SOURCE_DIR}/runtimes/win-x64/native/onnxruntime.dll")
+    ort_resolve_nuget_paths(ort_nuget_SOURCE_DIR "x64")
     set(ORT_EXTRA_DLLS "")
-    foreach(extra
+    foreach(_extra
             "${ort_nuget_SOURCE_DIR}/runtimes/win-x64/native/directml.dll"
             "${ort_nuget_SOURCE_DIR}/runtimes/win-x64/native/onnxruntime_providers_shared.dll")
-        if(EXISTS "${extra}")
-            list(APPEND ORT_EXTRA_DLLS "${extra}")
+        if(EXISTS "${_extra}")
+            list(APPEND ORT_EXTRA_DLLS "${_extra}")
         endif()
     endforeach()
     set(ORT_COMPILE_DEFS ORT_ENABLE_DML)
@@ -159,10 +195,7 @@ else()
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     FetchContent_MakeAvailable(ort_cpu_nuget)
-
-    set(ORT_INC  "${ort_cpu_nuget_SOURCE_DIR}/build/native/include")
-    set(ORT_LIB  "${ort_cpu_nuget_SOURCE_DIR}/build/native/lib/x86/onnxruntime.lib")
-    set(ORT_DLL  "${ort_cpu_nuget_SOURCE_DIR}/runtimes/win-x86/native/onnxruntime.dll")
+    ort_resolve_nuget_paths(ort_cpu_nuget_SOURCE_DIR "x86")
     set(ORT_EXTRA_DLLS "")
     set(ORT_COMPILE_DEFS "")   # no GPU EPs for x86
 
