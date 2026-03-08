@@ -5,28 +5,26 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
+set(FETCHCONTENT_UPDATES_DISCONNECTED TRUE)  # don't re-download if already present
 
 # ── Platform target ───────────────────────────────────────────────────────────
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(ARCH_SUFFIX "x64")
+    set(ORT_ARCH   "x64")
 else()
     set(ARCH_SUFFIX "x86")
+    set(ORT_ARCH   "x86")
 endif()
 
 # ── Windows SDK include/lib dirs ──────────────────────────────────────────────
-# Needed for d3d11.lib, dxgi.lib, strmiids.lib, etc.
 set(WINSDK_LIB_DIR
     "$ENV{WindowsSdkDir}Lib/$ENV{WindowsSDKVersion}/um/${ARCH_SUFFIX}"
     CACHE PATH "Windows SDK UM lib directory")
-
 set(WINSDK_INC_DIR
     "$ENV{WindowsSdkDir}Include/$ENV{WindowsSDKVersion}"
     CACHE PATH "Windows SDK include root")
 
 # ── DirectShow base classes (strmbase) – built from source ───────────────────
-# Fetches the Microsoft Windows-classic-samples repo (shallow, sparse).
-# The baseclasses folder is at:
-#   Samples/Win7Samples/multimedia/directshow/baseclasses/
 FetchContent_Declare(
     win_classic_samples
     GIT_REPOSITORY https://github.com/microsoft/Windows-classic-samples.git
@@ -36,68 +34,66 @@ FetchContent_Declare(
         "Samples/Win7Samples/multimedia/directshow/baseclasses"
     SOURCE_SUBDIR  "Samples/Win7Samples/multimedia/directshow/baseclasses"
 )
-# We only need to populate (download), not add_subdirectory – it has no CMakeLists.
 FetchContent_Populate(win_classic_samples)
 
 set(BASECLASSES_DIR
     "${win_classic_samples_SOURCE_DIR}/Samples/Win7Samples/multimedia/directshow/baseclasses")
 
-# Compile the DirectShow base classes as a static library target.
 file(GLOB STRMBASE_SOURCES "${BASECLASSES_DIR}/*.cpp")
-# Remove dllentry.cpp – it defines DllMain which conflicts with ours.
 list(FILTER STRMBASE_SOURCES EXCLUDE REGEX "dllentry\\.cpp$")
 
 add_library(strmbase STATIC ${STRMBASE_SOURCES})
-
 target_include_directories(strmbase PUBLIC
     "${BASECLASSES_DIR}"
     "${WINSDK_INC_DIR}/um"
     "${WINSDK_INC_DIR}/shared"
 )
-
 target_compile_definitions(strmbase PUBLIC
     WIN32_LEAN_AND_MEAN
-    # Do NOT define NOMINMAX for strmbase: the baseclasses rely on the Windows
-    # min/max macros and do not include <algorithm> themselves.
-    # NOMINMAX is defined only on our own filter sources below.
     _CRT_SECURE_NO_WARNINGS
-    UNICODE
-    _UNICODE
+    UNICODE _UNICODE
     _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
 )
-
-# /FI"algorithm" force-includes <algorithm> so std::min/std::max are always
-# available even in translation units that don't include it explicitly.
-# Also suppress the many warnings the old baseclasses generate under MSVC.
 target_compile_options(strmbase PRIVATE
-    /W3
-    /wd4996 /wd4267 /wd4244 /wd4312 /wd4311 /wd4302
+    /W3 /wd4996 /wd4267 /wd4244 /wd4312 /wd4311 /wd4302
     /FI"algorithm"
 )
 
-# ── ONNX Runtime ──────────────────────────────────────────────────────────────
-# VCPKG_INSTALLED_DIR is set by the toolchain; fall back to the conventional
-# manifest-mode default if it is not explicitly provided.
-if(NOT DEFINED VCPKG_INSTALLED_DIR)
-    set(VCPKG_INSTALLED_DIR "${CMAKE_SOURCE_DIR}/vcpkg_installed")
+# ── ONNX Runtime (official NuGet – includes DirectML EP + bundled DML dll) ───
+# The vcpkg onnxruntime port does not compile the DirectML or CUDA EPs.
+# Microsoft's NuGet package 'Microsoft.ML.OnnxRuntime.DirectML' ships DML
+# support built-in, along with a bundled directml.dll.  We download it via
+# FetchContent (NuGet packages are just ZIP archives).
+set(ORT_DML_VERSION "1.21.0")
+FetchContent_Declare(ort_nuget
+    URL "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/${ORT_DML_VERSION}/microsoft.ml.onnxruntime.directml.${ORT_DML_VERSION}.nupkg"
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(ort_nuget)
+
+# NuGet package layout:
+#   build/native/include/          – ORT C/C++ headers
+#   build/native/lib/x64/          – import lib
+#   runtimes/win-x64/native/       – DLLs (onnxruntime.dll, directml.dll)
+set(ORT_INC  "${ort_nuget_SOURCE_DIR}/build/native/include")
+set(ORT_LIB  "${ort_nuget_SOURCE_DIR}/build/native/lib/${ORT_ARCH}/onnxruntime.lib")
+set(ORT_DLL  "${ort_nuget_SOURCE_DIR}/runtimes/win-${ORT_ARCH}/native/onnxruntime.dll")
+set(DML_DLL  "${ort_nuget_SOURCE_DIR}/runtimes/win-${ORT_ARCH}/native/directml.dll")
+set(ORT_PROVIDERS_SHARED
+    "${ort_nuget_SOURCE_DIR}/runtimes/win-${ORT_ARCH}/native/onnxruntime_providers_shared.dll")
+
+if(NOT EXISTS "${ORT_LIB}")
+    message(FATAL_ERROR "ORT import lib not found at ${ORT_LIB} -- check NuGet download")
 endif()
 
-find_package(onnxruntime CONFIG REQUIRED)
-
-# DirectML ships inbox with Windows 10 1903+ (directml.dll in System32).
-# No vcpkg package or compile-time import library is needed.
-# ORT's DirectML EP is loaded at runtime via the string-key EP API;
-# depth_estimator.cpp probes for directml.dll before activating it.
-
-# Belt-and-suspenders: explicitly add the vcpkg include tree so that the
-# onnxruntime headers are found even if the imported target's
-# INTERFACE_INCLUDE_DIRECTORIES are not propagated as expected.
-set(VCPKG_INC "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include")
-if(EXISTS "${VCPKG_INC}")
-    include_directories("${VCPKG_INC}")
-    message(STATUS "vcpkg include dir: ${VCPKG_INC}")
-else()
-    message(WARNING "vcpkg include dir not found: ${VCPKG_INC}")
+# ── Optional CUDA EP ──────────────────────────────────────────────────────────
+# To enable: cmake -DORT_CUDA=ON  (also requires CUDA Toolkit installed).
+# With the DML NuGet you don't get CUDA; for CUDA you'd need either vcpkg's
+# onnxruntime[cuda] or the Microsoft.ML.OnnxRuntime.Gpu NuGet instead.
+option(ORT_CUDA "Enable NVIDIA CUDA execution provider" OFF)
+if(ORT_CUDA)
+    add_compile_definitions(ORT_ENABLE_CUDA)
+    message(STATUS "CUDA EP: enabled (requires CUDA Toolkit)")
 endif()
 
 # ── Shader compilation ────────────────────────────────────────────────────────
@@ -117,7 +113,6 @@ if(FXC)
                 "${CMAKE_SOURCE_DIR}/shaders/stereo_warp.hlsl"
         DEPENDS "${CMAKE_SOURCE_DIR}/shaders/stereo_warp.hlsl"
         COMMENT "Compiling stereo_warp.hlsl (PS_StereoWarp)")
-
     add_custom_command(
         OUTPUT  "${CMAKE_BINARY_DIR}/stereo_warp_vs.h"
         COMMAND "${FXC}"
@@ -127,7 +122,6 @@ if(FXC)
                 "${CMAKE_SOURCE_DIR}/shaders/stereo_warp.hlsl"
         DEPENDS "${CMAKE_SOURCE_DIR}/shaders/stereo_warp.hlsl"
         COMMENT "Compiling stereo_warp.hlsl (VS_FullScreen)")
-
     set(SHADER_OUTPUTS
         "${CMAKE_BINARY_DIR}/stereo_warp_ps.h"
         "${CMAKE_BINARY_DIR}/stereo_warp_vs.h")
@@ -137,14 +131,10 @@ else()
     set(SHADER_OUTPUTS "")
 endif()
 
-# ── Filter DLL source files ───────────────────────────────────────────────────
+# ── Filter DLL sources ────────────────────────────────────────────────────────
 set(SOURCES
     src/dllmain.cpp
     src/filter.cpp
-    # dllentry.cpp from baseclasses provides DllGetClassObject,
-    # DllCanUnloadNow, and DllEntryPoint.  We compile it as part of the
-    # filter (not strmbase) so its DllMain definition is the one that gets
-    # exported, while our dllmain.cpp's DllMain wraps it via DllEntryPoint.
     "${BASECLASSES_DIR}/dllentry.cpp"
     src/depth_estimator.cpp
     src/stereo_renderer.cpp
@@ -153,19 +143,12 @@ set(SOURCES
     src/3Deflatten.rc
     ${SHADER_OUTPUTS}
 )
-
 set(HEADERS
-    src/guids.h
-    src/ideflatten.h
-    src/filter.h
-    src/depth_estimator.h
-    src/stereo_renderer.h
-    src/logger.h
-    src/prop_page.h
-    src/resource.h
+    src/guids.h src/ideflatten.h src/filter.h
+    src/depth_estimator.h src/stereo_renderer.h
+    src/logger.h src/prop_page.h src/resource.h
 )
 
-# ── Filter DLL ────────────────────────────────────────────────────────────────
 add_library(3Deflatten SHARED ${SOURCES} ${HEADERS})
 
 set_target_properties(3Deflatten PROPERTIES
@@ -176,40 +159,47 @@ set_target_properties(3Deflatten PROPERTIES
 
 target_include_directories(3Deflatten PRIVATE
     src
-    "${CMAKE_BINARY_DIR}"               # for compiled shader headers
+    "${ORT_INC}"                        # official ORT NuGet headers
+    "${CMAKE_BINARY_DIR}"               # compiled shader headers
     "${WINSDK_INC_DIR}/um"
     "${WINSDK_INC_DIR}/shared"
 )
 
 target_compile_definitions(3Deflatten PRIVATE
-    _USRDLL
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-    _CRT_SECURE_NO_WARNINGS
-    UNICODE
-    _UNICODE
+    _USRDLL WIN32_LEAN_AND_MEAN NOMINMAX
+    _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE
 )
-
 target_compile_options(3Deflatten PRIVATE /W4 /wd4996 /wd4267 /wd4244)
 
 target_link_libraries(3Deflatten PRIVATE
-    strmbase                    # built from source above
-    onnxruntime::onnxruntime
-    d3d11.lib
-    dxgi.lib
-    d3dcompiler.lib
-    winmm.lib
-    strmiids.lib
-    ole32.lib
-    oleaut32.lib
-    uuid.lib
-    advapi32.lib
-    comdlg32.lib
-    comctl32.lib
+    strmbase
+    "${ORT_LIB}"
+    d3d11.lib dxgi.lib d3dcompiler.lib
+    winmm.lib strmiids.lib ole32.lib oleaut32.lib uuid.lib
+    advapi32.lib comdlg32.lib comctl32.lib shlwapi.lib
 )
 
 set_target_properties(3Deflatten PROPERTIES
     LINK_FLAGS "/DEF:\"${CMAKE_SOURCE_DIR}/src/3Deflatten.def\""
+)
+
+# Copy ORT and DirectML DLLs next to the .ax so they're found at runtime.
+add_custom_command(TARGET 3Deflatten POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${AX_OUTPUT_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORT_DLL}" "${AX_OUTPUT_DIR}/onnxruntime.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DML_DLL}" "${AX_OUTPUT_DIR}/directml.dll"
+    COMMENT "Copying ORT + DirectML DLLs to output"
+)
+if(EXISTS "${ORT_PROVIDERS_SHARED}")
+    add_custom_command(TARGET 3Deflatten POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ORT_PROVIDERS_SHARED}" "${AX_OUTPUT_DIR}/onnxruntime_providers_shared.dll"
+    )
+endif()
+
+# ── RC compiler include path (needed for commctrl constants in the dialog) ────
+set_source_files_properties(src/3Deflatten.rc PROPERTIES
+    COMPILE_FLAGS "/I \"${WINSDK_INC_DIR}/um\" /I \"${CMAKE_SOURCE_DIR}/src\""
 )
 
 install(TARGETS 3Deflatten DESTINATION bin)

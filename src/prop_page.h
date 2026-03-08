@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <streams.h>
+#include <vector>
+#include <string>
 #include "ideflatten.h"
 #include "guids.h"
 #include "resource.h"
@@ -18,24 +20,20 @@ public:
 private:
     C3DeflattenProp(LPUNKNOWN pUnk, HRESULT* phr);
 
-    // Push current m_cfg + m_modelPath to the filter immediately.
-    // Called on every control interaction so changes are live.
-    void PushToFilter();
-    void SetDirty();        // marks page dirty and notifies host
+    void PopulateControls(HWND hwnd);
+    void ReadControls(HWND hwnd);
+    void UpdateValueLabels(HWND hwnd);
+    void RefreshStatus(HWND hwnd);
+    void PopulateModelCombo(HWND hwnd);
+    void SetDirty();
 
-    // Populate all controls from m_cfg / m_modelPath.
-    void PopulateControls();
+    // Push current m_cfg to the live filter immediately.
+    void PushConfig();
 
-    // Read all controls back into m_cfg / m_modelPath.
-    void ReadControls();
+    static std::wstring GetDllDir();
 
-    // Update just the value labels next to sliders.
-    void UpdateValueLabels();
-
-    // Update the status line from the filter.
-    void RefreshStatus();
-
-    I3Deflatten*    m_pFilter    = nullptr;
-    DeflattenConfig m_cfg{};
-    wchar_t         m_modelPath[MAX_PATH]{};
+    I3Deflatten*               m_pFilter = nullptr;
+    DeflattenConfig            m_cfg{};
+    wchar_t                    m_modelPath[MAX_PATH]{};
+    std::vector<std::wstring>  m_onnxFiles;  // full paths, indexed by combo pos
 };

@@ -71,11 +71,15 @@ private:
     bool m_gpuOK       = false;
     int  m_renderCount = 0;
 
-    // Constant buffer layout (must match stereo_warp.hlsl)
+    // Constant buffer layout (must match stereo_warp.hlsl cbuffer CBStereo)
     struct alignas(16) CBStereo {
         float convergence;
         float separation;
-        float flipDepth;    // kept for completeness; depth is pre-flipped on CPU
+        float flipDepth;    // unused (depth pre-flipped on CPU)
         int   outputMode;   // 0=SBS 1=TAB
+        float texelW;       // 1.0f / srcWidth  (used by edge-fill shader)
+        float texelH;       // 1.0f / srcHeight
+        float pad0;
+        float pad1;
     };
 };

@@ -1,71 +1,66 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <windows.h>
-#include <commctrl.h>
 #include "resource.h"
+
+// DS_CONTROL makes embedded property-page dialogs look correct inside the host
+// frame.  WS_CHILD is required; omit WS_CAPTION, WS_POPUP, DS_MODALFRAME.
+// DS_SETFONT lets us pick the font; without it the dialog unit calculations
+// use the system font and controls end up mis-sized.
 
 STRINGTABLE
 BEGIN
     IDS_PROP_TITLE  "3Deflatten"
 END
 
-// Embedded property page – no WS_POPUP or DS_MODALFRAME, host provides chrome.
-IDD_PROP_PAGE DIALOGEX 0, 0, 300, 248
-STYLE DS_SETFONT | WS_CHILD | WS_VISIBLE
-FONT 8, "MS Shell Dlg", 0, 0, 0x0
+IDD_PROP_PAGE DIALOGEX 0, 0, 298, 240
+STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
+FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
     // ── Stereo Parameters ─────────────────────────────────────────────────────
-    GROUPBOX  "Stereo Parameters", -1,     7,   4, 286, 104
+    GROUPBOX  "Stereo Parameters", -1,              4,   2, 290,  94
 
-    LTEXT     "Convergence (screen-plane depth):",
-              -1,                          14,  16, 200,  10
+    LTEXT     "Convergence (screen-plane depth, 0–1):", -1,
+                                                    10,  14, 200,  10
     CONTROL   "", IDC_CONV_SLIDER, "msctls_trackbar32",
-              TBS_HORZ|TBS_NOTICKS|WS_CHILD|WS_VISIBLE,
-                                           14,  27, 236,  14
-    LTEXT     "0.50",  IDC_CONV_LABEL,    254,  27,  32,  14, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  24, 242,  14
+    LTEXT     "0.500", IDC_CONV_LABEL,             256,  24,  32,  14, SS_RIGHT
 
-    LTEXT     "Separation (stereo strength):",
-              -1,                          14,  46, 200,  10
+    LTEXT     "Separation (stereo strength, 0–0.20):", -1,
+                                                    10,  44, 200,  10
     CONTROL   "", IDC_SEP_SLIDER, "msctls_trackbar32",
-              TBS_HORZ|TBS_NOTICKS|WS_CHILD|WS_VISIBLE,
-                                           14,  57, 236,  14
-    LTEXT     "0.030", IDC_SEP_LABEL,     254,  57,  32,  14, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  54, 242,  14
+    LTEXT     "0.030", IDC_SEP_LABEL,              256,  54,  32,  14, SS_RIGHT
 
-    LTEXT     "Temporal Smoothing (flicker reduction, 0=off):",
-              -1,                          14,  76, 200,  10
+    LTEXT     "Temporal Smoothing (flicker reduction, 0=off):", -1,
+                                                    10,  74, 200,  10
     CONTROL   "", IDC_SMOOTH_SLIDER, "msctls_trackbar32",
-              TBS_HORZ|TBS_NOTICKS|WS_CHILD|WS_VISIBLE,
-                                           14,  87, 236,  14
-    LTEXT     "0.40",  IDC_SMOOTH_LABEL,  254,  87,  32,  14, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  84, 242,  14
+    LTEXT     "0.40", IDC_SMOOTH_LABEL,            256,  84,  32,  14, SS_RIGHT
 
-    // ── Output & Inference (side by side) ─────────────────────────────────────
-    GROUPBOX  "Output",    -1,             7, 114, 138,  38
-    LTEXT     "Mode:",     -1,            14, 127,  28,  10
-    COMBOBOX  IDC_MODE_COMBO,             44, 125,  94,  60,
-              CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP
-    AUTOCHECKBOX "Flip Depth (invert near/far)",
-              IDC_FLIP_CHECK,             14, 141, 128,  12
+    // ── Output & Inference ────────────────────────────────────────────────────
+    GROUPBOX  "Output",    -1,                      4, 102, 140,  36
+    LTEXT     "Mode:",     -1,                     10, 115,  28,  10
+    COMBOBOX  IDC_MODE_COMBO,                      40, 113, 100,  60,
+              CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX "Flip Depth",  IDC_FLIP_CHECK,    10, 129, 100,  12
 
-    GROUPBOX  "Inference", -1,           153, 114, 140,  38
-    LTEXT     "Provider:", -1,           160, 127,  36,  10
-    COMBOBOX  IDC_GPU_COMBO,             198, 125,  88,  60,
-              CBS_DROPDOWNLIST|WS_VSCROLL|WS_TABSTOP
-    LTEXT     "Changes take effect on next Reload.", -1,
-                                         160, 141, 126,  10
+    GROUPBOX  "Inference", -1,                    150, 102, 144,  36
+    LTEXT     "Provider:", -1,                    156, 115,  36,  10
+    COMBOBOX  IDC_GPU_COMBO,                      194, 113,  94,  80,
+              CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
     // ── ONNX Model ────────────────────────────────────────────────────────────
-    GROUPBOX  "ONNX Model", -1,            7, 158, 286,  48
-    LTEXT     "Path:",      -1,           14, 171,  22,  10
-    EDITTEXT  IDC_MODEL_PATH,             38, 169, 184,  12,
-              ES_AUTOHSCROLL|WS_BORDER|WS_TABSTOP|ES_READONLY
-    PUSHBUTTON "Browse…",  IDC_BROWSE_BTN, 226, 167,  60,  14
+    GROUPBOX  "ONNX Model", -1,                     4, 144, 290,  50
+    LTEXT     "File:",     -1,                     10, 158,  20,  10
+    COMBOBOX  IDC_MODEL_COMBO,                     32, 156, 200,  80,
+              CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON "Reload",  IDC_RELOAD_BTN,         236, 154,  52,  14
 
-    PUSHBUTTON "Reload Model", IDC_RELOAD_BTN,
-                                           14, 185,  70,  14
-    LTEXT     "Re-loads the model with the selected provider.",
-              -1,                          90, 188, 196,  10
+    LTEXT     "Switching model or provider takes effect after Reload.", -1,
+                                                   10, 174, 278,  10
 
     // ── Status ────────────────────────────────────────────────────────────────
-    GROUPBOX  "Active Inference Status", -1,   7, 212, 286,  30
-    LTEXT     "",  IDC_GPU_INFO,             14, 223, 272,  14,
-              SS_NOPREFIX|SS_ENDELLIPSIS
+    GROUPBOX  "Active Inference Status", -1,        4, 200, 290,  34
+    LTEXT     "", IDC_GPU_INFO,                    10, 213, 278,  16,
+              SS_NOPREFIX | SS_ENDELLIPSIS
 END

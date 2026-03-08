@@ -3,6 +3,9 @@
 #pragma once
 #include <streams.h>
 #include <memory>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 #include "ideflatten.h"
 #include "depth_estimator.h"
 #include "stereo_renderer.h"
@@ -65,5 +68,31 @@ private:
     bool m_isYUY2 = false;
 
     std::vector<BYTE> m_outBuf;
-    int                m_frameCount = 0;
+    int               m_frameCount = 0;
+
+    // ── Async depth worker (single-slot latest-wins) ──────────────────────────
+    // Transform() converts the frame to BGRA and posts it here, then returns
+    // immediately using the last completed depth map.  The worker thread runs
+    // ORT inference in the background so the media-player graph never stalls.
+    void StartDepthThread();
+    void StopDepthThread();
+    void DepthWorkerThread();
+
+    std::thread             m_depthThread;
+
+    // Pending work slot (written by Transform, read by worker)
+    std::mutex              m_pendMtx;
+    std::condition_variable m_pendCV;
+    bool                    m_pendStop  = false;
+    bool                    m_pendReady = false;
+    std::vector<BYTE>       m_pendBGRA;
+    int                     m_pendW     = 0;
+    int                     m_pendH     = 0;
+
+    // Depth result cache (written by worker, read by Transform)
+    std::mutex              m_cacheMtx;
+    std::vector<float>      m_cachedDepth;
+    int                     m_cachedW   = 0;
+    int                     m_cachedH   = 0;
+    bool                    m_cacheReady = false;
 };

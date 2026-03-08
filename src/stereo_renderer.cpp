@@ -17,6 +17,9 @@ cbuffer CBStereo : register(b0) {
     float  g_separation;
     float  g_flipDepth;
     int    g_outputMode;
+    float  g_texelW;
+    float  g_texelH;
+    float2 g_pad;
 };
 Texture2D<float4> g_srcTex   : register(t0);
 Texture2D<float>  g_depthTex : register(t1);
@@ -43,10 +46,39 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
         isLeft = (uv.y < 0.5);
         eyeUV  = float2(uv.x, isLeft ? uv.y * 2.0 : (uv.y - 0.5) * 2.0);
     }
-    float depth     = g_depthTex.Sample(g_sampler, eyeUV).r;
-    float disparity = g_separation * (depth - g_convergence);
-    float eyeSign   = isLeft ? 1.0 : -1.0;
-    float2 srcUV    = saturate(eyeUV + float2(eyeSign * disparity, 0.0));
+    float eyeSign = isLeft ? 1.0 : -1.0;
+
+    // Depth dilation: max over horizontal neighbourhood reduces gap size at edges
+    float dC = g_depthTex.Sample(g_sampler, eyeUV).r;
+    float dL = g_depthTex.Sample(g_sampler, eyeUV + float2(-g_texelW * 3.0, 0)).r;
+    float dR = g_depthTex.Sample(g_sampler, eyeUV + float2(+g_texelW * 3.0, 0)).r;
+    float depth = max(dC, max(dL, dR));
+
+    float  disparity = g_separation * (depth - g_convergence);
+    float2 srcUV     = saturate(eyeUV + float2(eyeSign * disparity, 0.0));
+
+    // Background infill: if srcUV lands on a foreground surface (occlusion gap),
+    // walk in the opposite direction to find background at similar depth.
+    float sampledDepth = g_depthTex.Sample(g_sampler, srcUV).r;
+    float depthJump    = sampledDepth - dC;
+    [branch]
+    if (depthJump > 0.10) {
+        float2 searchDir = float2(-eyeSign * g_texelW * 3.0, 0);
+        float4 fillColor = g_srcTex.Sample(g_sampler, srcUV);
+        [loop]
+        for (int s = 1; s <= 16; ++s) {
+            float2 cUV    = saturate(eyeUV + searchDir * (float)s);
+            float  cDepth = g_depthTex.Sample(g_sampler, cUV).r;
+            if (abs(cDepth - dC) < 0.08) {
+                float cDisp = g_separation * (cDepth - g_convergence);
+                fillColor = g_srcTex.Sample(g_sampler,
+                    saturate(cUV + float2(eyeSign * cDisp, 0.0)));
+                break;
+            }
+        }
+        float blend = saturate((depthJump - 0.10) * 10.0);
+        return lerp(g_srcTex.Sample(g_sampler, srcUV), fillColor, blend);
+    }
     return g_srcTex.Sample(g_sampler, srcUV);
 }
 )HLSL";
@@ -283,6 +315,10 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
         cb->separation  = cfg.separation;
         cb->flipDepth   = cfg.flipDepth ? 1.f : 0.f;
         cb->outputMode  = (int)cfg.outputMode;
+        cb->texelW      = srcW > 0 ? 1.0f / (float)srcW : 0.0f;
+        cb->texelH      = srcH > 0 ? 1.0f / (float)srcH : 0.0f;
+        cb->pad0        = 0.0f;
+        cb->pad1        = 0.0f;
         m_ctx->Unmap(m_cb.Get(), 0);
     }
 
