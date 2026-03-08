@@ -82,9 +82,9 @@ set(DML_DLL  "${ort_nuget_SOURCE_DIR}/runtimes/win-${ORT_ARCH}/native/directml.d
 set(ORT_PROVIDERS_SHARED
     "${ort_nuget_SOURCE_DIR}/runtimes/win-${ORT_ARCH}/native/onnxruntime_providers_shared.dll")
 
-##if(NOT EXISTS "${ORT_LIB}")
-##    message(FATAL_ERROR "ORT import lib not found at ${ORT_LIB} -- check NuGet download")
-##endif()
+if(NOT EXISTS "${ORT_LIB}")
+    message(FATAL_ERROR "ORT import lib not found at ${ORT_LIB} -- check NuGet download")
+endif()
 
 # ── Optional CUDA EP ──────────────────────────────────────────────────────────
 # To enable: cmake -DORT_CUDA=ON  (also requires CUDA Toolkit installed).
