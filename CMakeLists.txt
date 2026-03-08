@@ -88,8 +88,33 @@ if(ORT_BACKEND STREQUAL "GPU")
     )
     FetchContent_MakeAvailable(ort_gpu)
 
-    # GitHub release zip layout:  onnxruntime-win-x64-gpu-1.21.0/{include,lib}/
-    set(ORT_ZIP_ROOT "${ort_gpu_SOURCE_DIR}/onnxruntime-win-x64-gpu-${ORT_VERSION}")
+    # The GitHub release zip may extract to a nested subdirectory OR directly
+    # into SOURCE_DIR depending on the archive structure and CMake version.
+    # Probe both layouts so the build is robust against version changes:
+    #   Layout A (nested):  SOURCE_DIR/onnxruntime-win-x64-gpu-<ver>/lib/
+    #   Layout B (flat):    SOURCE_DIR/lib/
+    set(_ORT_NESTED "${ort_gpu_SOURCE_DIR}/onnxruntime-win-x64-gpu-${ORT_VERSION}")
+    if(EXISTS "${_ORT_NESTED}/lib/onnxruntime.lib")
+        set(ORT_ZIP_ROOT "${_ORT_NESTED}")
+        message(STATUS "ORT GPU zip: nested layout detected (${ORT_ZIP_ROOT})")
+    elseif(EXISTS "${ort_gpu_SOURCE_DIR}/lib/onnxruntime.lib")
+        set(ORT_ZIP_ROOT "${ort_gpu_SOURCE_DIR}")
+        message(STATUS "ORT GPU zip: flat layout detected (${ORT_ZIP_ROOT})")
+    else()
+        # Last resort: glob for onnxruntime.lib anywhere under SOURCE_DIR
+        file(GLOB_RECURSE _ORT_LIB_CANDIDATES
+             "${ort_gpu_SOURCE_DIR}/*/onnxruntime.lib")
+        list(GET _ORT_LIB_CANDIDATES 0 _ORT_LIB_FOUND)
+        if(_ORT_LIB_FOUND)
+            get_filename_component(ORT_ZIP_ROOT "${_ORT_LIB_FOUND}" DIRECTORY)
+            get_filename_component(ORT_ZIP_ROOT "${ORT_ZIP_ROOT}" DIRECTORY)
+            message(STATUS "ORT GPU zip: found via glob at ${ORT_ZIP_ROOT}")
+        else()
+            # Will be caught by the existence check below with a clear message
+            set(ORT_ZIP_ROOT "${_ORT_NESTED}")
+        endif()
+    endif()
+
     set(ORT_INC  "${ORT_ZIP_ROOT}/include")
     set(ORT_LIB  "${ORT_ZIP_ROOT}/lib/onnxruntime.lib")
     set(ORT_DLL  "${ORT_ZIP_ROOT}/lib/onnxruntime.dll")
