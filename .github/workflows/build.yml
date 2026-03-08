@@ -62,42 +62,14 @@ jobs:
       id: cache-cuda
       uses: actions/cache@v5
       with:
-        path: "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.1"
-        key: CUDA
+        path: "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v10.1"
+        key: CUDA_V10_1
     - name: Install CUDA
       if: steps.cache-cuda.outputs.cache-hit != 'true'
       run: |
         curl -L --ssl-revoke-best-effort "https://developer.download.nvidia.com/compute/cuda/10.1/Prod/local_installers/cuda_10.1.243_426.00_win10.exe" -o "CUDA.exe"
-        CUDA.exe -s
+        ./CUDA.exe -s
     - name: Set CUDA path
       run: |
         echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v10.1" >> $env:GITHUB_ENV
         echo "CUDA_PATH_V10_1=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v10.1" >> $env:GITHUB_ENV
-
-    - name: Export Actions cache env vars for vcpkg
-      uses: actions/github-script@v7
-      with:
-        script: |
-          core.exportVariable('ACTIONS_CACHE_URL',     process.env.ACTIONS_CACHE_URL     || '');
-          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-    - name: Cache vcpkg installed packages
-      uses: actions/cache@v4
-      with:
-        path: ${{ github.workspace }}\vcpkg_installed
-        key:  vcpkg-${{matrix.Settings.Triplet}}-${{ hashFiles('vcpkg.json') }}
-        restore-keys: |
-          vcpkg-${{matrix.Settings.Triplet}}-
-        save-always: true
-
-    - name: Install vcpkg dependencies
-      run: >
-        C:\vcpkg\vcpkg.exe install
-        --triplet ${{matrix.Settings.Triplet}}
-        --no-print-usage
-        --x-install-root="${{github.workspace}}\vcpkg_installed"
-      shell: cmd
-      working-directory: ${{ github.workspace }}
-
-    - name: List files
-      run: ls -R
