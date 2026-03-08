@@ -95,6 +95,39 @@ static void TryAddDir(const std::wstring& dir, const wchar_t* probeDll,
              std::string(dir.begin(), dir.end()));
 }
 
+// Recursively walk baseDir (up to maxDepth levels) looking for any
+// subdirectory that directly contains probeDll, then calls TryAddDir on it.
+// Stops after the first match to avoid registering conflicting versions.
+// Returns true if a directory was added.
+static bool RecursiveFindAndAdd(const std::wstring& baseDir,
+                                const wchar_t* probeDll,
+                                const char* label,
+                                int maxDepth = 6) {
+    if (maxDepth <= 0 || baseDir.empty()) return false;
+
+    // Check if the DLL lives directly in baseDir
+    std::wstring probe = baseDir + L"\\" + probeDll;
+    if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        TryAddDir(baseDir, probeDll, label);
+        return true;
+    }
+
+    // Enumerate sub-directories and recurse
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((baseDir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (wcscmp(fd.cFileName, L".") == 0 ||
+            wcscmp(fd.cFileName, L"..") == 0) continue;
+        found = RecursiveFindAndAdd(baseDir + L"\\" + fd.cFileName,
+                                    probeDll, label, maxDepth - 1);
+    } while (!found && FindNextFileW(h, &fd));
+    FindClose(h);
+    return found;
+}
+
 // Discover CUDA 12.x, cuDNN 9.x, and TensorRT 10.x install directories and
 // register them as DLL search paths so ORT can find provider DLLs without
 // requiring the user to modify PATH.
@@ -132,18 +165,23 @@ static void RegisterGpuRuntimeDirs() {
         }
     }
     if (!foundCuda) {
-        // Registry fallback: CUDA installer writes InstallDir here
+        // Registry fallback: enumerate all subkeys under the CUDA key so we
+        // don't need to hard-code version strings (works for 12.7, 12.8, etc.)
         const wchar_t* regBase =
             L"SOFTWARE\\NVIDIA Corporation\\GPU Computing Toolkit\\CUDA";
-        const wchar_t* versions[] = {
-            L"v12.6", L"v12.5", L"v12.4", L"v12.3",
-            L"v12.2", L"v12.1", L"v12.0", nullptr
-        };
-        for (int i = 0; versions[i] && !foundCuda; ++i) {
-            std::wstring subkey = std::wstring(regBase) + L"\\" + versions[i];
-            std::wstring inst = RegReadSz(HKEY_LOCAL_MACHINE,
-                                          subkey.c_str(), L"InstallDir");
-            if (!inst.empty()) {
+        HKEY hBase = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, regBase, 0,
+                          KEY_READ | KEY_ENUMERATE_SUB_KEYS, &hBase) == ERROR_SUCCESS) {
+            wchar_t subName[64] = {};
+            for (DWORD idx = 0; !foundCuda; ++idx) {
+                DWORD nameLen = ARRAYSIZE(subName);
+                if (RegEnumKeyExW(hBase, idx, subName, &nameLen,
+                                  nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
+                    break;
+                // Only consider v12.x subkeys
+                if (wcsncmp(subName, L"v12.", 4) != 0) continue;
+                std::wstring inst = RegReadSz(hBase, subName, L"InstallDir");
+                if (inst.empty()) continue;
                 std::wstring binDir = inst + L"\\bin";
                 std::wstring probe12 = binDir + L"\\cudart64_12.dll";
                 if (GetFileAttributesW(probe12.c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -151,23 +189,15 @@ static void RegisterGpuRuntimeDirs() {
                     foundCuda = true;
                 }
             }
+            RegCloseKey(hBase);
         }
     }
     if (!foundCuda) {
-        // Hard-coded last resort
-        const wchar_t* defaults[] = {
-            L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6\\bin",
-            L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.5\\bin",
-            L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4\\bin",
-            nullptr
-        };
-        for (int i = 0; defaults[i] && !foundCuda; ++i) {
-            std::wstring probe12 = std::wstring(defaults[i]) + L"\\cudart64_12.dll";
-            if (GetFileAttributesW(probe12.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                TryAddDir(defaults[i], L"cudart64_12.dll", "CUDA 12 bin (default path)");
-                foundCuda = true;
-            }
-        }
+        // Recursive scan of the CUDA Toolkit base directory.
+        // Works for any 12.x version regardless of the exact version subfolder.
+        foundCuda = RecursiveFindAndAdd(
+            L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA",
+            L"cudart64_12.dll", "CUDA 12 bin (default scan)");
     }
     if (!foundCuda) {
         LOG_WARN("  CUDA 12.x not found. ORT GPU EP requires CUDA 12.x (not 13.x).");
@@ -176,39 +206,42 @@ static void RegisterGpuRuntimeDirs() {
     }
 
     // ── cuDNN 9.x ────────────────────────────────────────────────────────────
-    // cuDNN 9 can be installed standalone (CUDNN_PATH env) or into the CUDA dir.
+    // The cuDNN standalone installer nests DLLs in a version-specific path like
+    //   bin\<cuda-ver>\<arch>\    e.g. bin\12.9\x64\  (v9.19, Mar 2026)
+    // Rather than hard-coding these version strings we recursively scan the
+    // install root for cudnn64_9.dll at any depth.
     {
         bool foundCuDnn = false;
         wchar_t val[MAX_PATH] = {};
-        if (GetEnvironmentVariableW(L"CUDNN_PATH", val, MAX_PATH) && val[0]) {
-            std::wstring binDir = std::wstring(val) + L"\\bin";
-            TryAddDir(binDir, L"cudnn64_9.dll", "cuDNN 9 bin (CUDNN_PATH)");
-            foundCuDnn = true;
-        }
+
+        // 1. CUDNN_PATH env var (set by standalone installer)
+        if (!foundCuDnn &&
+            GetEnvironmentVariableW(L"CUDNN_PATH", val, MAX_PATH) && val[0])
+            foundCuDnn = RecursiveFindAndAdd(val, L"cudnn64_9.dll",
+                                             "cuDNN 9 (CUDNN_PATH)");
+
+        // 2. Registry key written by standalone installer
         if (!foundCuDnn) {
             std::wstring inst = RegReadSz(HKEY_LOCAL_MACHINE,
                 L"SOFTWARE\\NVIDIA Corporation\\cuDNN", L"InstallPath");
-            if (!inst.empty()) {
-                // cuDNN 9 standalone puts DLLs in bin/<cuda-ver>/
-                std::wstring binDir = inst + L"\\bin\\12.6";
-                TryAddDir(binDir, L"cudnn64_9.dll", "cuDNN 9 bin (registry)");
-                // Also try the plain bin/ in case layout differs
-                TryAddDir(inst + L"\\bin", L"cudnn64_9.dll",
-                          "cuDNN 9 bin (registry, flat)");
-                foundCuDnn = true;
-            }
+            if (!inst.empty())
+                foundCuDnn = RecursiveFindAndAdd(inst, L"cudnn64_9.dll",
+                                                  "cuDNN 9 (registry)");
         }
+
+        // 3. Recursive scan of default base dir -- handles any version layout
+        if (!foundCuDnn)
+            foundCuDnn = RecursiveFindAndAdd(
+                L"C:\\Program Files\\NVIDIA\\CUDNN",
+                L"cudnn64_9.dll", "cuDNN 9 (default scan)");
+
+        // 4. If still not found: cuDNN may be co-installed into the CUDA Toolkit
+        //    directory, in which case cudnn64_9.dll already lives in the CUDA bin
+        //    folder registered above -- no extra step needed.
         if (!foundCuDnn) {
-            // Default standalone install paths for cuDNN 9
-            const wchar_t* cuDnnDefaults[] = {
-                L"C:\\Program Files\\NVIDIA\\CUDNN\\v9.6\\bin\\12.6",
-                L"C:\\Program Files\\NVIDIA\\CUDNN\\v9.5\\bin\\12.6",
-                L"C:\\Program Files\\NVIDIA\\CUDNN\\v9.0\\bin\\12.6",
-                nullptr
-            };
-            for (int i = 0; cuDnnDefaults[i]; ++i)
-                TryAddDir(cuDnnDefaults[i], L"cudnn64_9.dll",
-                          "cuDNN 9 bin (default path)");
+            LOG_INFO("  cuDNN 9 not found via env/registry/default path.");
+            LOG_INFO("  If installed elsewhere: set CUDNN_PATH=<install root>.");
+            LOG_INFO("  Download: https://developer.nvidia.com/cudnn");
         }
     }
 
