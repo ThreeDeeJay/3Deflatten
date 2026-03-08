@@ -100,8 +100,10 @@ if(ORT_BACKEND STREQUAL "GPU")
     )
     set(ORT_COMPILE_DEFS ORT_ENABLE_TENSORRT ORT_ENABLE_CUDA)
 
-else()
-    # ── DirectML backend (DirectML + CPU) ─────────────────────────────────────
+elseif(ARCH_SUFFIX STREQUAL "x64")
+    # ── DirectML backend, x64 (DirectML + CPU) ────────────────────────────────
+    # Microsoft.ML.OnnxRuntime.DirectML only ships x64 native libs; DirectML
+    # itself is a DX12 technology with no x86 implementation.
     FetchContent_Declare(ort_nuget
         URL "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/${ORT_VERSION}/microsoft.ml.onnxruntime.directml.${ORT_VERSION}.nupkg"
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
@@ -109,20 +111,35 @@ else()
     FetchContent_MakeAvailable(ort_nuget)
 
     set(ORT_INC  "${ort_nuget_SOURCE_DIR}/build/native/include")
-    set(ORT_LIB  "${ort_nuget_SOURCE_DIR}/build/native/lib/${ORT_ARCH}/onnxruntime.lib")
-    set(ORT_DLL  "${ort_nuget_SOURCE_DIR}/runtimes/win-${ORT_ARCH}/native/onnxruntime.dll")
-    set(ORT_DML_DLL
-        "${ort_nuget_SOURCE_DIR}/runtimes/win-${ORT_ARCH}/native/directml.dll")
+    set(ORT_LIB  "${ort_nuget_SOURCE_DIR}/build/native/lib/x64/onnxruntime.lib")
+    set(ORT_DLL  "${ort_nuget_SOURCE_DIR}/runtimes/win-x64/native/onnxruntime.dll")
     set(ORT_EXTRA_DLLS "")
-    if(EXISTS "${ORT_DML_DLL}")
-        list(APPEND ORT_EXTRA_DLLS "${ORT_DML_DLL}")
-    endif()
-    set(ORT_SHARED_DLL
-        "${ort_nuget_SOURCE_DIR}/runtimes/win-${ORT_ARCH}/native/onnxruntime_providers_shared.dll")
-    if(EXISTS "${ORT_SHARED_DLL}")
-        list(APPEND ORT_EXTRA_DLLS "${ORT_SHARED_DLL}")
-    endif()
+    foreach(extra
+            "${ort_nuget_SOURCE_DIR}/runtimes/win-x64/native/directml.dll"
+            "${ort_nuget_SOURCE_DIR}/runtimes/win-x64/native/onnxruntime_providers_shared.dll")
+        if(EXISTS "${extra}")
+            list(APPEND ORT_EXTRA_DLLS "${extra}")
+        endif()
+    endforeach()
     set(ORT_COMPILE_DEFS ORT_ENABLE_DML)
+
+else()
+    # ── CPU-only backend, x86 ─────────────────────────────────────────────────
+    # DirectML has no x86 build.  Use the plain Microsoft.ML.OnnxRuntime NuGet
+    # (CPU execution provider only).  32-bit player hosts are rare on modern
+    # hardware, so CPU-only is an acceptable trade-off.
+    message(STATUS "x86 build: DirectML unavailable, using CPU-only ORT NuGet")
+    FetchContent_Declare(ort_cpu_nuget
+        URL "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ORT_VERSION}/microsoft.ml.onnxruntime.${ORT_VERSION}.nupkg"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(ort_cpu_nuget)
+
+    set(ORT_INC  "${ort_cpu_nuget_SOURCE_DIR}/build/native/include")
+    set(ORT_LIB  "${ort_cpu_nuget_SOURCE_DIR}/build/native/lib/x86/onnxruntime.lib")
+    set(ORT_DLL  "${ort_cpu_nuget_SOURCE_DIR}/runtimes/win-x86/native/onnxruntime.dll")
+    set(ORT_EXTRA_DLLS "")
+    set(ORT_COMPILE_DEFS "")   # no GPU EPs for x86
 
 endif()
 
