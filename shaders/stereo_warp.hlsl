@@ -62,9 +62,9 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
     // ── Depth with edge dilation ──────────────────────────────────────────────
     // max() over a ±3-texel neighbourhood causes near objects to bleed
     // outward, reducing the exposed-background width at depth edges.
-    float dC = g_depthTex.Sample(g_sampler, eyeUV).r;
-    float dL = g_depthTex.Sample(g_sampler, eyeUV + float2(-g_texelW * 3.0, 0)).r;
-    float dR = g_depthTex.Sample(g_sampler, eyeUV + float2(+g_texelW * 3.0, 0)).r;
+    float dC = g_depthTex.SampleLevel(g_sampler, eyeUV, 0).r;
+    float dL = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(-g_texelW * 3.0, 0), 0).r;
+    float dR = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(+g_texelW * 3.0, 0), 0).r;
     float depth = max(dC, max(dL, dR));
 
     // ── Primary warp ─────────────────────────────────────────────────────────
@@ -76,33 +76,31 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
     // we've landed on a foreground surface – this is an occlusion gap.
     // Walk away from the warp direction in eye-space to find a background
     // pixel at similar depth, then warp that instead.
-    float sampledDepth = g_depthTex.Sample(g_sampler, srcUV).r;
+    float sampledDepth = g_depthTex.SampleLevel(g_sampler, srcUV, 0).r;
     float depthJump    = sampledDepth - dC;   // positive → sampled point is nearer
 
     [branch]
     if (depthJump > 0.10) {
-        // Search direction: opposite of the warp direction, so we walk
-        // behind the foreground object and find the exposed background.
         float2 searchDir = float2(-eyeSign * g_texelW * 3.0, 0);
-        float4 fillColor = g_srcTex.Sample(g_sampler, srcUV);  // safe fallback
+        float4 fillColor = g_srcTex.SampleLevel(g_sampler, srcUV, 0);  // safe fallback
 
         [loop]
         for (int s = 1; s <= 16; ++s) {
             float2 cUV    = saturate(eyeUV + searchDir * (float)s);
-            float  cDepth = g_depthTex.Sample(g_sampler, cUV).r;
+            float  cDepth = g_depthTex.SampleLevel(g_sampler, cUV, 0).r;
             if (abs(cDepth - dC) < 0.08) {
                 // Found a background pixel – warp it with its own disparity
                 float cDisp = g_separation * (cDepth - g_convergence);
                 float2 cSrcUV = saturate(cUV + float2(eyeSign * cDisp, 0.0));
-                fillColor = g_srcTex.Sample(g_sampler, cSrcUV);
+                fillColor = g_srcTex.SampleLevel(g_sampler, cSrcUV, 0);
                 break;
             }
         }
 
         // Hard-blend: transition over a narrow depth-jump range
         float blend = saturate((depthJump - 0.10) * 10.0);
-        return lerp(g_srcTex.Sample(g_sampler, srcUV), fillColor, blend);
+        return lerp(g_srcTex.SampleLevel(g_sampler, srcUV, 0), fillColor, blend);
     }
 
-    return g_srcTex.Sample(g_sampler, srcUV);
+    return g_srcTex.SampleLevel(g_sampler, srcUV, 0);
 }

@@ -189,10 +189,10 @@ static void RegisterGpuRuntimeDirs() {
             std::wstring inst = RegReadSz(HKEY_LOCAL_MACHINE,
                 L"SOFTWARE\\NVIDIA Corporation\\cuDNN", L"InstallPath");
             if (!inst.empty()) {
-                // cuDNN 9 standalone puts DLLs in bin\<cuda-ver>\
+                // cuDNN 9 standalone puts DLLs in bin/<cuda-ver>/
                 std::wstring binDir = inst + L"\\bin\\12.6";
                 TryAddDir(binDir, L"cudnn64_9.dll", "cuDNN 9 bin (registry)");
-                // Also try the plain bin\ in case layout differs
+                // Also try the plain bin/ in case layout differs
                 TryAddDir(inst + L"\\bin", L"cudnn64_9.dll",
                           "cuDNN 9 bin (registry, flat)");
                 foundCuDnn = true;

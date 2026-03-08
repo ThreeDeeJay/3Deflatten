@@ -49,9 +49,9 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
     float eyeSign = isLeft ? 1.0 : -1.0;
 
     // Depth dilation: max over horizontal neighbourhood reduces gap size at edges
-    float dC = g_depthTex.Sample(g_sampler, eyeUV).r;
-    float dL = g_depthTex.Sample(g_sampler, eyeUV + float2(-g_texelW * 3.0, 0)).r;
-    float dR = g_depthTex.Sample(g_sampler, eyeUV + float2(+g_texelW * 3.0, 0)).r;
+    float dC = g_depthTex.SampleLevel(g_sampler, eyeUV, 0).r;
+    float dL = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(-g_texelW * 3.0, 0), 0).r;
+    float dR = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(+g_texelW * 3.0, 0), 0).r;
     float depth = max(dC, max(dL, dR));
 
     float  disparity = g_separation * (depth - g_convergence);
@@ -59,27 +59,27 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
 
     // Background infill: if srcUV lands on a foreground surface (occlusion gap),
     // walk in the opposite direction to find background at similar depth.
-    float sampledDepth = g_depthTex.Sample(g_sampler, srcUV).r;
+    float sampledDepth = g_depthTex.SampleLevel(g_sampler, srcUV, 0).r;
     float depthJump    = sampledDepth - dC;
     [branch]
     if (depthJump > 0.10) {
         float2 searchDir = float2(-eyeSign * g_texelW * 3.0, 0);
-        float4 fillColor = g_srcTex.Sample(g_sampler, srcUV);
+        float4 fillColor = g_srcTex.SampleLevel(g_sampler, srcUV, 0);
         [loop]
         for (int s = 1; s <= 16; ++s) {
             float2 cUV    = saturate(eyeUV + searchDir * (float)s);
-            float  cDepth = g_depthTex.Sample(g_sampler, cUV).r;
+            float  cDepth = g_depthTex.SampleLevel(g_sampler, cUV, 0).r;
             if (abs(cDepth - dC) < 0.08) {
                 float cDisp = g_separation * (cDepth - g_convergence);
-                fillColor = g_srcTex.Sample(g_sampler,
-                    saturate(cUV + float2(eyeSign * cDisp, 0.0)));
+                fillColor = g_srcTex.SampleLevel(g_sampler,
+                    saturate(cUV + float2(eyeSign * cDisp, 0.0)), 0);
                 break;
             }
         }
         float blend = saturate((depthJump - 0.10) * 10.0);
-        return lerp(g_srcTex.Sample(g_sampler, srcUV), fillColor, blend);
+        return lerp(g_srcTex.SampleLevel(g_sampler, srcUV, 0), fillColor, blend);
     }
-    return g_srcTex.Sample(g_sampler, srcUV);
+    return g_srcTex.SampleLevel(g_sampler, srcUV, 0);
 }
 )HLSL";
 
