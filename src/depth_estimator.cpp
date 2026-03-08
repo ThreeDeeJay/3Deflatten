@@ -153,18 +153,71 @@ static std::wstring GetDllDir() {
     return path;
 }
 
-// Quick probe: can we LoadLibrary the given DLL without actually running it?
-static bool DllPresent(const wchar_t* name) {
-    HMODULE h = LoadLibraryExW(name, nullptr, LOAD_LIBRARY_AS_DATAFILE);
-    if (h) { FreeLibrary(h); return true; }
-    return false;
+// Probe whether a DLL can be fully loaded (all its own dependencies resolved).
+// LOAD_LIBRARY_AS_DATAFILE only maps the file without resolving imports, so it
+// succeeds even when a DLL's dependencies are missing.  We need a real load to
+// confirm the DLL is actually usable.
+// Returns: 0 = not found, ERROR_MOD_NOT_FOUND(126) = found but deps missing, S_OK = ok
+static DWORD DllLoadable(const wchar_t* path) {
+    HMODULE h = LoadLibraryExW(path, nullptr,
+        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+        LOAD_LIBRARY_SEARCH_USER_DIRS    |
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+    if (h) { FreeLibrary(h); return 0; }
+    return GetLastError();
 }
 
-// Probe for nvcuda.dll – presence means an NVIDIA driver (and CUDA runtime)
-// is installed. Required for both CUDA EP and TensorRT EP.
+// Probe for nvcuda.dll (NVIDIA driver).  Also checks that the CUDA *runtime*
+// version required by this ORT build is available.
+// ORT 1.21 GPU build requires CUDA 12.x (cudart64_12.dll).
 static bool CudaDriverPresent() {
-    if (DllPresent(L"nvcuda.dll")) return true;
-    LOG_WARN("nvcuda.dll not found – CUDA/TRT EPs unavailable");
+    // nvcuda.dll = kernel-mode driver proxy, present if any NVIDIA driver installed
+    DWORD e = DllLoadable(L"nvcuda.dll");
+    if (e != 0) {
+        LOG_WARN("nvcuda.dll not loadable (error ", e, ") – no NVIDIA driver detected. "
+                 "CUDA/TRT EPs unavailable.");
+        return false;
+    }
+    // cudart64_12.dll = CUDA 12.x runtime, required by ORT 1.21 GPU build.
+    // CUDA 11.x ships cudart64_110.dll which is NOT compatible.
+    e = DllLoadable(L"cudart64_12.dll");
+    if (e != 0) {
+        // Try generic cudart64 (older naming)
+        e = DllLoadable(L"cudart64.dll");
+    }
+    if (e != 0) {
+        LOG_WARN("CUDA 12.x runtime (cudart64_12.dll) not found (error ", e, ").");
+        LOG_WARN("  This ORT build requires CUDA 12.x. You appear to have an older version.");
+        LOG_WARN("  Download: https://developer.nvidia.com/cuda-downloads");
+        LOG_WARN("  Minimum driver for CUDA 12: 527.41 (Windows). Your driver: check Device Manager.");
+        return false;
+    }
+    return true;
+}
+
+// Probe a provider DLL for loadability and log a clear diagnostic on failure.
+// name = short name for logging, path = full path to the DLL.
+static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
+    DWORD e = DllLoadable(path.c_str());
+    if (e == 0) return true;
+    if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_MOD_NOT_FOUND) {
+        LOG_WARN(name, " not found at '",
+                 std::string(path.begin(), path.end()), "'");
+    } else if (e == 126) { // ERROR_MOD_NOT_FOUND when file exists = dependency missing
+        LOG_WARN(name, " found but its dependencies could not be loaded (error 126).");
+        if (std::wstring(path).find(L"tensorrt") != std::wstring::npos) {
+            LOG_WARN("  TensorRT runtime is not installed or is the wrong version.");
+            LOG_WARN("  ORT 1.21 requires TensorRT 10.x + CUDA 12.x + driver >= 520.");
+            LOG_WARN("  Driver 426.06 is too old for TensorRT -- minimum is ~520.61.");
+            LOG_WARN("  Download TensorRT: https://developer.nvidia.com/tensorrt");
+        } else {
+            LOG_WARN("  A required dependency (cuDNN, CUDA runtime, etc.) is missing.");
+            LOG_WARN("  ORT 1.21 GPU requires: CUDA 12.x + cuDNN 9.x + driver >= 527.");
+            LOG_WARN("  Download cuDNN: https://developer.nvidia.com/cudnn");
+        }
+    } else {
+        LOG_WARN(name, " load failed with error ", e);
+    }
     return false;
 }
 
@@ -208,12 +261,8 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
 
             // onnxruntime_providers_tensorrt.dll must be next to the .ax
             std::wstring trtDll = GetDllDir() + L"\\onnxruntime_providers_tensorrt.dll";
-            if (!DllPresent(trtDll.c_str())) {
-                LOG_WARN("onnxruntime_providers_tensorrt.dll not found at '",
-                         std::string(trtDll.begin(), trtDll.end()),
-                         "' – TensorRT EP skipped");
+            if (!ProviderDllLoadable("onnxruntime_providers_tensorrt.dll", trtDll))
                 return false;
-            }
 
             try {
                 // Store the cache path so the member lives long enough for
@@ -253,10 +302,8 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
             if (!CudaDriverPresent()) return false;
 
             std::wstring cudaDll = GetDllDir() + L"\\onnxruntime_providers_cuda.dll";
-            if (!DllPresent(cudaDll.c_str())) {
-                LOG_WARN("onnxruntime_providers_cuda.dll not found – CUDA EP skipped");
+            if (!ProviderDllLoadable("onnxruntime_providers_cuda.dll", cudaDll))
                 return false;
-            }
 
             try {
                 OrtCUDAProviderOptions cuda{};
@@ -280,9 +327,10 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
             LOG_INFO("DirectML EP: not compiled in (build uses GPU/CUDA backend)");
             return false;
 #else
-            // directml.dll ships with Windows 10 1903+ or bundled next to the .ax
-            if (!DllPresent(L"directml.dll")) {
-                LOG_WARN("directml.dll not found – DirectML EP skipped");
+            // directml.dll ships with Windows 10 1903+ or is bundled next to the .ax
+            DWORD _dmlErr = DllLoadable(L"directml.dll");
+            if (_dmlErr != 0) {
+                LOG_WARN("directml.dll not loadable (error ", _dmlErr, ") – DirectML EP skipped");
                 return false;
             }
             try {

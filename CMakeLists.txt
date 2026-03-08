@@ -166,18 +166,26 @@ if(ORT_BACKEND STREQUAL "GPU")
 
 elseif(ARCH_SUFFIX STREQUAL "x64")
     # ── DirectML backend, x64 (DirectML + CPU) ────────────────────────────────
-    # Microsoft.ML.OnnxRuntime.DirectML only ships x64 native libs; DirectML
-    # itself is a DX12 technology with no x86 implementation.
-    FetchContent_Declare(ort_nuget
-        URL "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/${ORT_VERSION}/microsoft.ml.onnxruntime.directml.${ORT_VERSION}.nupkg"
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-    FetchContent_MakeAvailable(ort_nuget)
+    # ORT_NUGET_DIR can be set externally (e.g. by CI using nuget.exe install)
+    # for reliable package resolution.  If not set we fall back to FetchContent.
+    if(DEFINED ORT_NUGET_DIR AND EXISTS "${ORT_NUGET_DIR}")
+        message(STATUS "ORT DirectML NuGet: using externally provided dir ${ORT_NUGET_DIR}")
+        set(_ORT_NUGET_SRC "${ORT_NUGET_DIR}")
+    else()
+        message(STATUS "ORT DirectML NuGet: downloading via FetchContent")
+        FetchContent_Declare(ort_nuget
+            URL "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/${ORT_VERSION}/microsoft.ml.onnxruntime.directml.${ORT_VERSION}.nupkg"
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(ort_nuget)
+        set(_ORT_NUGET_SRC "${ort_nuget_SOURCE_DIR}")
+    endif()
+    set(ort_nuget_SOURCE_DIR "${_ORT_NUGET_SRC}")
     ort_resolve_nuget_paths(ort_nuget_SOURCE_DIR "x64")
     set(ORT_EXTRA_DLLS "")
     foreach(_extra
-            "${ort_nuget_SOURCE_DIR}/runtimes/win-x64/native/directml.dll"
-            "${ort_nuget_SOURCE_DIR}/runtimes/win-x64/native/onnxruntime_providers_shared.dll")
+            "${_ORT_NUGET_SRC}/runtimes/win-x64/native/directml.dll"
+            "${_ORT_NUGET_SRC}/runtimes/win-x64/native/onnxruntime_providers_shared.dll")
         if(EXISTS "${_extra}")
             list(APPEND ORT_EXTRA_DLLS "${_extra}")
         endif()
@@ -186,15 +194,21 @@ elseif(ARCH_SUFFIX STREQUAL "x64")
 
 else()
     # ── CPU-only backend, x86 ─────────────────────────────────────────────────
-    # DirectML has no x86 build.  Use the plain Microsoft.ML.OnnxRuntime NuGet
-    # (CPU execution provider only).  32-bit player hosts are rare on modern
-    # hardware, so CPU-only is an acceptable trade-off.
+    # DirectML has no x86 build. Use the plain Microsoft.ML.OnnxRuntime NuGet.
     message(STATUS "x86 build: DirectML unavailable, using CPU-only ORT NuGet")
-    FetchContent_Declare(ort_cpu_nuget
-        URL "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ORT_VERSION}/microsoft.ml.onnxruntime.${ORT_VERSION}.nupkg"
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-    FetchContent_MakeAvailable(ort_cpu_nuget)
+    if(DEFINED ORT_NUGET_DIR AND EXISTS "${ORT_NUGET_DIR}")
+        message(STATUS "ORT CPU NuGet: using externally provided dir ${ORT_NUGET_DIR}")
+        set(_ORT_CPU_SRC "${ORT_NUGET_DIR}")
+    else()
+        message(STATUS "ORT CPU NuGet: downloading via FetchContent")
+        FetchContent_Declare(ort_cpu_nuget
+            URL "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ORT_VERSION}/microsoft.ml.onnxruntime.${ORT_VERSION}.nupkg"
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(ort_cpu_nuget)
+        set(_ORT_CPU_SRC "${ort_cpu_nuget_SOURCE_DIR}")
+    endif()
+    set(ort_cpu_nuget_SOURCE_DIR "${_ORT_CPU_SRC}")
     ort_resolve_nuget_paths(ort_cpu_nuget_SOURCE_DIR "x86")
     set(ORT_EXTRA_DLLS "")
     set(ORT_COMPILE_DEFS "")   # no GPU EPs for x86
@@ -302,10 +316,26 @@ target_link_libraries(3Deflatten PRIVATE
     d3d11.lib dxgi.lib d3dcompiler.lib
     winmm.lib strmiids.lib ole32.lib oleaut32.lib uuid.lib
     advapi32.lib comdlg32.lib comctl32.lib shlwapi.lib shell32.lib
+    delayimp.lib          # required for /DELAYLOAD
 )
 
+# ── Delay-load ORT and GPU-provider DLLs ─────────────────────────────────────
+# With delay-loading these DLLs are NOT resolved at .ax load time; they are
+# resolved on first call.  This lets DllInit (dllmain.cpp) call
+# AddDllDirectory() first, which is what allows the filter to work as a
+# COM-registered filter even when onnxruntime.dll is not on the system PATH.
+# Without this, regsvr32 / COM would fail with CO_E_ERRORINDLL (error 126).
+set(_DELAYLOAD_FLAGS
+    "/DELAYLOAD:onnxruntime.dll"
+    "/DELAYLOAD:onnxruntime_providers_shared.dll"
+    "/DELAYLOAD:onnxruntime_providers_cuda.dll"
+    "/DELAYLOAD:onnxruntime_providers_tensorrt.dll"
+    "/DELAYLOAD:directml.dll"
+)
+string(JOIN " " _DELAYLOAD_STR ${_DELAYLOAD_FLAGS})
+
 set_target_properties(3Deflatten PROPERTIES
-    LINK_FLAGS "/DEF:\"${CMAKE_SOURCE_DIR}/src/3Deflatten.def\""
+    LINK_FLAGS "/DEF:\"${CMAKE_SOURCE_DIR}/src/3Deflatten.def\" ${_DELAYLOAD_STR}"
 )
 
 # ── Copy runtime DLLs next to the .ax ─────────────────────────────────────────
