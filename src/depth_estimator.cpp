@@ -136,92 +136,201 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 }
 
 // ── BuildSessionOptions ───────────────────────────────────────────────────────
-// Probe whether CUDA runtime DLLs are present on this machine at all.
-// This avoids a hard crash / long timeout when CUDA EP is compiled in
-// but the user has no NVIDIA driver installed.
-#ifdef ORT_ENABLE_CUDA
-static bool CUDARuntimeAvailable() {
-    // Try loading the CUDA runtime DLL (ships with NVIDIA driver >= 410.x).
-    // We don't need to call anything – presence alone is sufficient.
-    HMODULE h = LoadLibraryExW(L"nvcuda.dll", nullptr,
-                                LOAD_LIBRARY_AS_DATAFILE);
+
+// Returns the directory that contains this DLL.
+// Used to locate bundled provider DLLs (onnxruntime_providers_*.dll).
+static std::wstring GetDllDir() {
+    wchar_t path[MAX_PATH] = {};
+    HMODULE hm = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&GetDllDir), &hm);
+    if (hm) GetModuleFileNameW(hm, path, MAX_PATH);
+    wchar_t* sl = wcsrchr(path, L'\\');
+    if (!sl) sl = wcsrchr(path, L'/');
+    if (sl) *sl = L'\0';
+    return path;
+}
+
+// Quick probe: can we LoadLibrary the given DLL without actually running it?
+static bool DllPresent(const wchar_t* name) {
+    HMODULE h = LoadLibraryExW(name, nullptr, LOAD_LIBRARY_AS_DATAFILE);
     if (h) { FreeLibrary(h); return true; }
-    LOG_INFO("nvcuda.dll not found – CUDA EP will be skipped");
     return false;
 }
-#endif // ORT_ENABLE_CUDA
+
+// Probe for nvcuda.dll – presence means an NVIDIA driver (and CUDA runtime)
+// is installed. Required for both CUDA EP and TensorRT EP.
+static bool CudaDriverPresent() {
+    if (DllPresent(L"nvcuda.dll")) return true;
+    LOG_WARN("nvcuda.dll not found – CUDA/TRT EPs unavailable");
+    return false;
+}
+
+// Returns %LOCALAPPDATA%\3Deflatten\trt_engines as a UTF-8 string.
+// TRT compiles CUDA kernels on first use; the cache avoids that on subsequent
+// runs (first-run cost: 30-120 s on an RTX 2080 Ti for 1022x1022 input).
+static std::string TrtEngineCacheDir() {
+    wchar_t appdata[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, appdata))) {
+        std::wstring dir = std::wstring(appdata) + L"\\3Deflatten\\trt_engines";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        // Convert to narrow UTF-8 string (ORT TRT options take const char*)
+        int n = WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string out(n, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1, out.data(), n, nullptr, nullptr);
+        out.pop_back(); // remove null terminator
+        return out;
+    }
+    return ".\\trt_engines";
+}
 
 void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                                           std::wstring& outInfo) {
     m_sessionOpts = Ort::SessionOptions();
     m_sessionOpts.SetIntraOpNumThreads(4);
-    m_sessionOpts.SetGraphOptimizationLevel(
-        GraphOptimizationLevel::ORT_ENABLE_ALL);
+    m_sessionOpts.SetGraphOptimizationLevel(ORT_ENABLE_ALL);
     m_sessionOpts.EnableMemPattern();
     m_sessionOpts.EnableCpuMemArena();
 
+    // Returns true if the EP was successfully appended.
+    // On failure (DLL absent, CUDA not installed, ORT exception) returns false.
     auto tryEP = [&](GPUProvider ep) -> bool {
-        try {
-            if (ep == GPUProvider::CUDA) {
-#ifdef ORT_ENABLE_CUDA
-                // Runtime-probe first so we fail fast without ORT's own
-                // long timeout when nvcuda.dll is absent.
-                if (!CUDARuntimeAvailable()) return false;
+
+        // ── TensorRT ─────────────────────────────────────────────────────────
+        if (ep == GPUProvider::TensorRT) {
+#ifndef ORT_ENABLE_TENSORRT
+            LOG_INFO("TensorRT EP: not compiled in (build uses DirectML backend)");
+            return false;
+#else
+            if (!CudaDriverPresent()) return false;
+
+            // onnxruntime_providers_tensorrt.dll must be next to the .ax
+            std::wstring trtDll = GetDllDir() + L"\\onnxruntime_providers_tensorrt.dll";
+            if (!DllPresent(trtDll.c_str())) {
+                LOG_WARN("onnxruntime_providers_tensorrt.dll not found at '",
+                         std::string(trtDll.begin(), trtDll.end()),
+                         "' – TensorRT EP skipped");
+                return false;
+            }
+
+            try {
+                // Store the cache path so the member lives long enough for
+                // AppendExecutionProvider_TensorRT to copy it.
+                m_trtCacheDir = TrtEngineCacheDir();
+
+                OrtTensorRTProviderOptions trt{};
+                trt.device_id                 = 0;
+                trt.trt_max_workspace_size    = 2LL * 1024 * 1024 * 1024; // 2 GB
+                trt.trt_fp16_enable           = 1;   // ~2x faster on RTX cards
+                trt.trt_engine_cache_enable   = 1;
+                trt.trt_engine_cache_path     = m_trtCacheDir.c_str();
+                trt.trt_timing_cache_enable   = 1;
+                trt.trt_dump_subgraphs        = 0;
+                m_sessionOpts.AppendExecutionProvider_TensorRT(trt);
+
+                outInfo = L"NVIDIA TensorRT (FP16, engine cache: "
+                        + std::wstring(m_trtCacheDir.begin(), m_trtCacheDir.end())
+                        + L")";
+                LOG_INFO("Execution provider: TensorRT (FP16)");
+                LOG_INFO("  Engine cache: ", m_trtCacheDir);
+                LOG_WARN("  NOTE: first inference compiles TRT kernels (30-120 s). "
+                         "Subsequent runs use the cache and are fast.");
+                return true;
+            } catch (const Ort::Exception& e) {
+                LOG_WARN("TensorRT EP init failed: ", e.what());
+                return false;
+            }
+#endif // ORT_ENABLE_TENSORRT
+        }
+
+        // ── CUDA ─────────────────────────────────────────────────────────────
+        if (ep == GPUProvider::CUDA) {
+#ifndef ORT_ENABLE_CUDA
+            LOG_INFO("CUDA EP: not compiled in (build uses DirectML backend)");
+            return false;
+#else
+            if (!CudaDriverPresent()) return false;
+
+            std::wstring cudaDll = GetDllDir() + L"\\onnxruntime_providers_cuda.dll";
+            if (!DllPresent(cudaDll.c_str())) {
+                LOG_WARN("onnxruntime_providers_cuda.dll not found – CUDA EP skipped");
+                return false;
+            }
+
+            try {
                 OrtCUDAProviderOptions cuda{};
-                cuda.device_id                 = 0;
-                cuda.cudnn_conv_algo_search     = OrtCudnnConvAlgoSearchExhaustive;
-                cuda.do_copy_in_default_stream  = 1;
+                cuda.device_id                = 0;
+                cuda.cudnn_conv_algo_search    = OrtCudnnConvAlgoSearchExhaustive;
+                cuda.do_copy_in_default_stream = 1;
                 m_sessionOpts.AppendExecutionProvider_CUDA(cuda);
                 outInfo = L"NVIDIA CUDA";
-                LOG_INFO("Execution provider: CUDA (cuDNN exhaustive search)");
+                LOG_INFO("Execution provider: CUDA");
                 return true;
-#else
-                LOG_INFO("CUDA EP not compiled in – skipping");
+            } catch (const Ort::Exception& e) {
+                LOG_WARN("CUDA EP init failed: ", e.what());
                 return false;
-#endif
-            } else if (ep == GPUProvider::DirectML) {
-                // DirectML ships with Windows 10 1903+ (directml.dll).
-                // On older Windows it may be absent; probe before calling.
-                HMODULE hDML = LoadLibraryExW(L"directml.dll", nullptr,
-                                               LOAD_LIBRARY_AS_DATAFILE);
-                if (!hDML) {
-                    LOG_WARN("directml.dll not found - DirectML EP skipped");
-                    return false;
-                }
-                FreeLibrary(hDML);
-                // AppendExecutionProvider_DML() was removed in ORT 1.17+.
-                // Use the generic string-key API which works across all
-                // modern ORT versions.
-                m_sessionOpts.AppendExecutionProvider("DML",
-                    {{"device_id", "0"}});
+            }
+#endif // ORT_ENABLE_CUDA
+        }
+
+        // ── DirectML ─────────────────────────────────────────────────────────
+        if (ep == GPUProvider::DirectML) {
+#ifndef ORT_ENABLE_DML
+            LOG_INFO("DirectML EP: not compiled in (build uses GPU/CUDA backend)");
+            return false;
+#else
+            // directml.dll ships with Windows 10 1903+ or bundled next to the .ax
+            if (!DllPresent(L"directml.dll")) {
+                LOG_WARN("directml.dll not found – DirectML EP skipped");
+                return false;
+            }
+            try {
+                m_sessionOpts.AppendExecutionProvider("DML", {{"device_id", "0"}});
                 outInfo = L"DirectML (DX12 GPU)";
                 LOG_INFO("Execution provider: DirectML");
                 return true;
+            } catch (const Ort::Exception& e) {
+                LOG_WARN("DirectML EP init failed: ", e.what());
+                return false;
             }
-        } catch (const Ort::Exception& e) {
-            LOG_WARN("EP init failed (", ep == GPUProvider::CUDA ? "CUDA" : "DML",
-                     "): ", e.what());
+#endif // ORT_ENABLE_DML
         }
-        return false;
+
+        return false; // unknown EP
     };
 
+    // ── Explicit provider selection ───────────────────────────────────────────
+    // Walk down the fallback chain from the requested provider.
+    if (provider == GPUProvider::TensorRT) {
+        if (tryEP(GPUProvider::TensorRT)) return;
+        LOG_INFO("TensorRT requested but unavailable – trying CUDA");
+        provider = GPUProvider::CUDA;
+    }
     if (provider == GPUProvider::CUDA) {
-        if (!tryEP(GPUProvider::CUDA)) provider = GPUProvider::DirectML;
+        if (tryEP(GPUProvider::CUDA)) return;
+        LOG_INFO("CUDA requested but unavailable – trying DirectML");
+        provider = GPUProvider::DirectML;
     }
     if (provider == GPUProvider::DirectML) {
-        if (!tryEP(GPUProvider::DirectML)) provider = GPUProvider::CPU;
+        if (tryEP(GPUProvider::DirectML)) return;
+        LOG_INFO("DirectML requested but unavailable – falling back to CPU");
+        provider = GPUProvider::CPU;
     }
     if (provider == GPUProvider::CPU) {
         outInfo = L"CPU";
         LOG_INFO("Execution provider: CPU");
         return;
     }
-    if (provider == GPUProvider::Auto) {
-        if (tryEP(GPUProvider::CUDA))     return;  // fastest if available
-        if (tryEP(GPUProvider::DirectML)) return;  // DX12 GPU fallback
-        outInfo = L"CPU (fallback)";
-        LOG_INFO("Execution provider: CPU (auto fallback)");
-    }
+
+    // ── Auto: try best available in order ────────────────────────────────────
+    // Auto = 0, so we reach here only when provider == Auto from the start.
+    if (tryEP(GPUProvider::TensorRT)) return;
+    if (tryEP(GPUProvider::CUDA))     return;
+    if (tryEP(GPUProvider::DirectML)) return;
+    outInfo = L"CPU (auto fallback – no GPU EP available)";
+    LOG_INFO("Execution provider: CPU (auto fallback)");
 }
 
 // ── Estimate ─────────────────────────────────────────────────────────────────

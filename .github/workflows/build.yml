@@ -1,121 +1,176 @@
-#Based on template from: https://github.com/ThreeDeeJay/GitHub-Actions-build-templates/blob/main/Windows-CMake.yml
 name: Build
-
-env:
-  GH_TOKEN: ${{github.token}}
-  Branch: ${{github.ref_name}}
-  Artifacts: build/Release
-  Title: ${{github.event.repository.name}}
 
 on:
   push:
-    Branches: $Branch
+    branches: [ main, master ]
   pull_request:
-    Branches: $Branch
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  Build:
-    name: ${{matrix.Settings.Name}}-${{matrix.Configuration}}
-    runs-on: windows-2025
+  build:
+    name: ${{ matrix.name }}
+    runs-on: windows-latest
+
     strategy:
+      fail-fast: false
       matrix:
-        Configuration: [Release] #[Release, Debug]
-        Settings:
-#        - {
-#            Name: "Win32",
-#            Platform: "Win32",
-#            Architecture: "x86",
-#            Triplet: "x86-windows"
-#          }
-        - {
-            Name: "Win64",
-            Platform: "x64",
-            Architecture: "x64",
-            Triplet: "x64-windows"
-          }
+        include:
+          # ── DirectML backend (DirectML + CPU) ──────────────────────────────
+          # Works on any DX12 GPU (AMD / Intel / NVIDIA).
+          # Produces: Win64/3Deflatten_x64.ax + onnxruntime.dll + directml.dll
+          - name:           "x64 DirectML"
+            arch:           x64
+            cmake_arch:     x64
+            vcpkg_triplet:  x64-windows
+            ort_backend:    DirectML
+            ax_dir:         Win64
+            artifact_name:  3Deflatten_x64_DirectML
+
+          # ── DirectML backend – 32-bit (for 32-bit player hosts) ────────────
+          # CUDA/TRT are x64-only; x86 always uses DirectML or CPU.
+          - name:           "x86 DirectML"
+            arch:           x86
+            cmake_arch:     Win32
+            vcpkg_triplet:  x86-windows
+            ort_backend:    DirectML
+            ax_dir:         Win32
+            artifact_name:  3Deflatten_x86_DirectML
+
+          # ── GPU backend (TensorRT + CUDA + CPU) ────────────────────────────
+          # NVIDIA only.  Requires CUDA runtime + (optionally) TensorRT SDK
+          # installed on the user's machine at runtime.
+          # The build itself needs NO CUDA/TRT – only ORT headers + stubs.
+          # Produces: Win64_GPU/3Deflatten_x64.ax + onnxruntime.dll
+          #         + onnxruntime_providers_cuda.dll
+          #         + onnxruntime_providers_tensorrt.dll
+          #         + onnxruntime_providers_shared.dll
+          - name:           "x64 GPU (TensorRT+CUDA)"
+            arch:           x64
+            cmake_arch:     x64
+            vcpkg_triplet:  x64-windows
+            ort_backend:    GPU
+            ax_dir:         Win64_GPU
+            artifact_name:  3Deflatten_x64_GPU
+
     env:
       VCPKG_ROOT:            C:\vcpkg
-      VCPKG_DEFAULT_TRIPLET: ${{matrix.Settings.Triplet}}
-      VCPKG_INSTALLED_DIR:   ${{github.workspace}}\vcpkg_installed
+      VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
+      VCPKG_INSTALLED_DIR:   ${{ github.workspace }}\vcpkg_installed
       VCPKG_BINARY_SOURCES:  "clear;x-gha,readwrite"
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Clone repo and submodules
-      run: >
-        git
-        clone https://${{github.repository_owner}}:${{github.token}}@github.com/${{github.repository}}.git
-        "${{github.workspace}}"
-        --branch ${{env.Branch}}
-        --recurse-submodules
+      - name: Export Actions cache vars for vcpkg
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL',     process.env.ACTIONS_CACHE_URL     || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-    - name: Get current date, commit hash and count
-      run: |
-        echo "FirstCommitHash=$(git rev-list --max-parents=0 HEAD --first-parent)" >> $env:GITHUB_ENV
-        echo "CommitHash=$(git rev-parse HEAD)" >> $env:GITHUB_ENV
-        echo "CommitHashShort=$(git rev-parse --short=7 HEAD)" >> $env:GITHUB_ENV
-        echo "CommitCount=$(git rev-list --count HEAD)" >> $env:GITHUB_ENV
-        echo "CommitDate=$(git show -s --date=format:'%Y-%m-%d' --format=%cd)" >> $env:GITHUB_ENV
+      # FetchContent cache: ORT NuGet/zip + strmbase git clone.
+      # Keyed on CMakeLists hash so it invalidates when ORT version changes.
+      - name: Cache FetchContent downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\build\_deps
+          key:  fetchcontent-${{ matrix.ort_backend }}-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt') }}
+          save-always: true
 
-    - name: Cache CUDA
-      id: cache-cuda
-      uses: actions/cache@v5
-      with:
-        path: "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v10.1"
-        key: CUDA_V10_1
-    - name: Download CUDA
-      if: steps.cache-cuda.outputs.cache-hit != 'true'
-      run: |
-        curl --ssl-revoke-best-effort -L "https://developer.download.nvidia.com/compute/cuda/10.1/Prod/local_installers/cuda_10.1.243_426.00_win10.exe" -o "CUDA.exe"
-    - name: Install CUDA
-      if: steps.cache-cuda.outputs.cache-hit != 'true'
-      run: |
-        Start-Process -Wait "CUDA.exe" -ArgumentList "-s"
-    - name: Set CUDA path
-      run: |
-        echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v10.1" >> $env:GITHUB_ENV
-        echo "CUDA_PATH_V10_1=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v10.1" >> $env:GITHUB_ENV
+      # vcpkg cache (currently only directxtk)
+      - name: Cache vcpkg installed packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg_installed
+          key:  vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ matrix.vcpkg_triplet }}-
+          save-always: true
 
-    - name: Cache cuDNN
-      id: cache-cudnn
-      uses: actions/cache@v5
-      with:
-        path: "C:\\Program Files\\NVIDIA\\CUDNN\\v9.19"
-        key: CUDNN_V9_19
-    - name: Download cuDNN
-      if: steps.cache-cudnn.outputs.cache-hit != 'true'
-      run: |
-        curl --ssl-revoke-best-effort -L "https://developer.download.nvidia.com/compute/cudnn/9.19.1/local_installers/cudnn_9.19.1_windows_x86_64.exe" -o "cuDNN.exe"
-    - name: Install cuDNN
-      if: steps.cache-cudnn.outputs.cache-hit != 'true'
-      run: |
-        Start-Process -Wait "cuDNN.exe" -ArgumentList "-s"
+      - name: Install vcpkg dependencies
+        run: >
+          C:\vcpkg\vcpkg.exe install
+          --triplet ${{ matrix.vcpkg_triplet }}
+          --no-print-usage
+          --x-install-root="${{ github.workspace }}\vcpkg_installed"
+        shell: cmd
+        working-directory: ${{ github.workspace }}
 
-    - name: Export Actions cache env vars for vcpkg
-      uses: actions/github-script@v7
-      with:
-        script: |
-          core.exportVariable('ACTIONS_CACHE_URL',     process.env.ACTIONS_CACHE_URL     || '');
-          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - name: Set up MSVC (${{ matrix.arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
 
-    - name: Cache vcpkg installed packages
-      uses: actions/cache@v4
-      with:
-        path: ${{ github.workspace }}\vcpkg_installed
-        key:  vcpkg-${{matrix.Settings.Triplet}}-${{ hashFiles('vcpkg.json') }}
-        restore-keys: |
-          vcpkg-${{matrix.Settings.Triplet}}-
-        save-always: true
+      - name: Configure CMake
+        run: >
+          cmake -B build
+          -A ${{ matrix.cmake_arch }}
+          -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
+          "-DVCPKG_INSTALLED_DIR=${{ github.workspace }}\vcpkg_installed"
+          -DCMAKE_BUILD_TYPE=Release
+          -DORT_BACKEND=${{ matrix.ort_backend }}
+        shell: cmd
 
-    - name: Install vcpkg dependencies
-      run: >
-        C:\vcpkg\vcpkg.exe install
-        --triplet ${{matrix.Settings.Triplet}}
-        --no-print-usage
-        --x-install-root="${{github.workspace}}\vcpkg_installed"
-      shell: cmd
-      working-directory: ${{ github.workspace }}
+      - name: Build
+        run: cmake --build build --config Release --parallel
+        shell: cmd
 
-    - name: List files
-      run: ls -R
+      # Upload the entire output directory (includes all runtime DLLs).
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: build/${{ matrix.ax_dir }}/
+          if-no-files-found: error
+
+  # ── Package job: combine all three artifacts into one release zip ────────────
+  package:
+    name: Package release
+    needs: build
+    runs-on: windows-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download x64 DirectML
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x64_DirectML
+          path: release\Win64
+
+      - name: Download x86 DirectML
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x86_DirectML
+          path: release\Win32
+
+      - name: Download x64 GPU (TensorRT+CUDA)
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x64_GPU
+          path: release\Win64_GPU
+
+      - name: Assemble release layout
+        run: |
+          copy README.md                 release\
+          copy LICENSE                   release\
+          copy scripts\register.bat      release\
+          copy scripts\unregister.bat    release\
+          copy scripts\download_model.py release\
+        shell: cmd
+
+      - name: Create release zip
+        run: |
+          powershell Compress-Archive -Path release\* -DestinationPath 3Deflatten-release.zip
+        shell: cmd
+
+      - name: Upload release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3Deflatten-release
+          path: 3Deflatten-release.zip

@@ -5,13 +5,15 @@
 #include <string>
 #include <vector>
 #include <memory>
-// vcpkg onnxruntime header – try both install layouts
-#if __has_include(<onnxruntime/core/session/onnxruntime_cxx_api.h>)
-#  include <onnxruntime/core/session/onnxruntime_cxx_api.h>
-#elif __has_include(<onnxruntime_cxx_api.h>)
+// ORT header – the NuGet (and GitHub release zip) puts headers directly at
+// the include root.  vcpkg nests them under onnxruntime/core/session/.
+// We try both so either layout works.
+#if __has_include(<onnxruntime_cxx_api.h>)
 #  include <onnxruntime_cxx_api.h>
+#elif __has_include(<onnxruntime/core/session/onnxruntime_cxx_api.h>)
+#  include <onnxruntime/core/session/onnxruntime_cxx_api.h>
 #else
-#  error "Cannot find onnxruntime_cxx_api.h. Is onnxruntime installed via vcpkg?"
+#  error "onnxruntime_cxx_api.h not found. Check CMakeLists ORT_BACKEND / include path."
 #endif
 #include "ideflatten.h"
 
@@ -63,6 +65,7 @@ private:
     std::unique_ptr<Ort::Session> m_session;
 
     std::wstring m_modelPath;
+    std::string  m_trtCacheDir;  // UTF-8 path; kept alive for OrtTensorRTProviderOptions
     bool         m_loaded        = false;
     int          m_estimateCount = 0;
 

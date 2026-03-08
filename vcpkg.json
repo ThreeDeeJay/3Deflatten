@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "DirectShow 2D-to-3D AI depth filter",
   "dependencies": [
-    "directxtk",
-    "onnxruntime-gpu"
+    "directxtk"
   ]
 }
