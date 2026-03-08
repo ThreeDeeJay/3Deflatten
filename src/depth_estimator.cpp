@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <shlobj.h>
+#include <winreg.h>
 
 constexpr float DepthEstimator::MEAN[3];
 constexpr float DepthEstimator::STD[3];
@@ -137,86 +138,185 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 
 // ── BuildSessionOptions ───────────────────────────────────────────────────────
 
-// Returns the directory that contains this DLL.
-// Used to locate bundled provider DLLs (onnxruntime_providers_*.dll).
-static std::wstring GetDllDir() {
+// Returns the directory that contains this DLL (.ax file).
+// __declspec(noinline) prevents ICF / inlining which would corrupt the
+// address used by GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS.
+__declspec(noinline) static std::wstring GetDllDir() {
     wchar_t path[MAX_PATH] = {};
     HMODULE hm = nullptr;
-    GetModuleHandleExW(
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&GetDllDir), &hm);
-    if (hm) GetModuleFileNameW(hm, path, MAX_PATH);
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&GetDllDir), &hm) || !hm) {
+        // Fallback: look up the registered InprocServer32 path for our CLSID.
+        // This handles the case where PotPlayer copies the .ax to its own
+        // directory but the companion DLLs live in the original install path.
+        return {};  // caller handles empty case
+    }
+    GetModuleFileNameW(hm, path, MAX_PATH);
     wchar_t* sl = wcsrchr(path, L'\\');
     if (!sl) sl = wcsrchr(path, L'/');
     if (sl) *sl = L'\0';
     return path;
 }
 
-// Probe whether a DLL can be fully loaded (all its own dependencies resolved).
-// LOAD_LIBRARY_AS_DATAFILE only maps the file without resolving imports, so it
-// succeeds even when a DLL's dependencies are missing.  We need a real load to
-// confirm the DLL is actually usable.
-// Returns: 0 = not found, ERROR_MOD_NOT_FOUND(126) = found but deps missing, S_OK = ok
+// Read the InprocServer32 path for our filter CLSID from the registry.
+// PotPlayer (and some other hosts) copy the .ax to their own directory when
+// registering it as an external filter. The registry retains the original
+// path, which is where onnxruntime.dll and the model files actually live.
+static std::wstring GetRegisteredDllDir() {
+    // CLSID_3Deflatten = {4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F}
+    const wchar_t* key =
+        L"CLSID\\{4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F}\\InprocServer32";
+    wchar_t regPath[MAX_PATH] = {};
+    DWORD cb = sizeof(regPath);
+    if (RegGetValueW(HKEY_CLASSES_ROOT, key, nullptr,
+                     RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                     nullptr, regPath, &cb) != ERROR_SUCCESS) {
+        RegGetValueW(HKEY_CLASSES_ROOT, key, nullptr,
+                     RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY,
+                     nullptr, regPath, &cb);
+    }
+    if (!regPath[0]) return {};
+    wchar_t* sl = wcsrchr(regPath, L'\\');
+    if (sl) *sl = L'\0';
+    return regPath;
+}
+
+// Probe whether a DLL can be fully loaded with all its dependencies resolved.
+// LOAD_LIBRARY_AS_DATAFILE succeeds even when deps are missing, so we need a
+// real load.  IMPORTANT: LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR requires an ABSOLUTE
+// path -- using it with a bare DLL name causes ERROR_INVALID_PARAMETER (87).
+// We use it only when path contains a directory separator.
 static DWORD DllLoadable(const wchar_t* path) {
-    HMODULE h = LoadLibraryExW(path, nullptr,
-        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
-        LOAD_LIBRARY_SEARCH_USER_DIRS    |
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+    bool isAbsPath = (wcschr(path, L'\\') || wcschr(path, L'/'));
+    DWORD flags = isAbsPath
+        ? (LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+           LOAD_LIBRARY_SEARCH_USER_DIRS    |
+           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)
+        : 0;  // bare name: use default Windows search order
+    HMODULE h = LoadLibraryExW(path, nullptr, flags);
     if (h) { FreeLibrary(h); return 0; }
     return GetLastError();
 }
 
-// Probe for nvcuda.dll (NVIDIA driver).  Also checks that the CUDA *runtime*
-// version required by this ORT build is available.
-// ORT 1.21 GPU build requires CUDA 12.x (cudart64_12.dll).
+// Probe a single named DLL, log its status as INFO.  Used for the full
+// dependency scan logged when CUDA/TRT init begins.
+static bool ProbeDep(const wchar_t* name, const wchar_t* purpose) {
+    DWORD e = DllLoadable(name);
+    if (e == 0) {
+        LOG_INFO("  [OK]     ", std::wstring(name), "  (", std::wstring(purpose), ")");
+        return true;
+    }
+    // Error 2 / 126 / 127 / 193 are all "not found or wrong arch"
+    LOG_WARN("  [MISSING] ", std::wstring(name), "  (", std::wstring(purpose),
+             ")  error=", e);
+    return false;
+}
+
+// Log every DLL that the CUDA and TRT EPs depend on, with OK/MISSING status.
+// Called once before attempting EP init so the user always sees the full
+// dependency picture, not just the first missing piece.
+static void LogCudaDependencies(bool includeTrt) {
+    LOG_INFO("--- CUDA/TRT dependency scan ---");
+    LOG_INFO("  ORT 1.21 GPU build requirements:");
+    LOG_INFO("    CUDA 12.x runtime  (install: https://developer.nvidia.com/cuda-12-6-0-download-archive)");
+    LOG_INFO("    cuDNN 9.x          (install: https://developer.nvidia.com/cudnn)");
+    if (includeTrt)
+        LOG_INFO("    TensorRT 10.x      (install: https://developer.nvidia.com/tensorrt)");
+    LOG_INFO("  NOTE: CUDA 13.x ships cudart64_13.dll which is NOT compatible.");
+    LOG_INFO("        Install CUDA 12.x alongside 13.x -- multiple versions coexist.");
+    LOG_INFO("  NOTE: Driver 527+ required for CUDA 12. Driver 520+ for TRT 10.");
+    LOG_INFO("");
+
+    // NVIDIA driver (kernel proxy -- loaded by nvcuda.dll consumers)
+    ProbeDep(L"nvcuda.dll",       L"NVIDIA driver kernel proxy -- must be in System32");
+
+    // CUDA 12 runtime -- THE most common missing piece
+    bool hasCuda12 = ProbeDep(L"cudart64_12.dll", L"CUDA 12.x runtime");
+    if (!hasCuda12) {
+        // Detect other CUDA versions so we can tell the user exactly what they have
+        if (DllLoadable(L"cudart64_13.dll") == 0)
+            LOG_WARN("  -> cudart64_13.dll found: you have CUDA 13.x. "
+                     "ORT 1.21 needs CUDA 12.x. Install CUDA 12.6.");
+        else if (DllLoadable(L"cudart64_110.dll") == 0)
+            LOG_WARN("  -> cudart64_110.dll found: you have CUDA 11.x. "
+                     "ORT 1.21 needs CUDA 12.x. Upgrade to CUDA 12.6.");
+        else
+            LOG_WARN("  -> No CUDA runtime found at all. Install CUDA 12.6.");
+    }
+
+    // cuBLAS 12
+    ProbeDep(L"cublas64_12.dll",   L"cuBLAS 12 -- in CUDA Toolkit bin");
+    ProbeDep(L"cublasLt64_12.dll", L"cuBLAS-Lt 12 -- in CUDA Toolkit bin");
+
+    // cuDNN 9 -- often the missing piece after CUDA itself
+    bool hasCudnn9 = ProbeDep(L"cudnn64_9.dll", L"cuDNN 9.x main library");
+    if (!hasCudnn9) {
+        // cuDNN 9 also ships as split libraries on some installs
+        ProbeDep(L"cudnn_ops64_9.dll", L"cuDNN 9.x ops -- alternative layout");
+    }
+
+    // cuFFT (11 = part of CUDA 12 toolkit)
+    ProbeDep(L"cufft64_11.dll",    L"cuFFT 11 -- in CUDA Toolkit bin");
+
+    if (includeTrt) {
+        LOG_INFO("");
+        LOG_INFO("  TensorRT 10.x libraries (install from https://developer.nvidia.com/tensorrt):");
+        ProbeDep(L"nvinfer_10.dll",     L"TensorRT 10 inference engine");
+        ProbeDep(L"nvonnxparser_10.dll",L"TensorRT 10 ONNX parser");
+    }
+    LOG_INFO("--- end dependency scan ---");
+}
+
+// Probe for nvcuda.dll + CUDA 12 runtime.  Returns false and logs clearly if
+// either is absent or the wrong version.
 static bool CudaDriverPresent() {
-    // nvcuda.dll = kernel-mode driver proxy, present if any NVIDIA driver installed
     DWORD e = DllLoadable(L"nvcuda.dll");
     if (e != 0) {
-        LOG_WARN("nvcuda.dll not loadable (error ", e, ") – no NVIDIA driver detected. "
-                 "CUDA/TRT EPs unavailable.");
+        LOG_WARN("nvcuda.dll not loadable (error ", e, ") – no NVIDIA driver detected.");
+        if (e == 87)
+            LOG_WARN("  (Error 87 = invalid parameter -- this is a 3Deflatten internal bug; "
+                     "please report it.)");
         return false;
     }
-    // cudart64_12.dll = CUDA 12.x runtime, required by ORT 1.21 GPU build.
-    // CUDA 11.x ships cudart64_110.dll which is NOT compatible.
-    e = DllLoadable(L"cudart64_12.dll");
-    if (e != 0) {
-        // Try generic cudart64 (older naming)
-        e = DllLoadable(L"cudart64.dll");
-    }
-    if (e != 0) {
-        LOG_WARN("CUDA 12.x runtime (cudart64_12.dll) not found (error ", e, ").");
-        LOG_WARN("  This ORT build requires CUDA 12.x. You appear to have an older version.");
-        LOG_WARN("  Download: https://developer.nvidia.com/cuda-downloads");
-        LOG_WARN("  Minimum driver for CUDA 12: 527.41 (Windows). Your driver: check Device Manager.");
+    if (DllLoadable(L"cudart64_12.dll") != 0) {
+        if (DllLoadable(L"cudart64_13.dll") == 0)
+            LOG_WARN("CUDA 13.x detected (cudart64_13.dll) but ORT 1.21 needs CUDA 12.x. "
+                     "Install CUDA 12.6 from https://developer.nvidia.com/cuda-12-6-0-download-archive");
+        else if (DllLoadable(L"cudart64_110.dll") == 0)
+            LOG_WARN("CUDA 11.x detected (cudart64_110.dll) but ORT 1.21 needs CUDA 12.x. "
+                     "Install CUDA 12.6.");
+        else
+            LOG_WARN("cudart64_12.dll not found. Install CUDA 12.6 Toolkit.");
         return false;
     }
     return true;
 }
 
-// Probe a provider DLL for loadability and log a clear diagnostic on failure.
-// name = short name for logging, path = full path to the DLL.
+// Probe a provider DLL with full-load check, log result with detail on error 126.
 static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
     DWORD e = DllLoadable(path.c_str());
     if (e == 0) return true;
-    if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_MOD_NOT_FOUND) {
-        LOG_WARN(name, " not found at '",
-                 std::string(path.begin(), path.end()), "'");
-    } else if (e == 126) { // ERROR_MOD_NOT_FOUND when file exists = dependency missing
-        LOG_WARN(name, " found but its dependencies could not be loaded (error 126).");
-        if (std::wstring(path).find(L"tensorrt") != std::wstring::npos) {
-            LOG_WARN("  TensorRT runtime is not installed or is the wrong version.");
-            LOG_WARN("  ORT 1.21 requires TensorRT 10.x + CUDA 12.x + driver >= 520.");
-            LOG_WARN("  Driver 426.06 is too old for TensorRT -- minimum is ~520.61.");
-            LOG_WARN("  Download TensorRT: https://developer.nvidia.com/tensorrt");
-        } else {
-            LOG_WARN("  A required dependency (cuDNN, CUDA runtime, etc.) is missing.");
-            LOG_WARN("  ORT 1.21 GPU requires: CUDA 12.x + cuDNN 9.x + driver >= 527.");
-            LOG_WARN("  Download cuDNN: https://developer.nvidia.com/cudnn");
+    std::string narrow(path.begin(), path.end());
+    if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) {
+        LOG_WARN(name, " not found at '", narrow, "'");
+        // Suggest the registered install dir if it differs from current DLL dir
+        std::wstring regDir = GetRegisteredDllDir();
+        std::wstring dllDir = GetDllDir();
+        if (!regDir.empty() && _wcsicmp(regDir.c_str(), dllDir.c_str()) != 0) {
+            LOG_WARN("  DLL dir = ", dllDir);
+            LOG_WARN("  Registry install dir = ", regDir);
+            LOG_WARN("  Hint: copy onnxruntime*.dll and directml.dll to the registry dir,");
+            LOG_WARN("  OR move the .ax file back to its original install directory.");
         }
+    } else if (e == 126) {
+        LOG_WARN(name, " exists but failed to load (error 126 = missing dependencies).");
+        bool isTrt = (std::wstring(path).find(L"tensorrt") != std::wstring::npos);
+        LOG_WARN("  Running dependency scan to identify what is missing:");
+        LogCudaDependencies(isTrt);
     } else {
-        LOG_WARN(name, " load failed with error ", e);
+        LOG_WARN(name, " load failed error=", e, " path='", narrow, "'");
     }
     return false;
 }
@@ -257,6 +357,7 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
             LOG_INFO("TensorRT EP: not compiled in (build uses DirectML backend)");
             return false;
 #else
+            LogCudaDependencies(/*includeTrt=*/true);
             if (!CudaDriverPresent()) return false;
 
             // onnxruntime_providers_tensorrt.dll must be next to the .ax
@@ -299,6 +400,7 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
             LOG_INFO("CUDA EP: not compiled in (build uses DirectML backend)");
             return false;
 #else
+            LogCudaDependencies(/*includeTrt=*/false);
             if (!CudaDriverPresent()) return false;
 
             std::wstring cudaDll = GetDllDir() + L"\\onnxruntime_providers_cuda.dll";
