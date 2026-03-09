@@ -224,36 +224,33 @@ static bool ProbeDep(const wchar_t* name, const wchar_t* purpose) {
 // dependency picture, not just the first missing piece.
 static void LogCudaDependencies(bool includeTrt) {
     LOG_INFO("--- CUDA/TRT dependency scan ---");
-    LOG_INFO("  ORT 1.21 GPU build requirements:");
-    LOG_INFO("    CUDA 12.x runtime  (install: https://developer.nvidia.com/cuda-12-6-0-download-archive)");
+    LOG_INFO("  ORT 1.24.x GPU build requirements:");
+    LOG_INFO("    CUDA 13.x runtime  (install: https://developer.nvidia.com/cuda-downloads)");
     LOG_INFO("    cuDNN 9.x          (install: https://developer.nvidia.com/cudnn)");
     if (includeTrt)
         LOG_INFO("    TensorRT 10.x      (install: https://developer.nvidia.com/tensorrt)");
-    LOG_INFO("  NOTE: ORT 1.21 GPU build requires CUDA 12.x (cudart64_12.dll).");
-    LOG_INFO("        CUDA 13.x ships cudart64_13.dll and is NOT compatible with this build.");
-    LOG_INFO("  NOTE: Driver 527+ required for CUDA 12. Driver 520+ for TRT 10.");
+    LOG_INFO("  NOTE: ORT 1.24.x GPU build requires CUDA 13.x (cudart64_13.dll).");
+    LOG_INFO("        CUDA 12.x ships cudart64_12.dll and is NOT compatible with this build.");
+    LOG_INFO("  NOTE: Driver 545+ required for CUDA 13.");
     LOG_INFO("");
 
     // NVIDIA driver (kernel proxy -- loaded by nvcuda.dll consumers)
     ProbeDep(L"nvcuda.dll",       L"NVIDIA driver kernel proxy -- must be in System32");
 
-    // CUDA 12 runtime -- THE most common missing piece
-    bool hasCuda12 = ProbeDep(L"cudart64_12.dll", L"CUDA 12.x runtime");
-    if (!hasCuda12) {
-        // Detect other CUDA versions so we can tell the user exactly what they have
-        if (DllLoadable(L"cudart64_13.dll") == 0)
-            LOG_WARN("  -> CUDA 13.x detected. ORT 1.21 requires CUDA 12.x. "
-                     "Install CUDA 12.6 from https://developer.nvidia.com/cuda-12-6-0-download-archive");
-        else if (DllLoadable(L"cudart64_110.dll") == 0)
-            LOG_WARN("  -> cudart64_110.dll found: you have CUDA 11.x. "
-                     "ORT 1.21 needs CUDA 12.x. Upgrade to CUDA 12.6.");
+    // CUDA 13 runtime -- required by ORT 1.24.x GPU build
+    bool hasCuda13 = ProbeDep(L"cudart64_13.dll", L"CUDA 13.x runtime");
+    if (!hasCuda13) {
+        if (DllLoadable(L"cudart64_12.dll") == 0)
+            LOG_WARN("  -> CUDA 12.x detected. ORT 1.24.x requires CUDA 13.x. "
+                     "Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
         else
-            LOG_WARN("  -> No CUDA runtime found at all. Install CUDA 12.6.");
+            LOG_WARN("  -> No CUDA 13 runtime found at all. "
+                     "Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
     }
 
-    // cuBLAS 12
-    ProbeDep(L"cublas64_12.dll",   L"cuBLAS 12 -- in CUDA Toolkit bin");
-    ProbeDep(L"cublasLt64_12.dll", L"cuBLAS-Lt 12 -- in CUDA Toolkit bin");
+    // cuBLAS 13
+    ProbeDep(L"cublas64_13.dll",   L"cuBLAS 13 -- in CUDA Toolkit bin");
+    ProbeDep(L"cublasLt64_13.dll", L"cuBLAS-Lt 13 -- in CUDA Toolkit bin");
 
     // cuDNN 9 -- often the missing piece after CUDA itself
     bool hasCudnn9 = ProbeDep(L"cudnn64_9.dll", L"cuDNN 9.x main library");
@@ -262,8 +259,8 @@ static void LogCudaDependencies(bool includeTrt) {
         ProbeDep(L"cudnn_ops64_9.dll", L"cuDNN 9.x ops -- alternative layout");
     }
 
-    // cuFFT (11 = part of CUDA 12 toolkit)
-    ProbeDep(L"cufft64_11.dll",    L"cuFFT 11 -- in CUDA Toolkit bin");
+    // cuFFT (12 = part of CUDA 13 toolkit)
+    ProbeDep(L"cufft64_12.dll",    L"cuFFT 12 -- in CUDA Toolkit bin");
 
     if (includeTrt) {
         LOG_INFO("");
@@ -322,6 +319,21 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
         bool isTrt = (std::wstring(path).find(L"tensorrt") != std::wstring::npos);
         LOG_WARN("  Running dependency scan to identify what is missing:");
         LogCudaDependencies(isTrt);
+        if (isTrt) {
+            LOG_WARN("  TIP: Copy ALL DLLs from TensorRT lib\\ folder next to the .ax,");
+            LOG_WARN("       not just nvinfer_10.dll -- TRT has sub-dependencies too.");
+            LOG_WARN("       Or ensure TRT_LIB_PATH was set before launching the host app.");
+        }
+    } else if (e == 1114) {
+        // ERROR_DLL_INIT_FAILED: DLL loaded but its init (DllMain) threw.
+        // For CUDA/TRT providers this almost always means a CUDA version mismatch.
+        LOG_WARN(name, " load failed error=1114 (DLL init failed).");
+        LOG_WARN("  This almost always means a CUDA version mismatch:");
+        LOG_WARN("  ORT 1.24.x GPU build requires CUDA 13.x (cudart64_13.dll).");
+        LOG_WARN("  If you have CUDA 12.x, upgrade to CUDA 13:");
+        LOG_WARN("    https://developer.nvidia.com/cuda-downloads");
+        LOG_WARN("  If you have CUDA 13.x, ensure the DLL search path includes");
+        LOG_WARN("    the CUDA 13 bin\\ folder before launching the host app.");
     } else {
         LOG_WARN(name, " load failed error=", e, " path='", narrow, "'");
     }
@@ -402,12 +414,13 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 LOG_WARN("TensorRT EP init failed: ", e.what());
                 LOG_WARN("  Common causes:");
                 LOG_WARN("    1. TRT version does not match CUDA version.");
-                LOG_WARN("       TRT 10.7.x needs CUDA 12.6  |  TRT 10.15.x needs CUDA 12.9");
-                LOG_WARN("       Check zip filename: TensorRT-10.x.y.z.Windows.amd64.cuda-12.N.zip");
-                LOG_WARN("    2. Replaced onnxruntime*.dll with a version != 1.21.0.");
-                LOG_WARN("       The .ax is linked against ORT 1.21.0 ABI. Other versions crash.");
-                LOG_WARN("    3. nvinfer_10.dll / nvonnxparser_10.dll missing from .ax folder");
-                LOG_WARN("       or from TRT_LIB_PATH directory.");
+                LOG_WARN("       Check zip filename for the cuda-XX.N suffix.");
+                LOG_WARN("       TRT 10.x must match the CUDA 13.x minor you have installed.");
+                LOG_WARN("    2. Replaced onnxruntime*.dll with a version != " ORT_VER_STR ".");
+                LOG_WARN("       The .ax is ABI-linked to ORT " ORT_VER_STR ". Other versions crash.");
+                LOG_WARN("    3. nvinfer_10.dll / nvonnxparser_10.dll missing or their deps missing.");
+                LOG_WARN("       Ensure TRT_LIB_PATH was set before launching the host app,");
+                LOG_WARN("       or copy all DLLs from TensorRT lib\\ next to the .ax file.");
                 return false;
             }
 #endif // ORT_ENABLE_TENSORRT

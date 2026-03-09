@@ -3,6 +3,7 @@
 #include "logger.h"
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 #ifdef USE_PRECOMPILED_SHADERS
@@ -164,7 +165,10 @@ HRESULT StereoRenderer::InitGPU() {
 }
 
 HRESULT StereoRenderer::CreateShaders() {
+    using Clock = std::chrono::steady_clock;
 #ifdef USE_PRECOMPILED_SHADERS
+    LOG_INFO("Loading precompiled shaders (FXC offline compilation)...");
+    auto t0 = Clock::now();
     HRESULT hr = m_dev->CreateVertexShader(
         g_vsStereoWarp, sizeof(g_vsStereoWarp), nullptr, &m_vs);
     if (FAILED(hr)) return hr;
@@ -175,9 +179,15 @@ HRESULT StereoRenderer::CreateShaders() {
         {"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0, 0,D3D11_INPUT_PER_VERTEX_DATA,0},
         {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0, 8,D3D11_INPUT_PER_VERTEX_DATA,0},
     };
-    return m_dev->CreateInputLayout(
+    hr = m_dev->CreateInputLayout(
         ied, ARRAYSIZE(ied), g_vsStereoWarp, sizeof(g_vsStereoWarp), &m_il);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+    LOG_INFO("Precompiled shaders loaded in ", ms, " ms");
+    return hr;
 #else
+    LOG_INFO("Compiling shaders at runtime via D3DCompile (no precompiled .h found)...");
+    LOG_INFO("  This may take a few seconds on first run.");
+    auto t0 = Clock::now();
     ComPtr<ID3DBlob> vsBlob, psBlob, err;
     HRESULT hr = D3DCompile(kShaderSrc, strlen(kShaderSrc),
         "stereo_warp.hlsl", nullptr, nullptr,
@@ -203,9 +213,12 @@ HRESULT StereoRenderer::CreateShaders() {
         {"POSITION",0,DXGI_FORMAT_R32G32_FLOAT,0, 0,D3D11_INPUT_PER_VERTEX_DATA,0},
         {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0, 8,D3D11_INPUT_PER_VERTEX_DATA,0},
     };
-    return m_dev->CreateInputLayout(
+    hr = m_dev->CreateInputLayout(
         ied, ARRAYSIZE(ied),
         vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_il);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+    LOG_INFO("Shaders compiled in ", ms, " ms");
+    return hr;
 #endif
 }
 

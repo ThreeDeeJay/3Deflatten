@@ -5,22 +5,19 @@
 Checks GPU runtime support, guides you through installing missing dependencies,
 and downloads ONNX depth estimation models.
 
+Detection logic mirrors the .ax filter exactly:
+  1. Environment variables (inherited at process-creation time)
+  2. Registry keys written by installers
+  3. Recursive filesystem scan of default install paths
+  4. DLLs already bundled next to the .ax file
+
 Usage:
     python Setup.py              -- interactive menu
     python Setup.py --check      -- diagnostics only, no prompts
     python Setup.py --models     -- model download only
     python Setup.py --model <id> -- download specific model (0-6)
 """
-import sys
-import os
-import io
-import ctypes
-import winreg
-import pathlib
-import argparse
-import urllib.request
-import hashlib
-import subprocess
+import sys, os, io, winreg, pathlib, argparse, urllib.request, hashlib
 
 # Force UTF-8 output (Windows console may default to cp1252)
 if hasattr(sys.stdout, "reconfigure"):
@@ -34,11 +31,19 @@ BANNER = """
   3Deflatten  --  Setup & Diagnostics
 ================================================================="""
 
+# ORT version string bundled in the current release
+ORT_VERSION = "1.24.3"
+# CUDA major version required by this ORT build
+CUDA_MAJOR   = 13
+CUDA_RT_DLL  = f"cudart64_{CUDA_MAJOR}.dll"     # cudart64_13.dll
+CUBLAS_DLL   = f"cublas64_{CUDA_MAJOR}.dll"
+CUBLASLT_DLL = f"cublasLt64_{CUDA_MAJOR}.dll"
+CUFFT_DLL    = "cufft64_12.dll"                 # cuFFT name in CUDA 13 toolkit
+
 # ---------------------------------------------------------------------------
 # Model catalogue
 # ---------------------------------------------------------------------------
 MODELS = [
-    # (id, display_name, filename, url, sha256_or_None, size_mb)
     (0, "Depth Anything V2 Small  (fast,  ~80 MB)",
         "depth_anything_v2_small.onnx",
         "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx",
@@ -71,375 +76,560 @@ MODELS = [
 
 
 # ---------------------------------------------------------------------------
-# Diagnostic helpers
+# Filesystem helpers  (mirror the filter's RecursiveFindAndAdd logic)
 # ---------------------------------------------------------------------------
 
-def find_dll_on_path(name: str) -> str | None:
-    """Search DLL search path for name; return full path or None."""
-    import ctypes.util
-    # Try LoadLibraryExW with LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
-    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS = 0x1000
-    h = ctypes.windll.kernel32.LoadLibraryExW(name, None, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)
-    if h:
-        buf = ctypes.create_unicode_buffer(512)
-        ctypes.windll.kernel32.GetModuleFileNameW(h, buf, 512)
-        ctypes.windll.kernel32.FreeLibrary(h)
-        return buf.value
+# Setup.py lives at <root>/Setup.py  (same level as Win32/ Win64/ Win64_GPU/)
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+
+# The three release subdirectories, ordered by preference
+RELEASE_DIRS = [
+    SCRIPT_DIR / "Win64_GPU",
+    SCRIPT_DIR / "Win64",
+    SCRIPT_DIR / "Win32",
+    SCRIPT_DIR,
+]
+
+
+def find_file_recursive(base: str | pathlib.Path,
+                        filename: str,
+                        max_depth: int = 6) -> pathlib.Path | None:
+    """Walk *base* up to *max_depth* levels looking for *filename*.
+    Matches the filter's RecursiveFindAndAdd() behaviour."""
+    base = pathlib.Path(base)
+    if not base.exists():
+        return None
+    fname_lower = filename.lower()
+    for root, dirs, files in os.walk(base):
+        depth = len(pathlib.Path(root).relative_to(base).parts)
+        if depth >= max_depth:
+            dirs.clear()
+            continue
+        for f in files:
+            if f.lower() == fname_lower:
+                return pathlib.Path(root) / f
     return None
 
 
-def reg_read(root, subkey, value_name="") -> str | None:
+def find_in_release_dirs(filename: str) -> pathlib.Path | None:
+    """Look for *filename* in the release subfolders next to this script."""
+    for d in RELEASE_DIRS:
+        p = d / filename
+        if p.exists():
+            return p
+    return None
+
+
+def reg_read(root, subkey: str, value_name: str = "") -> str | None:
+    for flag in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+        try:
+            with winreg.OpenKey(root, subkey, 0,
+                                winreg.KEY_READ | flag) as k:
+                v, _ = winreg.QueryValueEx(k, value_name)
+                return str(v)
+        except OSError:
+            pass
+    return None
+
+
+def reg_enum_subkeys(root, subkey: str) -> list[str]:
     try:
-        with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
-            v, _ = winreg.QueryValueEx(k, value_name)
-            return str(v)
+        with winreg.OpenKey(root, subkey, 0,
+                            winreg.KEY_READ | winreg.KEY_ENUMERATE_SUB_KEYS
+                            | winreg.KEY_WOW64_64KEY) as k:
+            keys = []
+            i = 0
+            while True:
+                try:
+                    keys.append(winreg.EnumKey(k, i))
+                    i += 1
+                except OSError:
+                    break
+            return keys
     except OSError:
-        return None
+        return []
 
 
 def env(name: str) -> str | None:
-    v = os.environ.get(name, "")
-    return v if v else None
+    v = os.environ.get(name, "").strip()
+    return v or None
 
 
-def find_cuda_bin() -> list[str]:
-    """Return list of CUDA bin directories found on this machine."""
-    dirs = []
-    # Environment variables set by CUDA installer
-    for var, version in [
-        ("CUDA_PATH_V12_9", "12.9"), ("CUDA_PATH_V12_8", "12.8"),
-        ("CUDA_PATH_V12_7", "12.7"), ("CUDA_PATH_V12_6", "12.6"),
-        ("CUDA_PATH_V12_5", "12.5"), ("CUDA_PATH_V12_4", "12.4"),
-        ("CUDA_PATH_V12_3", "12.3"), ("CUDA_PATH_V12_2", "12.2"),
-        ("CUDA_PATH_V12_1", "12.1"), ("CUDA_PATH_V12_0", "12.0"),
-        ("CUDA_PATH_V13_0", "13.0"),
-        ("CUDA_PATH", ""),
-    ]:
-        p = env(var)
-        if p:
-            b = pathlib.Path(p) / "bin"
-            if b.exists():
-                dirs.append((version or "?", str(b)))
-    return dirs
-
+# ---------------------------------------------------------------------------
+# CUDA detection  (matches filter's RegisterGpuRuntimeDirs CUDA block)
+# ---------------------------------------------------------------------------
 
 def check_cuda() -> dict:
-    result = {"ok": False, "version": None, "path": None, "notes": []}
+    result = {"ok": False, "version": None, "path": None,
+              "how": None, "notes": []}
 
-    # Probe for cudart64_12.dll (required by ORT 1.21 GPU build)
-    p = find_dll_on_path("cudart64_12.dll")
-    if p:
-        result["ok"] = True
-        result["version"] = "12.x"
-        result["path"] = p
+    # ── Step 1: env vars set by CUDA installer ───────────────────────────────
+    # Prefer CUDA_MAJOR.x; also accept older 12.x in case user has mixed install
+    cuda_env_vars = [
+        (f"CUDA_PATH_V{CUDA_MAJOR}_2", f"{CUDA_MAJOR}.2"),
+        (f"CUDA_PATH_V{CUDA_MAJOR}_1", f"{CUDA_MAJOR}.1"),
+        (f"CUDA_PATH_V{CUDA_MAJOR}_0", f"{CUDA_MAJOR}.0"),
+        ("CUDA_PATH_V12_9", "12.9"), ("CUDA_PATH_V12_8", "12.8"),
+        ("CUDA_PATH_V12_7", "12.7"), ("CUDA_PATH_V12_6", "12.6"),
+        ("CUDA_PATH", "?"),
+    ]
+    for var, ver in cuda_env_vars:
+        p = env(var)
+        if not p:
+            continue
+        bin_dir = pathlib.Path(p) / "bin"
+        dll = bin_dir / CUDA_RT_DLL
+        if dll.exists():
+            result.update(ok=True, version=ver, path=str(dll), how="env")
+            if not str(CUDA_MAJOR) in ver:
+                result["notes"].append(
+                    f"Found CUDA {ver} via {var}, but ORT {ORT_VERSION} "
+                    f"requires CUDA {CUDA_MAJOR}.x.\n"
+                    f"  Please install CUDA {CUDA_MAJOR}: "
+                    "https://developer.nvidia.com/cuda-downloads"
+                )
+            return result
+        # env var exists but wrong CUDA major -- note for diagnostics
+        dll12 = bin_dir / "cudart64_12.dll"
+        if dll12.exists() and str(CUDA_MAJOR) not in ver:
+            result["notes"].append(
+                f"{var} points to CUDA {ver} (cudart64_12.dll) but "
+                f"ORT {ORT_VERSION} requires CUDA {CUDA_MAJOR}.x.\n"
+                f"  Install CUDA {CUDA_MAJOR}: "
+                "https://developer.nvidia.com/cuda-downloads"
+            )
+
+    # ── Step 2: registry ─────────────────────────────────────────────────────
+    reg_base = r"SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA"
+    for sub in reg_enum_subkeys(winreg.HKEY_LOCAL_MACHINE, reg_base):
+        if not (sub.startswith(f"v{CUDA_MAJOR}.") or
+                sub.startswith("v12.")):
+            continue
+        inst = reg_read(winreg.HKEY_LOCAL_MACHINE,
+                        f"{reg_base}\\{sub}", "InstallDir")
+        if not inst:
+            continue
+        dll = pathlib.Path(inst) / "bin" / CUDA_RT_DLL
+        if dll.exists():
+            result.update(ok=True, version=sub.lstrip("v"),
+                          path=str(dll), how="registry")
+            return result
+
+    # ── Step 3: default filesystem scan ──────────────────────────────────────
+    cuda_root = pathlib.Path(
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+    hit = find_file_recursive(cuda_root, CUDA_RT_DLL)
+    if hit:
+        result.update(ok=True, path=str(hit), how="filesystem")
+        # Extract version from path component like "v13.0"
+        for part in hit.parts:
+            if part.lower().startswith("v") and "." in part:
+                result["version"] = part.lstrip("vV")
+                break
         return result
 
-    # Not found -- check what IS installed
-    if find_dll_on_path("cudart64_13.dll"):
+    # ── Not found ─────────────────────────────────────────────────────────────
+    # Check whether a wrong CUDA major is installed
+    wrong = find_file_recursive(cuda_root, "cudart64_12.dll")
+    if wrong:
         result["notes"].append(
-            "CUDA 13.x detected. ORT 1.21 requires CUDA 12.x (cudart64_12.dll).\n"
-            "  Install CUDA 12.6 alongside 13.x -- both can coexist.\n"
-            "  Download: https://developer.nvidia.com/cuda-12-6-0-download-archive"
-        )
-    elif find_dll_on_path("cudart64_110.dll"):
-        result["notes"].append(
-            "CUDA 11.x detected. ORT 1.21 requires CUDA 12.x.\n"
-            "  Download: https://developer.nvidia.com/cuda-12-6-0-download-archive"
+            f"CUDA 12.x found at {wrong} but ORT {ORT_VERSION} requires "
+            f"CUDA {CUDA_MAJOR}.x.\n"
+            f"  Install CUDA {CUDA_MAJOR}: https://developer.nvidia.com/cuda-downloads"
         )
     else:
-        # Check if CUDA path env vars exist but bin isn't on PATH
-        cuda_dirs = find_cuda_bin()
-        cuda12 = [d for v, d in cuda_dirs if v.startswith("12.")]
-        if cuda12:
-            result["notes"].append(
-                f"CUDA 12 bin found at {cuda12[0]} but NOT on the DLL search path.\n"
-                "  The filter adds this automatically. If inference still fails,\n"
-                "  check that CUDA_PATH_V12_x env var is set by the CUDA installer."
-            )
-            result["ok"] = True
-            result["version"] = "12.x"
-            result["path"] = cuda12[0]
-        else:
-            result["notes"].append(
-                "No CUDA found. Download CUDA 12.6:\n"
-                "  https://developer.nvidia.com/cuda-12-6-0-download-archive"
-            )
+        result["notes"].append(
+            f"CUDA {CUDA_MAJOR}.x not found.\n"
+            f"  Install CUDA {CUDA_MAJOR}: https://developer.nvidia.com/cuda-downloads"
+        )
     return result
 
 
+# ---------------------------------------------------------------------------
+# cuDNN detection  (matches filter's CUDNN block)
+# ---------------------------------------------------------------------------
+
 def check_cudnn() -> dict:
-    result = {"ok": False, "version": None, "path": None, "notes": []}
-    p = find_dll_on_path("cudnn64_9.dll")
-    if p:
-        result["ok"] = True
-        result["version"] = "9.x"
-        result["path"] = p
+    result = {"ok": False, "version": None, "path": None,
+              "how": None, "notes": []}
+
+    # ── Step 1: CUDNN_PATH env var ────────────────────────────────────────────
+    # NOTE: The cuDNN standalone installer does NOT set CUDNN_PATH automatically.
+    # Users must set it manually: CUDNN_PATH=<install root>
+    # (e.g. C:\Program Files\NVIDIA\CUDNN\v9.19\bin\12.9\x64)
+    cudnn_env = env("CUDNN_PATH")
+    if cudnn_env:
+        hit = find_file_recursive(cudnn_env, "cudnn64_9.dll")
+        if hit:
+            result.update(ok=True, version="9.x", path=str(hit), how="env")
+            return result
+        else:
+            result["notes"].append(
+                f"CUDNN_PATH={cudnn_env} is set but cudnn64_9.dll was not "
+                f"found inside it."
+            )
+
+    # ── Step 2: registry ─────────────────────────────────────────────────────
+    inst = reg_read(winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\NVIDIA Corporation\cuDNN", "InstallPath")
+    if inst:
+        hit = find_file_recursive(inst, "cudnn64_9.dll")
+        if hit:
+            result.update(ok=True, version="9.x",
+                          path=str(hit), how="registry")
+            return result
+
+    # ── Step 3: default filesystem scan ──────────────────────────────────────
+    cudnn_root = pathlib.Path(r"C:\Program Files\NVIDIA\CUDNN")
+    hit = find_file_recursive(cudnn_root, "cudnn64_9.dll")
+    if hit:
+        result.update(ok=True, version="9.x",
+                      path=str(hit), how="filesystem")
         return result
-    # Check if it's installed but not on PATH
-    cudnn_path = env("CUDNN_PATH")
-    if not cudnn_path:
-        cudnn_path = reg_read(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SOFTWARE\NVIDIA Corporation\cuDNN", "InstallPath")
-    if cudnn_path:
-        # Recursive scan for cudnn64_9.dll
-        for root, _, files in os.walk(cudnn_path):
-            if "cudnn64_9.dll" in files:
-                result["ok"] = True
-                result["version"] = "9.x"
-                result["path"] = os.path.join(root, "cudnn64_9.dll")
-                result["notes"].append(
-                    f"cuDNN 9 found at {result['path']} but NOT on DLL search path.\n"
-                    "  Set CUDNN_PATH=" + cudnn_path + " so the filter can find it."
-                )
-                return result
+
+    # ── Not found ─────────────────────────────────────────────────────────────
     result["notes"].append(
-        "cuDNN 9.x not found. Download:\n"
-        "  https://developer.nvidia.com/cudnn\n"
-        "  Install the Windows installer -- it sets CUDNN_PATH automatically."
+        "cuDNN 9.x not found.\n"
+        "  Download: https://developer.nvidia.com/cudnn\n"
+        "  The standalone installer does NOT set CUDNN_PATH automatically.\n"
+        "  After installing, set CUDNN_PATH to the folder containing "
+        "cudnn64_9.dll\n"
+        r"  e.g. CUDNN_PATH=C:\Program Files\NVIDIA\CUDNN\v9.19\bin\12.9\x64"
     )
     return result
 
 
+# ---------------------------------------------------------------------------
+# TensorRT detection  (matches filter's TRT block)
+# ---------------------------------------------------------------------------
+
 def check_tensorrt() -> dict:
-    result = {"ok": False, "version": None, "path": None, "notes": []}
-    p = find_dll_on_path("nvinfer_10.dll")
-    if p:
-        result["ok"] = True
-        result["path"] = p
-        # Try to extract version from the DLL path (e.g. TensorRT-10.7.0.23)
-        parts = pathlib.Path(p).parts
-        for part in parts:
+    result = {"ok": False, "version": None, "path": None,
+              "how": None, "notes": []}
+
+    # ── Step 1: TRT_LIB_PATH (should point to lib\ folder) ───────────────────
+    trt_lib = env("TRT_LIB_PATH")
+    if trt_lib:
+        hit = find_file_recursive(trt_lib, "nvinfer_10.dll", max_depth=2)
+        if hit:
+            result.update(ok=True, path=str(hit), how="env:TRT_LIB_PATH")
+            for part in hit.parts:
+                if part.lower().startswith("tensorrt-"):
+                    result["version"] = part
+                    break
+            return result
+        result["notes"].append(
+            f"TRT_LIB_PATH={trt_lib} set but nvinfer_10.dll not found there.\n"
+            r"  TRT_LIB_PATH should point to the lib\ folder inside the TRT zip:"
+            "\n"
+            r"    TRT_LIB_PATH=C:\Program Files\NVIDIA\TensorRT-10.x.y.z\lib"
+        )
+
+    # ── Step 2: TENSORRT_DIR ──────────────────────────────────────────────────
+    trt_dir = env("TENSORRT_DIR")
+    if trt_dir:
+        lib_dir = pathlib.Path(trt_dir) / "lib"
+        hit = find_file_recursive(lib_dir, "nvinfer_10.dll", max_depth=2)
+        if hit:
+            result.update(ok=True, path=str(hit), how="env:TENSORRT_DIR")
+            return result
+
+    # ── Step 3: registry ─────────────────────────────────────────────────────
+    inst = reg_read(winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\NVIDIA Corporation\TensorRT", "InstallPath")
+    if inst:
+        hit = find_file_recursive(inst, "nvinfer_10.dll")
+        if hit:
+            result.update(ok=True, path=str(hit), how="registry")
+            return result
+
+    # ── Step 4: default scan under C:\Program Files\NVIDIA ───────────────────
+    hit = find_file_recursive(r"C:\Program Files\NVIDIA", "nvinfer_10.dll")
+    if hit:
+        result.update(ok=True, path=str(hit), how="filesystem")
+        for part in hit.parts:
             if part.lower().startswith("tensorrt-"):
                 result["version"] = part
                 break
         return result
 
-    # Check TRT_LIB_PATH
-    trt_lib = env("TRT_LIB_PATH")
-    trt_dir = env("TENSORRT_DIR")
-    if trt_lib:
-        candidate = pathlib.Path(trt_lib) / "nvinfer_10.dll"
-        if candidate.exists():
-            result["ok"] = True
-            result["path"] = str(candidate)
-            result["notes"].append(
-                "nvinfer_10.dll found via TRT_LIB_PATH but NOT on DLL search path.\n"
-                "  The filter reads TRT_LIB_PATH automatically; ensure it is set\n"
-                "  as a SYSTEM (not just user) environment variable, or copy\n"
-                "  nvinfer_10.dll + nvonnxparser_10.dll next to the .ax file."
-            )
-            return result
-        result["notes"].append(
-            f"TRT_LIB_PATH={trt_lib} but nvinfer_10.dll not found there.\n"
-            "  TRT DLLs live in the lib\\ subfolder of the TensorRT zip.\n"
-            "  Set TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.x.y.z\\lib"
-        )
-    if trt_dir:
-        lib_dir = pathlib.Path(trt_dir) / "lib"
-        candidate = lib_dir / "nvinfer_10.dll"
-        if candidate.exists():
-            result["ok"] = True
-            result["path"] = str(candidate)
-            return result
-
+    # ── Not found ─────────────────────────────────────────────────────────────
     result["notes"].append(
-        "TensorRT 10.x not found.\n"
-        "  Download TensorRT 10 for your CUDA version from:\n"
-        "  https://developer.nvidia.com/tensorrt\n"
+        "TensorRT 10.x not found (optional; required only for TRT EP).\n"
+        "  Download: https://developer.nvidia.com/tensorrt\n"
+        "  After extracting the zip, set:\n"
+        r"    TRT_LIB_PATH=C:\Program Files\NVIDIA\TensorRT-10.x.y.z\lib"
         "\n"
-        "  IMPORTANT: TRT version must match your CUDA version:\n"
-        "    TRT 10.7.x  -> CUDA 12.6\n"
-        "    TRT 10.9.x  -> CUDA 12.8\n"
-        "    TRT 10.15.x -> CUDA 12.9\n"
-        "\n"
-        "  After downloading, set:\n"
-        "    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.x.y.z\\lib\n"
-        "  Or copy nvinfer_10.dll + nvonnxparser_10.dll next to the .ax file."
+        "  IMPORTANT: set this BEFORE launching the host app (PotPlayer etc.)\n"
+        "  as env vars are inherited at process-creation time."
     )
     return result
 
 
+# ---------------------------------------------------------------------------
+# DirectML detection
+# ---------------------------------------------------------------------------
+
 def check_directml() -> dict:
-    result = {"ok": False, "version": None, "notes": []}
+    result = {"ok": False, "path": None, "notes": []}
     import platform
-    ver = platform.version()  # e.g. "10.0.19041"
     try:
         build = int(platform.version().split(".")[-1])
     except Exception:
         build = 0
 
-    if build >= 17763:  # Windows 10 1809+
-        result["ok"] = True
-        result["version"] = f"Windows build {build}"
-    else:
+    if build < 17763:
         result["notes"].append(
             "DirectML requires Windows 10 1809 (build 17763) or later.\n"
             f"  Your build: {build}"
         )
         return result
 
-    # Check directml.dll is present next to the filter or on PATH
-    p = find_dll_on_path("directml.dll")
-    if not p:
-        # Check next to this script's parent (install root)
-        script_dir = pathlib.Path(__file__).parent.parent
-        for d in [script_dir, script_dir / "Win64"]:
-            candidate = d / "directml.dll"
-            if candidate.exists():
-                p = str(candidate)
-                break
-    if p:
-        result["path"] = p
+    result["ok"] = True   # Windows is new enough
+
+    # Look for directml.dll in the release folders
+    hit = find_in_release_dirs("directml.dll")
+    if not hit:
+        # System-wide (Windows ships it in system32 on modern builds)
+        try:
+            import ctypes
+            h = ctypes.windll.kernel32.LoadLibraryExW(
+                "directml.dll", None, 0x1000)  # LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+            if h:
+                buf = ctypes.create_unicode_buffer(512)
+                ctypes.windll.kernel32.GetModuleFileNameW(h, buf, 512)
+                ctypes.windll.kernel32.FreeLibrary(h)
+                hit = pathlib.Path(buf.value) if buf.value else None
+        except Exception:
+            pass
+
+    if hit:
+        result["path"] = str(hit)
     else:
         result["notes"].append(
-            "directml.dll not found. It should be next to 3Deflatten_x64.ax.\n"
-            "  Download the x64 DirectML build of 3Deflatten which bundles it."
+            "directml.dll not found next to the .ax file.\n"
+            "  It should be bundled in the Win64 3Deflatten release folder."
         )
     return result
 
+
+# ---------------------------------------------------------------------------
+# onnxruntime.dll detection
+# ---------------------------------------------------------------------------
 
 def check_ort_dll() -> dict:
     result = {"ok": False, "path": None, "notes": []}
-    p = find_dll_on_path("onnxruntime.dll")
-    if p:
-        result["ok"] = True
-        result["path"] = p
-        # Warn if it looks like a non-1.21 version might have been manually swapped
-        if "1.21" not in p:
-            result["notes"].append(
-                "WARNING: onnxruntime.dll found at a path that does not include '1.21'.\n"
-                "  The filter is ABI-linked to ORT 1.21.0. Using a different version\n"
-                "  will likely cause crashes or silent fallback to CPU.\n"
-                "  Path: " + p
-            )
-    else:
-        result["notes"].append(
-            "onnxruntime.dll not found on DLL search path.\n"
-            "  It should be next to the .ax file. Re-install 3Deflatten."
-        )
+
+    # Primary: look in the release folders next to this script
+    hit = find_in_release_dirs("onnxruntime.dll")
+    if hit:
+        result.update(ok=True, path=str(hit))
+        if ORT_VERSION not in str(hit.parent):
+            pass  # version not in path is fine for zip-distributed releases
+        return result
+
+    # Secondary: DLL search path (system-wide install)
+    try:
+        import ctypes
+        h = ctypes.windll.kernel32.LoadLibraryExW(
+            "onnxruntime.dll", None, 0x1000)
+        if h:
+            buf = ctypes.create_unicode_buffer(512)
+            ctypes.windll.kernel32.GetModuleFileNameW(h, buf, 512)
+            ctypes.windll.kernel32.FreeLibrary(h)
+            if buf.value:
+                result.update(ok=True, path=buf.value)
+                return result
+    except Exception:
+        pass
+
+    result["notes"].append(
+        "onnxruntime.dll not found in the Win64_GPU / Win64 / Win32 folders\n"
+        "  next to Setup.py, nor on the system DLL search path.\n"
+        "  It should be bundled inside the 3Deflatten release zip.\n"
+        "  Re-download the release package."
+    )
     return result
 
+
+# ---------------------------------------------------------------------------
+# Filter registration
+# ---------------------------------------------------------------------------
 
 def check_filter_registration() -> dict:
     result = {"registered": False, "path": None}
-    clsid = r"CLSID\{4D455F30-1A2B-4C3D-8E4F-5A6B7C8D9E0F}\InprocServer32"
-    p = reg_read(winreg.HKEY_CLASSES_ROOT, clsid)
-    if p:
-        result["registered"] = True
-        result["path"] = p
+    # Try both x64 and x86 CLSIDs
+    for clsid in [
+        r"CLSID\{4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F}\InprocServer32",
+        r"CLSID\{4D455F30-1A2B-4C3D-8E4F-5A6B7C8D9E0F}\InprocServer32",
+    ]:
+        p = reg_read(winreg.HKEY_CLASSES_ROOT, clsid)
+        if p:
+            result.update(registered=True, path=p)
+            return result
     return result
 
 
 # ---------------------------------------------------------------------------
-# Display helpers
+# DLL accessibility check  (mirrors filter's "will this DLL actually load?")
 # ---------------------------------------------------------------------------
 
-OK    = "[  OK  ]"
-WARN  = "[ WARN ]"
-FAIL  = "[ FAIL ]"
-INFO  = "[ INFO ]"
+def _how_label(how: str | None) -> str:
+    labels = {
+        "env":              "found via env var",
+        "env:TRT_LIB_PATH": "found via TRT_LIB_PATH",
+        "env:TENSORRT_DIR": "found via TENSORRT_DIR",
+        "registry":         "found via registry",
+        "filesystem":       "found via default path scan",
+    }
+    return labels.get(how or "", "found")
 
-def status(flag: bool, warn_ok=False):
+
+def _env_restart_note(how: str | None) -> str | None:
+    """Warn if the component was found only via an env var that must be
+    set before launching the host application."""
+    if how and how.startswith("env"):
+        return (
+            "NOTE: env vars are read at process-creation time.\n"
+            "  If you set this AFTER launching PotPlayer/GraphEdit, the\n"
+            "  filter will NOT see it.  Restart the host app to pick it up.\n"
+            "  To make it permanent: set as a SYSTEM environment variable\n"
+            "  (System Properties > Environment Variables > System variables)."
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# run_diagnostics
+# ---------------------------------------------------------------------------
+
+OK   = "[  OK  ]"
+WARN = "[ WARN ]"
+FAIL = "[ FAIL ]"
+
+def _sym(flag: bool, warn_if_fail: bool = False) -> str:
     if flag:
         return OK
-    return WARN if warn_ok else FAIL
+    return WARN if warn_if_fail else FAIL
 
 
-def run_diagnostics(verbose=True) -> dict:
+def run_diagnostics() -> dict:
     results = {}
-
     print("\n--- GPU Runtime Diagnostics ---\n")
+    print(f"  Detection order mirrors the filter: env vars -> registry -> "
+          f"filesystem scan -> bundled DLLs\n")
 
-    # CUDA
+    # ── CUDA ──────────────────────────────────────────────────────────────────
     r = check_cuda()
     results["cuda"] = r
-    sym = status(r["ok"])
+    sym = _sym(r["ok"])
+    ver_str = f"CUDA {r['version']}" if r["version"] else f"CUDA {CUDA_MAJOR}.x"
     if r["ok"]:
-        print(f"{sym}  CUDA 12.x   -- {r['path']}")
+        print(f"{sym}  {ver_str:<12}-- {r['path']}")
+        print(f"           ({_how_label(r['how'])})")
+        note = _env_restart_note(r["how"])
+        if note:
+            for line in note.splitlines():
+                print(f"           {line}")
     else:
-        print(f"{sym}  CUDA 12.x   -- NOT FOUND")
+        print(f"{sym}  CUDA {CUDA_MAJOR}.x     -- NOT FOUND")
     for n in r["notes"]:
         for line in n.splitlines():
             print(f"           {line}")
 
-    # cuDNN
+    # ── cuDNN ─────────────────────────────────────────────────────────────────
     r = check_cudnn()
     results["cudnn"] = r
-    sym = status(r["ok"], warn_ok=True)
+    sym = _sym(r["ok"], warn_if_fail=True)
     if r["ok"]:
-        print(f"{sym}  cuDNN 9.x   -- {r['path']}")
+        print(f"{sym}  cuDNN 9.x    -- {r['path']}")
+        print(f"           ({_how_label(r['how'])})")
+        note = _env_restart_note(r["how"])
+        if note:
+            for line in note.splitlines():
+                print(f"           {line}")
     else:
-        print(f"{sym}  cuDNN 9.x   -- NOT FOUND  (required for CUDA/TRT EPs)")
+        print(f"{sym}  cuDNN 9.x    -- NOT FOUND  (required for CUDA/TRT EPs)")
     for n in r["notes"]:
         for line in n.splitlines():
             print(f"           {line}")
 
-    # TensorRT
+    # ── TensorRT ──────────────────────────────────────────────────────────────
     r = check_tensorrt()
     results["trt"] = r
-    sym = status(r["ok"], warn_ok=True)
+    sym = _sym(r["ok"], warn_if_fail=True)
+    ver_str = r["version"] or "TensorRT 10"
     if r["ok"]:
-        label = r["version"] or "found"
-        print(f"{sym}  TensorRT 10 -- {r['path']}")
+        print(f"{sym}  {ver_str:<12}-- {r['path']}")
+        print(f"           ({_how_label(r['how'])})")
+        note = _env_restart_note(r["how"])
+        if note:
+            for line in note.splitlines():
+                print(f"           {line}")
     else:
-        print(f"{sym}  TensorRT 10 -- NOT FOUND  (optional; fastest EP)")
+        print(f"{sym}  TensorRT 10  -- NOT FOUND  (optional; fastest EP)")
     for n in r["notes"]:
         for line in n.splitlines():
             print(f"           {line}")
 
-    # DirectML
+    # ── DirectML ──────────────────────────────────────────────────────────────
     r = check_directml()
     results["dml"] = r
-    sym = status(r["ok"])
+    sym = _sym(r["ok"])
     if r["ok"]:
         path_str = r.get("path") or "(built into Windows)"
-        print(f"{sym}  DirectML    -- {path_str}")
+        print(f"{sym}  DirectML     -- {path_str}")
     else:
-        print(f"{sym}  DirectML    -- NOT AVAILABLE")
+        print(f"{sym}  DirectML     -- NOT AVAILABLE")
     for n in r["notes"]:
         for line in n.splitlines():
             print(f"           {line}")
 
-    # onnxruntime.dll
+    # ── onnxruntime.dll ───────────────────────────────────────────────────────
     r = check_ort_dll()
     results["ort"] = r
-    sym = status(r["ok"])
+    sym = _sym(r["ok"])
     if r["ok"]:
-        print(f"{sym}  onnxruntime -- {r['path']}")
+        print(f"{sym}  onnxruntime  -- {r['path']}")
     else:
-        print(f"{sym}  onnxruntime -- NOT FOUND")
+        print(f"{sym}  onnxruntime  -- NOT FOUND")
     for n in r["notes"]:
         for line in n.splitlines():
             print(f"           {line}")
 
-    # Filter registration
+    # ── Filter registration ───────────────────────────────────────────────────
     r = check_filter_registration()
     results["reg"] = r
     sym = OK if r["registered"] else WARN
     if r["registered"]:
-        print(f"{sym}  Filter reg  -- {r['path']}")
+        print(f"{sym}  Filter reg   -- {r['path']}")
     else:
-        print(f"{sym}  Filter reg  -- NOT REGISTERED")
-        print(f"           Run:  regsvr32 \"<path>\\3Deflatten_x64.ax\"")
+        print(f"{sym}  Filter reg   -- NOT REGISTERED")
+        print(f'           Run:  regsvr32 "<path>\\3Deflatten_x64.ax"')
 
     print()
 
-    # Summary
+    # ── Summary ───────────────────────────────────────────────────────────────
     print("--- Recommended execution provider ---")
-    if results["cuda"]["ok"] and results["trt"]["ok"] and results["cudnn"]["ok"]:
-        print("  TensorRT   (fastest -- use gpuProvider=1 or Auto)")
-        print("  NOTE: first inference compiles TRT engines (30-120 s).")
-    elif results["cuda"]["ok"] and results["cudnn"]["ok"]:
-        print("  CUDA       (fast -- use gpuProvider=2 or Auto)")
-    elif results["dml"]["ok"]:
-        print("  DirectML   (good for any DX12 GPU -- gpuProvider=3 or Auto)")
-        print("  NOTE: first frame triggers shader compilation (5-30 s).")
-        print("  Subsequent frames on RTX 2080 Ti: ~100-400 ms for DA V2 Small.")
-    else:
-        print("  CPU        (slow -- no GPU runtime detected)")
-    print()
+    cuda_ok  = results["cuda"]["ok"]
+    cudnn_ok = results["cudnn"]["ok"]
+    trt_ok   = results["trt"]["ok"]
+    dml_ok   = results["dml"]["ok"]
 
+    if cuda_ok and cudnn_ok and trt_ok:
+        print("  TensorRT   (fastest -- set gpuProvider=1 or leave on Auto)")
+        print("  NOTE: first inference compiles TRT engines (30-120 s).")
+        print("  NOTE: TRT_LIB_PATH must be set BEFORE launching the host app.")
+    elif cuda_ok and cudnn_ok:
+        print("  CUDA       (fast -- set gpuProvider=2 or leave on Auto)")
+    elif dml_ok:
+        print("  DirectML   (good for any DX12 GPU -- gpuProvider=3 or Auto)")
+        print("  NOTE: first frame triggers DX shader compilation (5-30 s).")
+        print("  Subsequent frames on RTX: ~100-400 ms for DA V2 Small.")
+    else:
+        print("  CPU        (slow -- no GPU runtime found)")
+
+    print()
     return results
 
 
@@ -448,12 +638,15 @@ def run_diagnostics(verbose=True) -> dict:
 # ---------------------------------------------------------------------------
 
 def default_output_dir() -> pathlib.Path:
-    script_parent = pathlib.Path(__file__).parent.parent
-    for d in [script_parent / "Win64", script_parent / "Win64_GPU",
-              script_parent / "Win32", script_parent]:
-        if d.is_dir():
-            return d
-    return script_parent
+    """Return the best directory for model files: next to the .ax file.
+    Setup.py lives at <root>/Setup.py, alongside Win32/ Win64/ Win64_GPU/.
+    Models go directly in <root>/ so all three builds share them."""
+    # Prefer the first release subfolder that exists; fall back to SCRIPT_DIR
+    for d in RELEASE_DIRS:
+        if d.is_dir() and d != SCRIPT_DIR:
+            # Actually put models in SCRIPT_DIR (root), not a subfolder
+            break
+    return SCRIPT_DIR
 
 
 def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
@@ -481,13 +674,13 @@ def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
                 print(f"\r  Progress: {pct:3d}%", end="", flush=True)
 
         urllib.request.urlretrieve(url, dst, reporthook=progress)
-        print(f"\r  Progress: 100%  -- done")
+        print("\r  Progress: 100%  -- done")
         if sha:
             h = hashlib.sha256(dst.read_bytes()).hexdigest()
             if h != sha:
                 print(f"  WARNING: SHA256 mismatch! Expected {sha}, got {h}")
             else:
-                print(f"  SHA256 OK")
+                print("  SHA256 OK")
         return True
     except Exception as e:
         print(f"\n  FAILED: {e}")
@@ -504,7 +697,7 @@ def model_menu(output_dir: pathlib.Path):
         mark = " [downloaded]" if exists else ""
         print(f"  {mid}  {label}{mark}")
     print(f"  a  Download all models (~{sum(m[5] for m in MODELS)} MB total)")
-    print(f"  q  Back / quit")
+    print("  q  Back / quit")
     print()
     choice = input("Enter model number (or a/q): ").strip().lower()
     if choice == "q":
@@ -536,7 +729,8 @@ def main():
 
     print(BANNER)
 
-    out_dir = pathlib.Path(args.output).resolve() if args.output else default_output_dir()
+    out_dir = (pathlib.Path(args.output).resolve()
+               if args.output else default_output_dir())
 
     if args.list:
         for mid, label, fname, *_ in MODELS:
@@ -571,27 +765,28 @@ def main():
             model_menu(out_dir)
 
         elif choice == "3":
-            print("""
+            print(f"""
 --- Dependency Download Links ---
 
-CUDA 12.6 (recommended -- required for CUDA and TensorRT EPs):
-  https://developer.nvidia.com/cuda-12-6-0-download-archive
+CUDA {CUDA_MAJOR}.x (required for CUDA and TensorRT EPs with ORT {ORT_VERSION}):
+  https://developer.nvidia.com/cuda-downloads
 
 cuDNN 9.x (required for CUDA and TensorRT EPs):
   https://developer.nvidia.com/cudnn
-  -> Install the Windows local installer; it sets CUDNN_PATH automatically.
+  NOTE: The standalone installer does NOT set CUDNN_PATH automatically.
+  After installing, set CUDNN_PATH to the folder containing cudnn64_9.dll:
+    CUDNN_PATH=C:\\Program Files\\NVIDIA\\CUDNN\\v9.xx\\bin\\{CUDA_MAJOR}.x\\x64
 
-TensorRT 10 (optional; fastest -- match version to your CUDA):
+TensorRT 10.x (optional; fastest EP):
   https://developer.nvidia.com/tensorrt
-  TRT 10.7.x  -> CUDA 12.6    TRT 10.15.x -> CUDA 12.9
-  After installing, set:  TRT_LIB_PATH=<TRT root>\\lib
-
-NOTE: ORT 1.21 (bundled with 3Deflatten) supports CUDA 12.x ONLY.
-  CUDA 13.x ships cudart64_13.dll which is NOT compatible with this build.
-  You can install CUDA 12.6 alongside 13.x -- multiple versions coexist.
+  After extracting, set TRT_LIB_PATH=<TRT root>\\lib
+  IMPORTANT: set env vars BEFORE launching the host application.
+  Both TRT_LIB_PATH and CUDNN_PATH must be SYSTEM environment variables
+  (or set before launching PotPlayer) -- user env vars are not inherited
+  by already-running processes.
 
 DirectML: built into Windows 10 1809+ (no extra install needed).
-  The DX12 DirectML EP is included in the x64 3Deflatten build.
+  The x64 DirectML build of 3Deflatten bundles directml.dll.
 """)
 
         elif choice in ("q", "quit", "exit"):

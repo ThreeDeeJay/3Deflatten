@@ -65,19 +65,20 @@ target_compile_options(strmbase PRIVATE
 #   GPU                 –  ORT official GitHub release zip (CUDA + TRT)
 #       EPs available at runtime: TensorRT, CUDA, CPU
 #       Defines: ORT_ENABLE_TENSORRT, ORT_ENABLE_CUDA
-#       Good for: NVIDIA with CUDA Toolkit + (optionally) TensorRT SDK
+#       Good for: NVIDIA with CUDA 13.x Toolkit + (optionally) TensorRT SDK
+#       ORT 1.24.x GPU build requires CUDA 13.x at runtime.
 #       Note: x64 only. CUDA/TRT DLLs NOT bundled; user must have them installed.
 #
 # Select with:  cmake -B build -DORT_BACKEND=GPU   (or DirectML, the default)
 #
-set(ORT_VERSION "1.21.0")
+set(ORT_VERSION "1.24.3")
 set(ORT_BACKEND "DirectML" CACHE STRING "ORT inference backend: DirectML or GPU")
 set_property(CACHE ORT_BACKEND PROPERTY STRINGS "DirectML" "GPU")
 message(STATUS "ORT backend: ${ORT_BACKEND}")
 
 # ── Helper macro: resolve ORT paths from an extracted NuGet/zip directory ────
 # NuGet packages (.nupkg are zips) are extracted by FetchContent directly into
-# SOURCE_DIR with no wrapper folder.  Confirmed layout for ORT 1.21:
+# SOURCE_DIR with no wrapper folder.  Confirmed layout for ORT 1.21-1.24.x:
 #   SOURCE_DIR/build/native/include/          headers
 #   SOURCE_DIR/runtimes/win-x64/native/       onnxruntime.lib + onnxruntime.dll
 # Older packages used build/native/lib/<arch>/ for the import lib; we probe
@@ -318,6 +319,7 @@ target_include_directories(3Deflatten PRIVATE
 target_compile_definitions(3Deflatten PRIVATE
     _USRDLL WIN32_LEAN_AND_MEAN NOMINMAX
     _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE
+    ORT_VER_STR="${ORT_VERSION}"
     ${ORT_COMPILE_DEFS}
 )
 target_compile_options(3Deflatten PRIVATE /W4 /wd4996 /wd4267 /wd4244)

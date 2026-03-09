@@ -146,21 +146,26 @@ static void RegisterGpuRuntimeDirs() {
     // CUDA 12.6 installer sets CUDA_PATH_V12_6 and CUDA_PATH.
     // Multiple CUDA versions can coexist; we pick the highest 12.x present.
     bool foundCuda = false;
+    // Probe for CUDA 13.x first (required by ORT 1.24.x GPU build).
+    // Fall back to CUDA 12.x in case user still has an older ORT build.
     const wchar_t* cudaEnvVars[] = {
-        L"CUDA_PATH_V12_6", L"CUDA_PATH_V12_5", L"CUDA_PATH_V12_4",
-        L"CUDA_PATH_V12_3", L"CUDA_PATH_V12_2", L"CUDA_PATH_V12_1",
-        L"CUDA_PATH_V12_0", L"CUDA_PATH",
+        L"CUDA_PATH_V13_2", L"CUDA_PATH_V13_1", L"CUDA_PATH_V13_0",
+        L"CUDA_PATH_V12_9", L"CUDA_PATH_V12_8", L"CUDA_PATH_V12_7",
+        L"CUDA_PATH_V12_6", L"CUDA_PATH",
         nullptr
     };
     for (int i = 0; cudaEnvVars[i] && !foundCuda; ++i) {
         wchar_t val[MAX_PATH] = {};
         if (GetEnvironmentVariableW(cudaEnvVars[i], val, MAX_PATH) && val[0]) {
             std::wstring binDir = std::wstring(val) + L"\\bin";
-            // Validate it's actually a CUDA 12 install
-            std::wstring probe12 = binDir + L"\\cudart64_12.dll";
-            if (GetFileAttributesW(probe12.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                TryAddDir(binDir, L"cudart64_12.dll", "CUDA 12 bin (env var)");
-                foundCuda = true;
+            // Prefer cudart64_13.dll (ORT 1.24.x), also accept cudart64_12.dll
+            for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
+                std::wstring probe = binDir + L"\\" + dll;
+                if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    TryAddDir(binDir, dll, "CUDA bin (env var)");
+                    foundCuda = true;
+                    break;
+                }
             }
         }
     }
@@ -178,15 +183,19 @@ static void RegisterGpuRuntimeDirs() {
                 if (RegEnumKeyExW(hBase, idx, subName, &nameLen,
                                   nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
                     break;
-                // Only consider v12.x subkeys
-                if (wcsncmp(subName, L"v12.", 4) != 0) continue;
+                // Accept v13.x (primary for ORT 1.24.x) and v12.x (legacy)
+                if (wcsncmp(subName, L"v13.", 4) != 0 &&
+                    wcsncmp(subName, L"v12.", 4) != 0) continue;
                 std::wstring inst = RegReadSz(hBase, subName, L"InstallDir");
                 if (inst.empty()) continue;
                 std::wstring binDir = inst + L"\\bin";
-                std::wstring probe12 = binDir + L"\\cudart64_12.dll";
-                if (GetFileAttributesW(probe12.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                    TryAddDir(binDir, L"cudart64_12.dll", "CUDA 12 bin (registry)");
-                    foundCuda = true;
+                for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
+                    std::wstring probe = binDir + L"\\" + dll;
+                    if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                        TryAddDir(binDir, dll, "CUDA bin (registry)");
+                        foundCuda = true;
+                        break;
+                    }
                 }
             }
             RegCloseKey(hBase);
@@ -194,15 +203,20 @@ static void RegisterGpuRuntimeDirs() {
     }
     if (!foundCuda) {
         // Recursive scan of the CUDA Toolkit base directory.
-        // Works for any 12.x version regardless of the exact version subfolder.
+        // Try CUDA 13 (ORT 1.24.x requirement) then CUDA 12 as fallback.
         foundCuda = RecursiveFindAndAdd(
             L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA",
-            L"cudart64_12.dll", "CUDA 12 bin (default scan)");
+            L"cudart64_13.dll", "CUDA 13 bin (default scan)");
     }
     if (!foundCuda) {
-        LOG_WARN("  CUDA 12.x not found. ORT GPU EP requires CUDA 12.x (not 13.x).");
-        LOG_WARN("  Install: https://developer.nvidia.com/cuda-12-6-0-download-archive");
-        LOG_WARN("  CUDA 13.x (cudart64_13.dll) is NOT compatible with ORT 1.21.");
+        foundCuda = RecursiveFindAndAdd(
+            L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA",
+            L"cudart64_12.dll", "CUDA 12 bin (default scan -- ORT 1.24.x needs CUDA 13)");
+    }
+    if (!foundCuda) {
+        LOG_WARN("  CUDA not found. ORT 1.24.x GPU build requires CUDA 13.x.");
+        LOG_WARN("  Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
+        LOG_WARN("  CUDA 12.x will not work with the ORT 1.24.x GPU build.");
     }
 
     // ── cuDNN 9.x ────────────────────────────────────────────────────────────
@@ -246,26 +260,28 @@ static void RegisterGpuRuntimeDirs() {
     }
 
     // ── TensorRT 10.x ────────────────────────────────────────────────────────
-    // TRT is distributed as a zip.  DLLs live in <TRT_root>/lib/  (NOT bin/).
+    // TRT is distributed as a zip.  DLLs live in <TRT_root>\lib\  (NOT bin\).
     // Set TRT_LIB_PATH=<TRT_root>\lib  OR  TENSORRT_DIR=<TRT_root>
-    // IMPORTANT: TRT is compiled against a specific CUDA minor version.
-    //   TRT 10.7.x  -> CUDA 12.6    TRT 10.9.x  -> CUDA 12.8
-    //   TRT 10.15.x -> CUDA 12.9
-    // Your TRT and CUDA Toolkit versions must match.  Mismatches cause
-    // nvinfer_10.dll to fail to load even if all DLL files are present.
+    // NOTE: env vars are inherited at process-creation time.  If you set
+    // TRT_LIB_PATH after the host app (e.g. PotPlayer) was already running,
+    // restart the host app so the new value is inherited.
     {
         wchar_t val[MAX_PATH] = {};
         bool foundTrt = false;
         if (GetEnvironmentVariableW(L"TRT_LIB_PATH", val, MAX_PATH) && val[0]) {
-            // TRT_LIB_PATH should point to the lib/ folder (contains nvinfer_10.dll)
-            TryAddDir(val, L"nvinfer_10.dll", "TRT 10 lib (TRT_LIB_PATH)");
-            foundTrt = true;
+            // TRT_LIB_PATH should point to the lib/ folder (contains nvinfer_10.dll).
+            // Use RecursiveFindAndAdd so foundTrt=true only if DLL is actually there.
+            foundTrt = RecursiveFindAndAdd(val, L"nvinfer_10.dll",
+                                            "TRT 10 (TRT_LIB_PATH)");
+            if (!foundTrt)
+                LOG_WARN("  TRT_LIB_PATH set but nvinfer_10.dll not found in: ",
+                         std::wstring(val));
         }
         if (!foundTrt &&
             GetEnvironmentVariableW(L"TENSORRT_DIR", val, MAX_PATH) && val[0]) {
-            TryAddDir(std::wstring(val) + L"\\lib",
-                      L"nvinfer_10.dll", "TRT 10 lib (TENSORRT_DIR/lib)");
-            foundTrt = true;
+            foundTrt = RecursiveFindAndAdd(std::wstring(val) + L"\\lib",
+                                            L"nvinfer_10.dll",
+                                            "TRT 10 (TENSORRT_DIR/lib)");
         }
         if (!foundTrt) {
             std::wstring inst = RegReadSz(HKEY_LOCAL_MACHINE,
@@ -274,12 +290,16 @@ static void RegisterGpuRuntimeDirs() {
                 foundTrt = RecursiveFindAndAdd(inst, L"nvinfer_10.dll",
                                                "TRT 10 (registry)");
         }
+        // Default scan: TensorRT zips typically extract under C:\Program Files\NVIDIA
+        if (!foundTrt)
+            foundTrt = RecursiveFindAndAdd(
+                L"C:\\Program Files\\NVIDIA",
+                L"nvinfer_10.dll", "TRT 10 (default scan)");
         if (!foundTrt) {
-            LOG_INFO("  TensorRT 10 not found via env/registry.");
-            LOG_INFO("  To use TRT: extract TensorRT-10.x.zip, set:");
+            LOG_INFO("  TensorRT 10 not found via env/registry/default scan.");
+            LOG_INFO("  To use TRT: extract TensorRT-10.x.zip, then set:");
             LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.x.y.z\\lib");
-            LOG_INFO("  IMPORTANT: match TRT version to your CUDA version:");
-            LOG_INFO("    TRT 10.7.x -> CUDA 12.6    TRT 10.15.x -> CUDA 12.9");
+            LOG_INFO("  NOTE: env vars only take effect after restarting the host app.");
             LOG_INFO("  Download: https://developer.nvidia.com/tensorrt");
         }
     }
@@ -318,19 +338,24 @@ struct DllInit {
         // delay-load fires before the logger initialises (unlikely but safe).
         {
             const wchar_t* vars[] = {
-                L"CUDA_PATH_V12_6",L"CUDA_PATH_V12_5",L"CUDA_PATH_V12_4",
-                L"CUDA_PATH_V12_3",L"CUDA_PATH_V12_2",L"CUDA_PATH_V12_1",
-                L"CUDA_PATH_V12_0",L"CUDA_PATH", nullptr
+                L"CUDA_PATH_V13_2",L"CUDA_PATH_V13_1",L"CUDA_PATH_V13_0",
+                L"CUDA_PATH_V12_9",L"CUDA_PATH_V12_8",L"CUDA_PATH_V12_7",
+                L"CUDA_PATH_V12_6",L"CUDA_PATH", nullptr
             };
             for (int i = 0; vars[i]; ++i) {
                 wchar_t v[MAX_PATH] = {};
                 if (GetEnvironmentVariableW(vars[i], v, MAX_PATH) && v[0]) {
                     std::wstring bin = std::wstring(v) + L"\\bin";
-                    std::wstring chk = bin + L"\\cudart64_12.dll";
-                    if (GetFileAttributesW(chk.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                        AddDllDirectory(bin.c_str());
-                        break;
+                    bool found = false;
+                    for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
+                        std::wstring chk = bin + L"\\" + dll;
+                        if (GetFileAttributesW(chk.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                            AddDllDirectory(bin.c_str());
+                            found = true;
+                            break;
+                        }
                     }
+                    if (found) break;
                 }
             }
             // TRT: register both TRT_LIB_PATH (has nvinfer_10.dll) and TENSORRT_DIR/lib
