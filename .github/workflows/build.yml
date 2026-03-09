@@ -148,27 +148,30 @@ jobs:
           echo "CommitCount=$(git rev-list --count HEAD)" >> $env:GITHUB_ENV
           echo "CommitDate=$(git show -s --date=format:'%Y-%m-%d' --format=%cd)" >> $env:GITHUB_ENV
 
-      - name: Download x64 DirectML
-        uses: actions/download-artifact@v4
-        with:
-          name: 3Deflatten_x64_DirectML
-          path: Release\Win64
-
       - name: Download x86 DirectML
         uses: actions/download-artifact@v4
         with:
           name: 3Deflatten_x86_DirectML
-          path: Release\Win32
+          path: Artifacts\Win32
+
+      - name: Download x64 DirectML
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x64_DirectML
+          path: Artifacts\Win64
 
       - name: Download x64 GPU (TensorRT+CUDA)
         uses: actions/download-artifact@v4
         with:
           name: 3Deflatten_x64_GPU
-          path: Release\Win64_GPU
+          path: Artifacts\Win64_GPU
 
       - name: Deploy
         run: |
           mkdir "Release"
+          cp -r "Artifacts/Win32"        "Release"
+          cp -r "Artifacts/Win64"        "Release"
+          cp -r "Artifacts/Win64_GPU"    "Release"
           copy "README.md"               "Release/ReadMe.txt"
           copy "LICENSE"                 "Release/License.txt"
           copy scripts\register.bat      "Release\"
