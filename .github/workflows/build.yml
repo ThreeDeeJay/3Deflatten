@@ -169,17 +169,18 @@ jobs:
       - name: Deploy
         run: |
           mkdir "Release"
-          cp -r "Artifacts/Win32"        "Release"
-          cp -r "Artifacts/Win64"        "Release"
-          cp -r "Artifacts/Win64_GPU"    "Release"
-          copy "3Deflatten.ini"          "Release/Win32/3Deflatten.ini"
-          copy "3Deflatten.ini"          "Release/Win64/3Deflatten.ini"
-          copy "3Deflatten.ini"          "Release/Win64_GPU/3Deflatten.ini"
-          copy "README.md"               "Release/ReadMe.txt"
-          copy "LICENSE"                 "Release/License.txt"
-          copy scripts/register.bat      "Release/"
-          copy scripts/unregister.bat    "Release/"
-          copy scripts/download_model.py "Release/"
+          copy -r "Artifacts/Win32"               "Release"
+          copy -r "Artifacts/Win64"               "Release"
+          copy -r "Artifacts/Win64_GPU"           "Release"
+          copy "3Deflatten.ini"                   "Release/Win32/"
+          copy "3Deflatten.ini"                   "Release/Win64/"
+          copy "3Deflatten.ini"                   "Release/Win64_GPU/"
+          copy "README.md"                        "Release/ReadMe.txt"
+          copy "LICENSE"                          "Release/License.txt"
+          copy "scripts/register.bat"             "Release/"
+          copy "scripts/unregister.bat"           "Release/"
+          copy "scripts/Setup.py"                 "Release/"
+          copy "scripts/collect_runtime_dlls.py"  "Release/"
   
       - name: Compress artifacts
         if: github.event_name == 'push'

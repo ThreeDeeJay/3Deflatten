@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "logger.h"
 #include <cstdarg>
-#include <ctime>
 
 void Logger::Init(const wchar_t* /*dllPath*/) {
     wchar_t envBuf[MAX_PATH] = {};
@@ -15,10 +14,6 @@ void Logger::Init(const wchar_t* /*dllPath*/) {
     m_enabled = true;
     m_file << "\n====== 3Deflatten log opened ======\n";
     m_file.flush();
-}
-
-std::string Logger::Timestamp() {
-    return {};  // timestamps removed -- log entries are sequential
 }
 
 void Logger::Write(const std::string& line) {

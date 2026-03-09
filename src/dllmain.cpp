@@ -342,15 +342,15 @@ struct DllInit {
                     std::wstring trtParent = trtVal;
                     auto sl = trtParent.find_last_of(L"\\/");
                     if (sl != std::wstring::npos) {
-                        std::wstring binSib = trtParent.substr(0, sl) + L"\bin";
+                        std::wstring binSib = trtParent.substr(0, sl) + L"\\bin";
                         if (GetFileAttributesW(binSib.c_str()) != INVALID_FILE_ATTRIBUTES)
                             AddDllDirectory(binSib.c_str());
                     }
                 }
                 wchar_t trtDir[MAX_PATH] = {};
                 if (GetEnvironmentVariableW(L"TENSORRT_DIR", trtDir, MAX_PATH) && trtDir[0]) {
-                    AddDllDirectory((std::wstring(trtDir) + L"\lib").c_str());
-                    AddDllDirectory((std::wstring(trtDir) + L"\bin").c_str());
+                    AddDllDirectory((std::wstring(trtDir) + L"\\lib").c_str());
+                    AddDllDirectory((std::wstring(trtDir) + L"\\bin").c_str());
                 }
             }
         }

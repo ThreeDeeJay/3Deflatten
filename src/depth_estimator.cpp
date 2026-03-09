@@ -164,6 +164,8 @@ __declspec(noinline) static std::wstring GetDllDir() {
 // PotPlayer (and some other hosts) copy the .ax to their own directory when
 // registering it as an external filter. The registry retains the original
 // path, which is where onnxruntime.dll and the model files actually live.
+// Only needed by ProviderDllLoadable, which is itself GPU-only.
+#if defined(ORT_ENABLE_CUDA) || defined(ORT_ENABLE_TENSORRT)
 static std::wstring GetRegisteredDllDir() {
     // CLSID_3Deflatten = {4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F}
     const wchar_t* key =
@@ -182,6 +184,7 @@ static std::wstring GetRegisteredDllDir() {
     if (sl) *sl = L'\0';
     return regPath;
 }
+#endif // ORT_ENABLE_CUDA || ORT_ENABLE_TENSORRT
 
 // Probe whether a DLL can be fully loaded with all its dependencies resolved.
 // LOAD_LIBRARY_AS_DATAFILE succeeds even when deps are missing, so we need a
@@ -202,6 +205,8 @@ static DWORD DllLoadable(const wchar_t* path) {
 
 // Probe a single named DLL, log its status as INFO.  Used for the full
 // dependency scan logged when CUDA/TRT init begins.
+// Only referenced inside LogCudaDependencies, which is GPU-only.
+#if defined(ORT_ENABLE_CUDA) || defined(ORT_ENABLE_TENSORRT)
 static bool ProbeDep(const wchar_t* name, const wchar_t* purpose) {
     DWORD e = DllLoadable(name);
     if (e == 0) {
@@ -268,6 +273,7 @@ static void LogCudaDependencies(bool includeTrt) {
     }
     LOG_INFO("--- end dependency scan ---");
 }
+#endif // ORT_ENABLE_CUDA || ORT_ENABLE_TENSORRT
 
 #if defined(ORT_ENABLE_CUDA) || defined(ORT_ENABLE_TENSORRT)
 // Probe for nvcuda.dll + CUDA 12 runtime.  Returns false and logs clearly if
