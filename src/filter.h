@@ -99,9 +99,13 @@ private:
     int                     m_pendH     = 0;
 
     // Depth result cache (written by worker, read by Transform)
+    // m_cachedBGRA stores the SOURCE FRAME that produced m_cachedDepth so
+    // Transform can render the matched (frame, depth) pair instead of applying
+    // stale depth to a newer frame — eliminating the "reprojection desync" artifact.
     std::mutex              m_cacheMtx;
     std::vector<float>      m_cachedDepth;
-    int                     m_cachedW   = 0;
-    int                     m_cachedH   = 0;
+    std::vector<BYTE>       m_cachedBGRA;    // source frame matched to cachedDepth
+    int                     m_cachedW    = 0;
+    int                     m_cachedH    = 0;
     bool                    m_cacheReady = false;
 };

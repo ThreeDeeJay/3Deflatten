@@ -19,7 +19,23 @@ static int   SmoothToSlider(float f){ return (int)(f * SMOOTH_TICKS + 0.5f); }
 static float SliderToSmooth(int v)  { return (float)v / SMOOTH_TICKS; }
 
 // ── CreateInstance ────────────────────────────────────────────────────────────
+// g_hInst is the DirectShow baseclasses global used by CBasePropertyPage::
+// OnActivate to call CreateDialogParam.  If it somehow points to a different
+// module (stale value from another filter, or set before our DllMain ran),
+// the dialog resource 101 won't be found and the property page will be blank.
+// Patching it here ensures it is always our .ax's HMODULE.
+extern HINSTANCE g_hInst;  // from baseclasses dllentry.cpp
+
 CUnknown* WINAPI C3DeflattenProp::CreateInstance(LPUNKNOWN pUnk, HRESULT* phr) {
+    HMODULE hSelf = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&C3DeflattenProp::CreateInstance), &hSelf);
+    if (hSelf) {
+        g_hInst = hSelf;
+        LOG_DBG("PropPage::CreateInstance -- g_hInst patched to our .ax module");
+    }
     return new C3DeflattenProp(pUnk, phr);
 }
 

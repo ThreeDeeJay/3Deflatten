@@ -246,33 +246,40 @@ static void RegisterGpuRuntimeDirs() {
     }
 
     // ── TensorRT 10.x ────────────────────────────────────────────────────────
-    // TRT is distributed as a zip.  The user extracts it somewhere and either
-    // sets TRT_LIB_PATH / TENSORRT_DIR manually or runs the installer.
+    // TRT is distributed as a zip.  DLLs live in <TRT_root>/lib/  (NOT bin/).
+    // Set TRT_LIB_PATH=<TRT_root>\lib  OR  TENSORRT_DIR=<TRT_root>
+    // IMPORTANT: TRT is compiled against a specific CUDA minor version.
+    //   TRT 10.7.x  -> CUDA 12.6    TRT 10.9.x  -> CUDA 12.8
+    //   TRT 10.15.x -> CUDA 12.9
+    // Your TRT and CUDA Toolkit versions must match.  Mismatches cause
+    // nvinfer_10.dll to fail to load even if all DLL files are present.
     {
         wchar_t val[MAX_PATH] = {};
         bool foundTrt = false;
         if (GetEnvironmentVariableW(L"TRT_LIB_PATH", val, MAX_PATH) && val[0]) {
+            // TRT_LIB_PATH should point to the lib/ folder (contains nvinfer_10.dll)
             TryAddDir(val, L"nvinfer_10.dll", "TRT 10 lib (TRT_LIB_PATH)");
             foundTrt = true;
         }
         if (!foundTrt &&
             GetEnvironmentVariableW(L"TENSORRT_DIR", val, MAX_PATH) && val[0]) {
             TryAddDir(std::wstring(val) + L"\\lib",
-                      L"nvinfer_10.dll", "TRT 10 lib (TENSORRT_DIR)");
+                      L"nvinfer_10.dll", "TRT 10 lib (TENSORRT_DIR/lib)");
             foundTrt = true;
         }
         if (!foundTrt) {
             std::wstring inst = RegReadSz(HKEY_LOCAL_MACHINE,
                 L"SOFTWARE\\NVIDIA Corporation\\TensorRT", L"InstallPath");
             if (!inst.empty())
-                TryAddDir(inst + L"\\lib", L"nvinfer_10.dll",
-                          "TRT 10 lib (registry)");
+                foundTrt = RecursiveFindAndAdd(inst, L"nvinfer_10.dll",
+                                               "TRT 10 (registry)");
         }
         if (!foundTrt) {
             LOG_INFO("  TensorRT 10 not found via env/registry.");
-            LOG_INFO("  To use TRT: extract TensorRT-10.x.zip, then either:");
-            LOG_INFO("    set TRT_LIB_PATH=<path>\\lib   (per-session env var), or");
-            LOG_INFO("    copy nvinfer_10.dll + nvonnxparser_10.dll to the .ax folder.");
+            LOG_INFO("  To use TRT: extract TensorRT-10.x.zip, set:");
+            LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.x.y.z\\lib");
+            LOG_INFO("  IMPORTANT: match TRT version to your CUDA version:");
+            LOG_INFO("    TRT 10.7.x -> CUDA 12.6    TRT 10.15.x -> CUDA 12.9");
             LOG_INFO("  Download: https://developer.nvidia.com/tensorrt");
         }
     }
@@ -326,9 +333,26 @@ struct DllInit {
                     }
                 }
             }
-            wchar_t trtVal[MAX_PATH] = {};
-            if (GetEnvironmentVariableW(L"TRT_LIB_PATH", trtVal, MAX_PATH) && trtVal[0])
-                AddDllDirectory(trtVal);
+            // TRT: register both TRT_LIB_PATH (has nvinfer_10.dll) and TENSORRT_DIR/lib
+            {
+                wchar_t trtVal[MAX_PATH] = {};
+                if (GetEnvironmentVariableW(L"TRT_LIB_PATH", trtVal, MAX_PATH) && trtVal[0]) {
+                    AddDllDirectory(trtVal);
+                    // Also add sibling bin/ dir in case TRT has split DLL locations
+                    std::wstring trtParent = trtVal;
+                    auto sl = trtParent.find_last_of(L"\\/");
+                    if (sl != std::wstring::npos) {
+                        std::wstring binSib = trtParent.substr(0, sl) + L"\bin";
+                        if (GetFileAttributesW(binSib.c_str()) != INVALID_FILE_ATTRIBUTES)
+                            AddDllDirectory(binSib.c_str());
+                    }
+                }
+                wchar_t trtDir[MAX_PATH] = {};
+                if (GetEnvironmentVariableW(L"TENSORRT_DIR", trtDir, MAX_PATH) && trtDir[0]) {
+                    AddDllDirectory((std::wstring(trtDir) + L"\lib").c_str());
+                    AddDllDirectory((std::wstring(trtDir) + L"\bin").c_str());
+                }
+            }
         }
 
         // ── Step 4: register common controls (trackbar / slider classes) ──────
@@ -349,7 +373,18 @@ struct DllInit {
             LOG_INFO("3Deflatten v1.0.0  build: " __DATE__ " " __TIME__);
             LOG_INFO("Log file  : ", std::wstring(logPath));
             LOG_INFO("Host EXE  : ", std::wstring(exePath));
-            LOG_INFO("DLL dir   : ", dllDir);
+            // Log the full path to the .ax file for easy diagnosis
+            {
+                wchar_t axPath[MAX_PATH] = {};
+                HMODULE hm = nullptr;
+                GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(&GetThisDllDir), &hm);
+                if (hm) GetModuleFileNameW(hm, axPath, MAX_PATH);
+                LOG_INFO("DLL path  : ", std::wstring(axPath));
+                LOG_INFO("DLL dir   : ", dllDir);
+            }
             if (!installDir.empty() &&
                 _wcsicmp(installDir.c_str(), dllDir.c_str()) != 0)
                 LOG_INFO("Install dir: ", installDir,

@@ -7,8 +7,6 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
-#include <chrono>
-#include <iomanip>
 #include <cwchar>
 
 class Logger {
@@ -38,10 +36,7 @@ public:
     void Log(const char* level, Args&&... args) {
         if (!m_enabled) return;
         std::ostringstream oss;
-        oss << Timestamp() << " [" << level << "] ";
-        // Use comma-fold via an initializer list trick so each arg is
-        // dispatched through stream_arg (avoiding fold-with-<< which
-        // causes MSVC template deduction to bypass the wstring overloads).
+        oss << "[" << level << "] ";
         int dummy[] = { 0, (stream_arg(oss, args), 0)... };
         (void)dummy;
         oss << "\n";
@@ -52,8 +47,7 @@ public:
 
 private:
     Logger() = default;
-    std::string Timestamp();
-    void        Write(const std::string& line);
+    void Write(const std::string& line);
 
     bool          m_enabled = false;
     std::mutex    m_mtx;

@@ -18,16 +18,7 @@ void Logger::Init(const wchar_t* /*dllPath*/) {
 }
 
 std::string Logger::Timestamp() {
-    using namespace std::chrono;
-    auto now = system_clock::now();
-    auto tt  = system_clock::to_time_t(now);
-    auto ms  = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
-    std::tm tm{};
-    localtime_s(&tm, &tt);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%H:%M:%S")
-        << '.' << std::setfill('0') << std::setw(3) << ms.count();
-    return oss.str();
+    return {};  // timestamps removed -- log entries are sequential
 }
 
 void Logger::Write(const std::string& line) {

@@ -224,8 +224,8 @@ static void LogCudaDependencies(bool includeTrt) {
     LOG_INFO("    cuDNN 9.x          (install: https://developer.nvidia.com/cudnn)");
     if (includeTrt)
         LOG_INFO("    TensorRT 10.x      (install: https://developer.nvidia.com/tensorrt)");
-    LOG_INFO("  NOTE: CUDA 13.x ships cudart64_13.dll which is NOT compatible.");
-    LOG_INFO("        Install CUDA 12.x alongside 13.x -- multiple versions coexist.");
+    LOG_INFO("  NOTE: ORT 1.21 GPU build requires CUDA 12.x (cudart64_12.dll).");
+    LOG_INFO("        CUDA 13.x ships cudart64_13.dll and is NOT compatible with this build.");
     LOG_INFO("  NOTE: Driver 527+ required for CUDA 12. Driver 520+ for TRT 10.");
     LOG_INFO("");
 
@@ -237,8 +237,8 @@ static void LogCudaDependencies(bool includeTrt) {
     if (!hasCuda12) {
         // Detect other CUDA versions so we can tell the user exactly what they have
         if (DllLoadable(L"cudart64_13.dll") == 0)
-            LOG_WARN("  -> cudart64_13.dll found: you have CUDA 13.x. "
-                     "ORT 1.21 needs CUDA 12.x. Install CUDA 12.6.");
+            LOG_WARN("  -> CUDA 13.x detected. ORT 1.21 requires CUDA 12.x. "
+                     "Install CUDA 12.6 from https://developer.nvidia.com/cuda-12-6-0-download-archive");
         else if (DllLoadable(L"cudart64_110.dll") == 0)
             LOG_WARN("  -> cudart64_110.dll found: you have CUDA 11.x. "
                      "ORT 1.21 needs CUDA 12.x. Upgrade to CUDA 12.6.");
@@ -283,8 +283,8 @@ static bool CudaDriverPresent() {
     }
     if (DllLoadable(L"cudart64_12.dll") != 0) {
         if (DllLoadable(L"cudart64_13.dll") == 0)
-            LOG_WARN("CUDA 13.x detected (cudart64_13.dll) but ORT 1.21 needs CUDA 12.x. "
-                     "Install CUDA 12.6 from https://developer.nvidia.com/cuda-12-6-0-download-archive");
+            LOG_WARN("CUDA 13.x detected. ORT 1.21 requires CUDA 12.x. "
+                     "Install CUDA 12.6: https://developer.nvidia.com/cuda-12-6-0-download-archive");
         else if (DllLoadable(L"cudart64_110.dll") == 0)
             LOG_WARN("CUDA 11.x detected (cudart64_110.dll) but ORT 1.21 needs CUDA 12.x. "
                      "Install CUDA 12.6.");
@@ -394,6 +394,14 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 return true;
             } catch (const Ort::Exception& e) {
                 LOG_WARN("TensorRT EP init failed: ", e.what());
+                LOG_WARN("  Common causes:");
+                LOG_WARN("    1. TRT version does not match CUDA version.");
+                LOG_WARN("       TRT 10.7.x needs CUDA 12.6  |  TRT 10.15.x needs CUDA 12.9");
+                LOG_WARN("       Check zip filename: TensorRT-10.x.y.z.Windows.amd64.cuda-12.N.zip");
+                LOG_WARN("    2. Replaced onnxruntime*.dll with a version != 1.21.0.");
+                LOG_WARN("       The .ax is linked against ORT 1.21.0 ABI. Other versions crash.");
+                LOG_WARN("    3. nvinfer_10.dll / nvonnxparser_10.dll missing from .ax folder");
+                LOG_WARN("       or from TRT_LIB_PATH directory.");
                 return false;
             }
 #endif // ORT_ENABLE_TENSORRT
@@ -444,6 +452,9 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 m_sessionOpts.AppendExecutionProvider("DML", {{"device_id", "0"}});
                 outInfo = L"DirectML (DX12 GPU)";
                 LOG_INFO("Execution provider: DirectML");
+                LOG_INFO("  NOTE: DirectML compiles GPU shaders on first inference.");
+                LOG_INFO("  First frame may take 5-30 s; subsequent frames are fast.");
+                LOG_INFO("  Expected throughput for DA V2 Small on RTX/RX: ~100-400 ms/frame.");
                 return true;
             } catch (const Ort::Exception& e) {
                 LOG_WARN("DirectML EP init failed: ", e.what());
