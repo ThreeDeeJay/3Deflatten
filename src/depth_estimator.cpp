@@ -262,11 +262,39 @@ static void LogCudaDependencies(bool includeTrt) {
     // cuFFT (12 = part of CUDA 13 toolkit)
     ProbeDep(L"cufft64_12.dll",    L"cuFFT 12 -- in CUDA Toolkit bin");
 
+    // nvJitLink: CUDA JIT-linking library required by ORT 1.22+ CUDA EP.
+    // In CUDA 13.x this is nvJitLink_130_0.dll in the CUDA bin directory.
+    // NOTE: if all other CUDA DLLs are [OK] but onnxruntime_providers_cuda.dll
+    // still fails with error 126, this is almost always the missing piece.
+    bool hasJitLink = ProbeDep(L"nvJitLink_130_0.dll",
+                               L"CUDA 13 JIT-Link (required by ORT CUDA EP)");
+    if (!hasJitLink) {
+        // Older naming convention (CUDA 12 used this format)
+        hasJitLink = ProbeDep(L"nvJitLink_120_0.dll",
+                              L"CUDA 12 JIT-Link (fallback)");
+        if (!hasJitLink)
+            LOG_WARN("  nvJitLink not found -- onnxruntime_providers_cuda.dll WILL fail");
+            LOG_WARN("  with error 126 even if all other CUDA DLLs are present.");
+            LOG_WARN("  nvJitLink_130_0.dll should be in the CUDA 13 bin\\ directory.");
+            LOG_WARN("  If using CUDA 13 from bin\\x64\\, also add the parent bin\\ dir.");
+    }
+
     if (includeTrt) {
         LOG_INFO("");
         LOG_INFO("  TensorRT 10.x libraries (install from https://developer.nvidia.com/tensorrt):");
-        ProbeDep(L"nvinfer_10.dll",     L"TensorRT 10 inference engine");
-        ProbeDep(L"nvonnxparser_10.dll",L"TensorRT 10 ONNX parser");
+        ProbeDep(L"nvinfer_10.dll",              L"TensorRT 10 inference engine");
+        ProbeDep(L"nvonnxparser_10.dll",         L"TensorRT 10 ONNX parser");
+        ProbeDep(L"nvinfer_builder_resource_10.dll",
+                                                 L"TRT 10 builder resource (sub-dep of nvinfer)");
+        // zlibwapi.dll: required by TensorRT, NOT bundled with CUDA.
+        // TRT 10.x Windows zips may or may not include it in lib\.
+        bool hasZlib = ProbeDep(L"zlibwapi.dll", L"zlib (required by TRT 10)");
+        if (!hasZlib) {
+            LOG_WARN("  zlibwapi.dll NOT found -- TensorRT WILL fail with error 126.");
+            LOG_WARN("  Copy zlibwapi.dll from the TRT zip lib\\ folder, or download:");
+            LOG_WARN("  https://www.dll-files.com/zlibwapi.dll.html");
+            LOG_WARN("  Place it next to 3Deflatten_x64.ax or in TRT_LIB_PATH.");
+        }
     }
     LOG_INFO("--- end dependency scan ---");
 }
@@ -284,15 +312,13 @@ static bool CudaDriverPresent() {
                      "please report it.)");
         return false;
     }
-    if (DllLoadable(L"cudart64_12.dll") != 0) {
-        if (DllLoadable(L"cudart64_13.dll") == 0)
-            LOG_WARN("CUDA 13.x detected. ORT 1.21 requires CUDA 12.x. "
-                     "Install CUDA 12.6: https://developer.nvidia.com/cuda-12-6-0-download-archive");
-        else if (DllLoadable(L"cudart64_110.dll") == 0)
-            LOG_WARN("CUDA 11.x detected (cudart64_110.dll) but ORT 1.21 needs CUDA 12.x. "
-                     "Install CUDA 12.6.");
+    if (DllLoadable(L"cudart64_13.dll") != 0) {
+        if (DllLoadable(L"cudart64_12.dll") == 0)
+            LOG_WARN("CUDA 12.x detected. ORT 1.24.x requires CUDA 13.x. "
+                     "Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
         else
-            LOG_WARN("cudart64_12.dll not found. Install CUDA 12.6 Toolkit.");
+            LOG_WARN("No CUDA 13 runtime found. "
+                     "Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
         return false;
     }
     return true;

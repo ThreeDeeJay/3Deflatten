@@ -196,14 +196,61 @@ elseif(ARCH_SUFFIX STREQUAL "x64")
     endif()
     set(ort_nuget_SOURCE_DIR "${_ORT_NUGET_SRC}")
     ort_resolve_nuget_paths(ort_nuget_SOURCE_DIR "x64")
+
+    # ── Microsoft.AI.DirectML NuGet (latest standalone DirectML runtime) ──────
+    # The ORT NuGet bundles an older directml.dll.  We download the latest
+    # Microsoft.AI.DirectML package separately so users get the best perf.
+    # If DML_NUGET_DIR is set externally (CI), use that; otherwise FetchContent.
+    set(DML_NUGET_VERSION "1.15.4")
+    if(DEFINED DML_NUGET_DIR AND EXISTS "${DML_NUGET_DIR}")
+        message(STATUS "DirectML NuGet: using externally provided dir ${DML_NUGET_DIR}")
+        set(_DML_NUGET_SRC "${DML_NUGET_DIR}")
+    else()
+        message(STATUS "DirectML NuGet: downloading Microsoft.AI.DirectML ${DML_NUGET_VERSION} via FetchContent")
+        FetchContent_Declare(dml_nuget
+            URL "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/${DML_NUGET_VERSION}/microsoft.ai.directml.${DML_NUGET_VERSION}.nupkg"
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(dml_nuget)
+        set(_DML_NUGET_SRC "${dml_nuget_SOURCE_DIR}")
+    endif()
+    # DML NuGet layout: bin/x64-win/DirectML.dll  (note: capital D, capital ML)
+    set(_DML_DLL_CANDIDATES
+        "${_DML_NUGET_SRC}/bin/x64-win/DirectML.dll"
+        "${_DML_NUGET_SRC}/runtimes/win-x64/native/DirectML.dll"
+        "${_DML_NUGET_SRC}/bin/x64-win/directml.dll"
+        "${_DML_NUGET_SRC}/runtimes/win-x64/native/directml.dll"
+    )
+    set(_DML_DLL "")
+    foreach(_c ${_DML_DLL_CANDIDATES})
+        if(EXISTS "${_c}")
+            set(_DML_DLL "${_c}")
+            message(STATUS "DirectML.dll found at ${_DML_DLL}")
+            break()
+        endif()
+    endforeach()
+    if(NOT _DML_DLL)
+        file(GLOB_RECURSE _DML_CANDIDATES "${_DML_NUGET_SRC}/*.dll")
+        list(FILTER _DML_CANDIDATES INCLUDE REGEX "[Dd]irect[Mm][Ll]\\.dll$")
+        if(_DML_CANDIDATES)
+            list(GET _DML_CANDIDATES 0 _DML_DLL)
+            message(STATUS "DirectML.dll (glob fallback): ${_DML_DLL}")
+        else()
+            message(WARNING "DirectML.dll not found in NuGet. Users must place it manually.")
+        endif()
+    endif()
+
     set(ORT_EXTRA_DLLS "")
     foreach(_extra
-            "${_ORT_NUGET_SRC}/runtimes/win-x64/native/directml.dll"
             "${_ORT_NUGET_SRC}/runtimes/win-x64/native/onnxruntime_providers_shared.dll")
         if(EXISTS "${_extra}")
             list(APPEND ORT_EXTRA_DLLS "${_extra}")
         endif()
     endforeach()
+    # DirectML.dll comes from Microsoft.AI.DirectML (latest/fastest version)
+    if(_DML_DLL)
+        list(APPEND ORT_EXTRA_DLLS "${_DML_DLL}")
+    endif()
     set(ORT_COMPILE_DEFS ORT_ENABLE_DML)
 
 else()
@@ -333,23 +380,23 @@ target_link_libraries(3Deflatten PRIVATE
     delayimp.lib          # required for /DELAYLOAD
 )
 
-# ── Delay-load ORT and GPU-provider DLLs ─────────────────────────────────────
-# With delay-loading these DLLs are NOT resolved at .ax load time; they are
+# ── Delay-load ORT ───────────────────────────────────────────────────────────
+# With delay-loading, onnxruntime.dll is NOT resolved at .ax load time; it is
 # resolved on first call.  This lets DllInit (dllmain.cpp) call
 # AddDllDirectory() first, which is what allows the filter to work as a
 # COM-registered filter even when onnxruntime.dll is not on the system PATH.
 # Without this, regsvr32 / COM would fail with CO_E_ERRORINDLL (error 126).
-set(_DELAYLOAD_FLAGS
-    "/DELAYLOAD:onnxruntime.dll"
-    "/DELAYLOAD:onnxruntime_providers_shared.dll"
-    "/DELAYLOAD:onnxruntime_providers_cuda.dll"
-    "/DELAYLOAD:onnxruntime_providers_tensorrt.dll"
-    "/DELAYLOAD:directml.dll"
-)
-string(JOIN " " _DELAYLOAD_STR ${_DELAYLOAD_FLAGS})
-
+#
+# NOTE: we only DELAYLOAD onnxruntime.dll because that is the only ORT DLL
+# our .ax actually imports from directly.  The provider DLLs
+# (providers_cuda, providers_tensorrt, providers_shared, directml) are loaded
+# at runtime by ORT itself via LoadLibrary and have no direct import entries
+# in our .ax.  ORT's own import lib injects /DELAYLOAD pragmas for those DLLs;
+# since we have no imports from them, the linker emits LNK4199 warnings.
+# We suppress 4199 (and 4070 for the LIBRARY name mismatch from the .def).
+# These are purely cosmetic -- the .ax works correctly.
 set_target_properties(3Deflatten PROPERTIES
-    LINK_FLAGS "/DEF:\"${CMAKE_SOURCE_DIR}/src/3Deflatten.def\" ${_DELAYLOAD_STR}"
+    LINK_FLAGS "/DEF:\"${CMAKE_SOURCE_DIR}/src/3Deflatten.def\" /DELAYLOAD:onnxruntime.dll /ignore:4070 /ignore:4199"
 )
 
 # ── Copy runtime DLLs next to the .ax ─────────────────────────────────────────

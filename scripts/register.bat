@@ -6,6 +6,7 @@ setlocal
 cd /d "%~dp0"
 
 set AX64=Win64\3Deflatten_x64.ax
+set AX64G=Win64_GPU\3Deflatten_x64.ax
 set AX86=Win32\3Deflatten_x86.ax
 
 echo ============================================================
@@ -24,12 +25,23 @@ if errorlevel 1 (
 if exist "%AX64%" (
     regsvr32 /s "%AX64%"
     if errorlevel 1 (
-        echo [WARN] x64 registration failed.
+        echo [WARN] x64 DirectML registration failed.
     ) else (
-        echo [OK]   Registered x64: %AX64%
+        echo [OK]   Registered x64 DirectML: %AX64%
     )
 ) else (
-    echo [SKIP] x64 build not found: %AX64%
+    echo [SKIP] x64 DirectML build not found: %AX64%
+)
+
+if exist "%AX64G%" (
+    regsvr32 /s "%AX64G%"
+    if errorlevel 1 (
+        echo [WARN] x64 GPU (TRT+CUDA) registration failed.
+    ) else (
+        echo [OK]   Registered x64 GPU:      %AX64G%
+    )
+) else (
+    echo [SKIP] x64 GPU build not found: %AX64G%
 )
 
 if exist "%AX86%" (
@@ -37,7 +49,7 @@ if exist "%AX86%" (
     if errorlevel 1 (
         echo [WARN] x86 registration failed.
     ) else (
-        echo [OK]   Registered x86: %AX86%
+        echo [OK]   Registered x86:          %AX86%
     )
 ) else (
     echo [SKIP] x86 build not found: %AX86%
@@ -45,10 +57,13 @@ if exist "%AX86%" (
 
 echo.
 echo ============================================================
+echo  NOTE: If both Win64 and Win64_GPU are registered, the last
+echo  one registered wins for 64-bit DirectShow hosts.
+echo  Unregister the other first with unregister.bat if needed.
+echo ============================================================
+echo.
 echo  Optional environment variables:
-echo ============================================================
-echo  DEFLATTEN_LOG_FILE    = C:\path\to\deflatten.log
-echo  DEFLATTEN_MODEL_PATH  = C:\path\to\model.onnx
-echo ============================================================
+echo    DEFLATTEN_LOG_FILE    = C:\path\to\deflatten.log
+echo    DEFLATTEN_MODEL_PATH  = C:\path\to\model.onnx
 echo.
 pause

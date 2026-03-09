@@ -25,6 +25,7 @@
 #include "prop_page.h"
 #include "guids.h"
 #include "logger.h"
+#include <functional>
 #include <string>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -128,6 +129,40 @@ static bool RecursiveFindAndAdd(const std::wstring& baseDir,
     return found;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AddCudaDir: add CUDA bin directory AND its parent + nvJitLink subdirectory.
+//
+// CUDA 13.x on Windows may store DLLs under  bin\x64\  while nvJitLink
+// (required by ORT CUDA EP) lives in  bin\  or a  nvJitLink\  sub-tree.
+// Adding multiple levels ensures all transitive dependencies can be loaded.
+// ─────────────────────────────────────────────────────────────────────────────
+static void AddCudaDir(const std::wstring& cudaDllDir, const wchar_t* probeDll,
+                       const char* label) {
+    if (cudaDllDir.empty()) return;
+    TryAddDir(cudaDllDir, probeDll, label);
+    // Add parent directory (e.g. bin\ when we found bin\x64\) --
+    // nvJitLink_130_0.dll and nvrtc64_130_0.dll may live there.
+    auto sl = cudaDllDir.find_last_of(L"\\/");
+    if (sl != std::wstring::npos) {
+        std::wstring parent = cudaDllDir.substr(0, sl);
+        if (_wcsicmp(parent.c_str(), cudaDllDir.c_str()) != 0 &&
+            GetFileAttributesW(parent.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            AddDllDirectory(parent.c_str());
+            LOG_INFO("  added CUDA parent dir: ", parent);
+        }
+        // CUDA 13+ ships nvJitLink in its own subdirectory on some platforms
+        for (auto* sub : {L"nvJitLink\\bin", L"nvJitLink"}) {
+            std::wstring jitDir = parent + L"\\" + sub;
+            if (GetFileAttributesW(jitDir.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                AddDllDirectory(jitDir.c_str());
+                LOG_INFO("  added CUDA nvJitLink dir: ", jitDir);
+                break;
+            }
+        }
+    }
+}
+
 // Discover CUDA 12.x, cuDNN 9.x, and TensorRT 10.x install directories and
 // register them as DLL search paths so ORT can find provider DLLs without
 // requiring the user to modify PATH.
@@ -162,7 +197,7 @@ static void RegisterGpuRuntimeDirs() {
             for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
                 std::wstring probe = binDir + L"\\" + dll;
                 if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                    TryAddDir(binDir, dll, "CUDA bin (env var)");
+                    AddCudaDir(binDir, dll, "CUDA bin (env var)");
                     foundCuda = true;
                     break;
                 }
@@ -192,7 +227,7 @@ static void RegisterGpuRuntimeDirs() {
                 for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
                     std::wstring probe = binDir + L"\\" + dll;
                     if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                        TryAddDir(binDir, dll, "CUDA bin (registry)");
+                        AddCudaDir(binDir, dll, "CUDA bin (registry)");
                         foundCuda = true;
                         break;
                     }
@@ -204,14 +239,43 @@ static void RegisterGpuRuntimeDirs() {
     if (!foundCuda) {
         // Recursive scan of the CUDA Toolkit base directory.
         // Try CUDA 13 (ORT 1.24.x requirement) then CUDA 12 as fallback.
-        foundCuda = RecursiveFindAndAdd(
-            L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA",
-            L"cudart64_13.dll", "CUDA 13 bin (default scan)");
-    }
-    if (!foundCuda) {
-        foundCuda = RecursiveFindAndAdd(
-            L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA",
-            L"cudart64_12.dll", "CUDA 12 bin (default scan -- ORT 1.24.x needs CUDA 13)");
+        // NOTE: CUDA 13 on Windows may store DLLs in bin\x64\ not bin\.
+        // AddCudaDir adds both the found directory AND its parent (bin\) so
+        // that nvJitLink_130_0.dll and nvrtc64_130_0.dll are also reachable.
+        {
+            std::wstring cudaBase =
+                L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA";
+            for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
+                WIN32_FIND_DATAW fd{}; // reuse RecursiveFindPath logic inline
+                // Use RecursiveFindAndAdd to locate the DLL, then fix up dirs
+                // by also adding the parent.  We do a quick two-pass scan:
+                // pass 1: find the directory containing the DLL
+                std::function<std::wstring(const std::wstring&, int)> findDir;
+                findDir = [&](const std::wstring& dir, int depth) -> std::wstring {
+                    if (depth <= 0 || dir.empty()) return {};
+                    if (GetFileAttributesW((dir + L"\\" + dll).c_str()) !=
+                        INVALID_FILE_ATTRIBUTES) return dir;
+                    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+                    if (h == INVALID_HANDLE_VALUE) return {};
+                    std::wstring r;
+                    do {
+                        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+                        r = findDir(dir + L"\\" + fd.cFileName, depth - 1);
+                    } while (r.empty() && FindNextFileW(h, &fd));
+                    FindClose(h);
+                    return r;
+                };
+                std::wstring dir = findDir(cudaBase, 6);
+                if (!dir.empty()) {
+                    AddCudaDir(dir, dll,
+                               dll[9] == '1' ? "CUDA 13 bin (default scan)"
+                                             : "CUDA 12 bin (default scan -- needs CUDA 13)");
+                    foundCuda = true;
+                    break;
+                }
+            }
+        }
     }
     if (!foundCuda) {
         LOG_WARN("  CUDA not found. ORT 1.24.x GPU build requires CUDA 13.x.");
@@ -221,7 +285,7 @@ static void RegisterGpuRuntimeDirs() {
 
     // ── cuDNN 9.x ────────────────────────────────────────────────────────────
     // The cuDNN standalone installer nests DLLs in a version-specific path like
-    //   bin\<cuda-ver>\<arch>\    e.g. bin\12.9\x64\  (v9.19, Mar 2026)
+    //   bin\<cuda-ver>\<arch>\    e.g. bin\13.1\x64\  (v9.19, Mar 2026)
     // Rather than hard-coding these version strings we recursively scan the
     // install root for cudnn64_9.dll at any depth.
     {
@@ -255,33 +319,73 @@ static void RegisterGpuRuntimeDirs() {
         if (!foundCuDnn) {
             LOG_INFO("  cuDNN 9 not found via env/registry/default path.");
             LOG_INFO("  If installed elsewhere: set CUDNN_PATH=<install root>.");
+            LOG_INFO("  NOTE: the cuDNN standalone installer does NOT set CUDNN_PATH.");
+            LOG_INFO("  After installing, run Setup.py which will show the correct path.");
             LOG_INFO("  Download: https://developer.nvidia.com/cudnn");
         }
     }
 
     // ── TensorRT 10.x ────────────────────────────────────────────────────────
-    // TRT is distributed as a zip.  DLLs live in <TRT_root>\lib\  (NOT bin\).
-    // Set TRT_LIB_PATH=<TRT_root>\lib  OR  TENSORRT_DIR=<TRT_root>
-    // NOTE: env vars are inherited at process-creation time.  If you set
-    // TRT_LIB_PATH after the host app (e.g. PotPlayer) was already running,
-    // restart the host app so the new value is inherited.
+    // TRT may have DLLs in lib\, bin\, or both depending on version/extraction.
+    // We add every directory we find that contains nvinfer_10.dll, plus its
+    // sibling lib\/bin\ and the TRT root, to cover all sub-dependency layouts.
+    //
+    // IMPORTANT: TRT requires zlibwapi.dll which is NOT bundled with CUDA/cuDNN.
+    // In TRT 10.x Windows zips, zlibwapi.dll may be present in lib\.  If not,
+    // download and place it next to the .ax or in TRT_LIB_PATH.
+    // Get it from: https://www.dll-files.com/zlibwapi.dll.html
+    // (or build from https://zlib.net — use the Win64 DLL from contrib\vstudio)
     {
         wchar_t val[MAX_PATH] = {};
         bool foundTrt = false;
+
+        // Helper: add nvinfer directory + siblings to maximise sub-dep coverage
+        auto addTrtRoot = [&](const std::wstring& nvinferDir, const char* label) {
+            TryAddDir(nvinferDir, L"nvinfer_10.dll", label);
+            // Walk up to TRT root and add sibling directories
+            auto sl2 = nvinferDir.find_last_of(L"\\/");
+            if (sl2 != std::wstring::npos) {
+                std::wstring trtRoot = nvinferDir.substr(0, sl2);
+                for (auto* sub : {L"lib", L"bin", L""}) {
+                    std::wstring sib = sub[0] ? trtRoot + L"\\" + sub : trtRoot;
+                    if (sib != nvinferDir &&
+                        GetFileAttributesW(sib.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                        AddDllDirectory(sib.c_str());
+                        LOG_INFO("  added TRT dir: ", sib);
+                    }
+                }
+            }
+            // Log presence / absence of zlibwapi.dll
+            std::wstring zlib = nvinferDir + L"\\zlibwapi.dll";
+            if (GetFileAttributesW(zlib.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                AddDllDirectory(nvinferDir.c_str());
+                LOG_INFO("  zlibwapi.dll found in TRT dir");
+            } else {
+                LOG_WARN("  zlibwapi.dll NOT found next to nvinfer_10.dll.");
+                LOG_WARN("  TensorRT requires zlibwapi.dll.  Copy it from the TRT zip");
+                LOG_WARN("  (lib\\ folder) or get it from https://www.dll-files.com/zlibwapi.dll.html");
+                LOG_WARN("  and place it in: ", nvinferDir);
+            }
+        };
+
         if (GetEnvironmentVariableW(L"TRT_LIB_PATH", val, MAX_PATH) && val[0]) {
-            // TRT_LIB_PATH should point to the lib/ folder (contains nvinfer_10.dll).
-            // Use RecursiveFindAndAdd so foundTrt=true only if DLL is actually there.
-            foundTrt = RecursiveFindAndAdd(val, L"nvinfer_10.dll",
-                                            "TRT 10 (TRT_LIB_PATH)");
-            if (!foundTrt)
-                LOG_WARN("  TRT_LIB_PATH set but nvinfer_10.dll not found in: ",
-                         std::wstring(val));
+            std::wstring dir = val;
+            std::wstring probe = dir + L"\\nvinfer_10.dll";
+            if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                addTrtRoot(dir, "TRT 10 (TRT_LIB_PATH)");
+                foundTrt = true;
+            } else {
+                LOG_WARN("  TRT_LIB_PATH set but nvinfer_10.dll not found in: ", dir);
+            }
         }
         if (!foundTrt &&
             GetEnvironmentVariableW(L"TENSORRT_DIR", val, MAX_PATH) && val[0]) {
-            foundTrt = RecursiveFindAndAdd(std::wstring(val) + L"\\lib",
-                                            L"nvinfer_10.dll",
-                                            "TRT 10 (TENSORRT_DIR/lib)");
+            std::wstring libDir = std::wstring(val) + L"\\lib";
+            std::wstring probe  = libDir + L"\\nvinfer_10.dll";
+            if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                addTrtRoot(libDir, "TRT 10 (TENSORRT_DIR/lib)");
+                foundTrt = true;
+            }
         }
         if (!foundTrt) {
             std::wstring inst = RegReadSz(HKEY_LOCAL_MACHINE,
@@ -291,10 +395,32 @@ static void RegisterGpuRuntimeDirs() {
                                                "TRT 10 (registry)");
         }
         // Default scan: TensorRT zips typically extract under C:\Program Files\NVIDIA
-        if (!foundTrt)
-            foundTrt = RecursiveFindAndAdd(
-                L"C:\\Program Files\\NVIDIA",
-                L"nvinfer_10.dll", "TRT 10 (default scan)");
+        if (!foundTrt) {
+            // Use lambda to find nvinfer_10.dll then call addTrtRoot
+            std::wstring base = L"C:\\Program Files\\NVIDIA";
+            WIN32_FIND_DATAW fd2{};
+            std::function<std::wstring(const std::wstring&, int)> findTrt;
+            findTrt = [&](const std::wstring& dir, int depth) -> std::wstring {
+                if (depth <= 0 || dir.empty()) return {};
+                std::wstring p = dir + L"\\nvinfer_10.dll";
+                if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return dir;
+                HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd2);
+                if (h == INVALID_HANDLE_VALUE) return {};
+                std::wstring r;
+                do {
+                    if (!(fd2.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                    if (!wcscmp(fd2.cFileName, L".") || !wcscmp(fd2.cFileName, L"..")) continue;
+                    r = findTrt(dir + L"\\" + fd2.cFileName, depth - 1);
+                } while (r.empty() && FindNextFileW(h, &fd2));
+                FindClose(h);
+                return r;
+            };
+            std::wstring trtDir = findTrt(base, 5);
+            if (!trtDir.empty()) {
+                addTrtRoot(trtDir, "TRT 10 (default scan)");
+                foundTrt = true;
+            }
+        }
         if (!foundTrt) {
             LOG_INFO("  TensorRT 10 not found via env/registry/default scan.");
             LOG_INFO("  To use TRT: extract TensorRT-10.x.zip, then set:");
