@@ -34,13 +34,13 @@ jobs:
 
           # ── DirectML backend – 32-bit (for 32-bit player hosts) ────────────
           # CUDA/TRT are x64-only; x86 always uses DirectML or CPU.
-          - name:           "x86 DirectML"
-            arch:           x86
-            cmake_arch:     Win32
-            vcpkg_triplet:  x86-windows
-            ort_backend:    DirectML
-            ax_dir:         Win32
-            artifact_name:  3Deflatten_x86_DirectML
+#          - name:           "x86 DirectML"
+#            arch:           x86
+#            cmake_arch:     Win32
+#            vcpkg_triplet:  x86-windows
+#            ort_backend:    DirectML
+#            ax_dir:         Win32
+#            artifact_name:  3Deflatten_x86_DirectML
 
           # ── GPU backend (TensorRT + CUDA + CPU) ────────────────────────────
           # NVIDIA only.  Requires CUDA runtime + (optionally) TensorRT SDK
@@ -148,31 +148,26 @@ jobs:
           echo "CommitCount=$(git rev-list --count HEAD)" >> $env:GITHUB_ENV
           echo "CommitDate=$(git show -s --date=format:'%Y-%m-%d' --format=%cd)" >> $env:GITHUB_ENV
 
-      - name: Download x86 DirectML
-        uses: actions/download-artifact@v4
-        with:
-          name: 3Deflatten_x86_DirectML
-          path: Artifacts\Win32
+#      - name: Download x86 DirectML
+#        uses: actions/download-artifact@v4
+#        with:
+#          name: 3Deflatten_x86_DirectML
+#          path: Release\Win32
 
       - name: Download x64 DirectML
         uses: actions/download-artifact@v4
         with:
           name: 3Deflatten_x64_DirectML
-          path: Artifacts\Win64
+          path: Release\Win64
 
       - name: Download x64 GPU (TensorRT+CUDA)
         uses: actions/download-artifact@v4
         with:
           name: 3Deflatten_x64_GPU
-          path: Artifacts\Win64_GPU
+          path: Release\Win64_GPU
 
       - name: Deploy
         run: |
-          mkdir "Release"
-          copy -r "Artifacts/Win32"               "Release"
-          copy -r "Artifacts/Win64"               "Release"
-          copy -r "Artifacts/Win64_GPU"           "Release"
-          copy "3Deflatten.ini"                   "Release/Win32/"
           copy "3Deflatten.ini"                   "Release/Win64/"
           copy "3Deflatten.ini"                   "Release/Win64_GPU/"
           copy "README.md"                        "Release/ReadMe.txt"
@@ -181,6 +176,10 @@ jobs:
           copy "scripts/unregister.bat"           "Release/"
           copy "scripts/Setup.py"                 "Release/"
           copy "scripts/collect_runtime_dlls.py"  "Release/"
+#copy "3Deflatten.ini"                   "Release/Win32/"
+#copy -r "Artifacts/Win64"               "Release"
+#copy -r "Artifacts/Win64_GPU"           "Release"
+#copy -r "Artifacts/Win32"               "Release"
   
       - name: Compress artifacts
         if: github.event_name == 'push'
