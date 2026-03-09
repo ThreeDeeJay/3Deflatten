@@ -269,6 +269,7 @@ static void LogCudaDependencies(bool includeTrt) {
     LOG_INFO("--- end dependency scan ---");
 }
 
+#if defined(ORT_ENABLE_CUDA) || defined(ORT_ENABLE_TENSORRT)
 // Probe for nvcuda.dll + CUDA 12 runtime.  Returns false and logs clearly if
 // either is absent or the wrong version.
 static bool CudaDriverPresent() {
@@ -321,6 +322,9 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
     return false;
 }
 
+#endif // ORT_ENABLE_CUDA || ORT_ENABLE_TENSORRT
+
+#ifdef ORT_ENABLE_TENSORRT
 // Returns %LOCALAPPDATA%\3Deflatten\trt_engines as a UTF-8 string.
 // TRT compiles CUDA kernels on first use; the cache avoids that on subsequent
 // runs (first-run cost: 30-120 s on an RTX 2080 Ti for 1022x1022 input).
@@ -338,6 +342,7 @@ static std::string TrtEngineCacheDir() {
     }
     return ".\\trt_engines";
 }
+#endif // ORT_ENABLE_TENSORRT
 
 void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                                           std::wstring& outInfo) {

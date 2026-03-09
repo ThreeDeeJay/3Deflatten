@@ -87,27 +87,40 @@ macro(ort_resolve_nuget_paths SOURCE_VAR ARCH_RID)
     set(_ORT_SRC "${${SOURCE_VAR}}")
     # headers are stable
     set(ORT_INC "${_ORT_SRC}/build/native/include")
-    # find the import lib by glob
-    file(GLOB_RECURSE _ORT_LIB_CANDIDATES "${_ORT_SRC}/build/native/lib/*.lib")
-    if(NOT _ORT_LIB_CANDIDATES)
-        # some versions put the lib directly under runtimes/
-        file(GLOB_RECURSE _ORT_LIB_CANDIDATES "${_ORT_SRC}/runtimes/*.lib")
-    endif()
-    list(FILTER _ORT_LIB_CANDIDATES INCLUDE REGEX "onnxruntime\.lib$")
-    if(_ORT_LIB_CANDIDATES)
-        list(GET _ORT_LIB_CANDIDATES 0 ORT_LIB)
-        message(STATUS "ORT import lib: ${ORT_LIB}")
+
+    # ── Import lib ────────────────────────────────────────────────────────────
+    # The NuGet package ships libs for multiple arches (x64, x86, arm64, arm)
+    # under build/native/lib/<arch>/onnxruntime.lib.  "arm64" sorts before "x64"
+    # alphabetically so a plain GLOB_RECURSE + list(GET 0) always picked the
+    # wrong arch on x64 builds, causing LNK4272 and unresolved OrtGetApiBase.
+    # Always probe the exact arch path first; only glob as a fallback and then
+    # filter by ARCH_RID to guarantee we never link the wrong arch.
+    set(_ORT_LIB_EXACT "${_ORT_SRC}/build/native/lib/${ARCH_RID}/onnxruntime.lib")
+    if(EXISTS "${_ORT_LIB_EXACT}")
+        set(ORT_LIB "${_ORT_LIB_EXACT}")
+        message(STATUS "ORT import lib (exact): ${ORT_LIB}")
     else()
-        # leave ORT_LIB pointing at the expected path so the fatal check below fires
-        set(ORT_LIB "${_ORT_SRC}/build/native/lib/${ARCH_RID}/onnxruntime.lib")
+        file(GLOB_RECURSE _ORT_LIB_CANDIDATES "${_ORT_SRC}/build/native/lib/*.lib")
+        if(NOT _ORT_LIB_CANDIDATES)
+            file(GLOB_RECURSE _ORT_LIB_CANDIDATES "${_ORT_SRC}/runtimes/*.lib")
+        endif()
+        list(FILTER _ORT_LIB_CANDIDATES INCLUDE REGEX "onnxruntime\.lib$")
+        list(FILTER _ORT_LIB_CANDIDATES INCLUDE REGEX "/${ARCH_RID}/")
+        if(_ORT_LIB_CANDIDATES)
+            list(GET _ORT_LIB_CANDIDATES 0 ORT_LIB)
+            message(STATUS "ORT import lib (glob/${ARCH_RID}): ${ORT_LIB}")
+        else()
+            set(ORT_LIB "${_ORT_LIB_EXACT}")  # will be caught by existence check
+        endif()
     endif()
-    # DLL
+
+    # ── DLL ───────────────────────────────────────────────────────────────────
     set(ORT_DLL "${_ORT_SRC}/runtimes/win-${ARCH_RID}/native/onnxruntime.dll")
     if(NOT EXISTS "${ORT_DLL}")
-        # flat layout fallback
         file(GLOB_RECURSE _ORT_DLL_CANDIDATES "${_ORT_SRC}/runtimes/*.dll")
         list(FILTER _ORT_DLL_CANDIDATES INCLUDE REGEX "onnxruntime\.dll$")
         list(FILTER _ORT_DLL_CANDIDATES EXCLUDE REGEX "providers")
+        list(FILTER _ORT_DLL_CANDIDATES INCLUDE REGEX "win-${ARCH_RID}")
         if(_ORT_DLL_CANDIDATES)
             list(GET _ORT_DLL_CANDIDATES 0 ORT_DLL)
         endif()
