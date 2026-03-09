@@ -77,40 +77,40 @@ message(STATUS "ORT backend: ${ORT_BACKEND}")
 
 # ── Helper macro: resolve ORT paths from an extracted NuGet/zip directory ────
 # NuGet packages (.nupkg are zips) are extracted by FetchContent directly into
-# SOURCE_DIR with no wrapper folder, so the layout is always:
-#   SOURCE_DIR/build/native/include/
-#   SOURCE_DIR/build/native/lib/<arch>/onnxruntime.lib
-#   SOURCE_DIR/runtimes/win-<arch>/native/onnxruntime.dll
-# However the lib sub-arch folder name has varied across package versions
-# (x64, x86, arm64).  We glob to be safe rather than hardcoding it.
+# SOURCE_DIR with no wrapper folder.  Confirmed layout for ORT 1.21:
+#   SOURCE_DIR/build/native/include/          headers
+#   SOURCE_DIR/runtimes/win-x64/native/       onnxruntime.lib + onnxruntime.dll
+# Older packages used build/native/lib/<arch>/ for the import lib; we probe
+# both so the macro works across package versions.
 macro(ort_resolve_nuget_paths SOURCE_VAR ARCH_RID)
     set(_ORT_SRC "${${SOURCE_VAR}}")
-    # headers are stable
     set(ORT_INC "${_ORT_SRC}/build/native/include")
 
     # ── Import lib ────────────────────────────────────────────────────────────
-    # The NuGet package ships libs for multiple arches (x64, x86, arm64, arm)
-    # under build/native/lib/<arch>/onnxruntime.lib.  "arm64" sorts before "x64"
-    # alphabetically so a plain GLOB_RECURSE + list(GET 0) always picked the
-    # wrong arch on x64 builds, causing LNK4272 and unresolved OrtGetApiBase.
-    # Always probe the exact arch path first; only glob as a fallback and then
-    # filter by ARCH_RID to guarantee we never link the wrong arch.
-    set(_ORT_LIB_EXACT "${_ORT_SRC}/build/native/lib/${ARCH_RID}/onnxruntime.lib")
-    if(EXISTS "${_ORT_LIB_EXACT}")
-        set(ORT_LIB "${_ORT_LIB_EXACT}")
-        message(STATUS "ORT import lib (exact): ${ORT_LIB}")
+    # Microsoft.ML.OnnxRuntime.DirectML (and the plain CPU NuGet) ship the
+    # import lib at:  runtimes/win-<arch>/native/onnxruntime.lib
+    # NOT under build/native/lib/ (that path does not exist in these packages).
+    # Probe in priority order so we work across past and future package layouts:
+    #   1. runtimes/win-<arch>/native/  (DirectML / CPU NuGet -- confirmed 1.21)
+    #   2. build/native/lib/<arch>/     (older package layout, kept as fallback)
+    #   3. GLOB_RECURSE filtered by arch (last resort)
+    set(_ORT_LIB_RUNTIME "${_ORT_SRC}/runtimes/win-${ARCH_RID}/native/onnxruntime.lib")
+    set(_ORT_LIB_BUILD   "${_ORT_SRC}/build/native/lib/${ARCH_RID}/onnxruntime.lib")
+    if(EXISTS "${_ORT_LIB_RUNTIME}")
+        set(ORT_LIB "${_ORT_LIB_RUNTIME}")
+        message(STATUS "ORT import lib (runtimes/): ${ORT_LIB}")
+    elseif(EXISTS "${_ORT_LIB_BUILD}")
+        set(ORT_LIB "${_ORT_LIB_BUILD}")
+        message(STATUS "ORT import lib (build/native/lib/): ${ORT_LIB}")
     else()
-        file(GLOB_RECURSE _ORT_LIB_CANDIDATES "${_ORT_SRC}/build/native/lib/*.lib")
-        if(NOT _ORT_LIB_CANDIDATES)
-            file(GLOB_RECURSE _ORT_LIB_CANDIDATES "${_ORT_SRC}/runtimes/*.lib")
-        endif()
+        file(GLOB_RECURSE _ORT_LIB_CANDIDATES "${_ORT_SRC}/*.lib")
         list(FILTER _ORT_LIB_CANDIDATES INCLUDE REGEX "onnxruntime\.lib$")
-        list(FILTER _ORT_LIB_CANDIDATES INCLUDE REGEX "/${ARCH_RID}/")
+        list(FILTER _ORT_LIB_CANDIDATES INCLUDE REGEX "${ARCH_RID}")
         if(_ORT_LIB_CANDIDATES)
             list(GET _ORT_LIB_CANDIDATES 0 ORT_LIB)
             message(STATUS "ORT import lib (glob/${ARCH_RID}): ${ORT_LIB}")
         else()
-            set(ORT_LIB "${_ORT_LIB_EXACT}")  # will be caught by existence check
+            set(ORT_LIB "${_ORT_LIB_RUNTIME}")  # will be caught by existence check
         endif()
     endif()
 

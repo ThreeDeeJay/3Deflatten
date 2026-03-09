@@ -19,11 +19,11 @@ Usage (CI / automated)
 
 Required DLLs (bundled by this script)
 ----------------------------------------
-  cudart64_12.dll        – CUDA 12 runtime
-  cublas64_12.dll        – cuBLAS
-  cublasLt64_12.dll      – cuBLAS Lt
-  cufft64_11.dll         – cuFFT  (ORT 1.21 still uses the CUDA 11 ABI name)
-  cudnn64_9.dll          – cuDNN 9
+  cudart64_12.dll        - CUDA 12 runtime
+  cublas64_12.dll        - cuBLAS
+  cublasLt64_12.dll      - cuBLAS Lt
+  cufft64_11.dll         - cuFFT  (ORT 1.21 still uses the CUDA 11 ABI name)
+  cudnn64_9.dll          - cuDNN 9
 
 Note: onnxruntime_providers_cuda.dll / onnxruntime_providers_tensorrt.dll
 are already included in the ORT GPU zip that CMake downloads at build time.
@@ -40,7 +40,7 @@ import subprocess
 import sys
 import tempfile
 
-# pip package → list of DLL names it should provide on Windows
+# pip package -> list of DLL names it should provide on Windows
 PACKAGES = {
     "nvidia-cuda-runtime-cu12":  ["cudart64_12.dll"],
     "nvidia-cublas-cu12":        ["cublas64_12.dll", "cublasLt64_12.dll"],
@@ -57,7 +57,7 @@ def find_dll_in_package(site_packages: pathlib.Path,
                         dll_name: str) -> pathlib.Path | None:
     """Search for dll_name inside the nvidia pip package directory."""
     # pip installs nvidia packages as  site-packages/nvidia/<short_name>/
-    # e.g. nvidia-cuda-runtime-cu12 → nvidia/cuda_runtime/
+    # e.g. nvidia-cuda-runtime-cu12 -> nvidia/cuda_runtime/
     short = pkg_pip_name.replace("nvidia-", "").replace("-cu12", "").replace("-", "_")
     candidates = [
         site_packages / "nvidia" / short,
@@ -94,7 +94,7 @@ def install_packages(packages: list[str], target_dir: pathlib.Path) -> None:
 def collect(output_dir: pathlib.Path, no_confirm: bool = False) -> bool:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n3Deflatten – Collect CUDA Runtime DLLs")
+    print("\n3Deflatten - Collect CUDA Runtime DLLs")
     print("=" * 50)
     print(f"Output: {output_dir}\n")
     print("Packages to install:")
@@ -134,7 +134,7 @@ def collect(output_dir: pathlib.Path, no_confirm: bool = False) -> bool:
                     dst = output_dir / dll
                     shutil.copy2(src, dst)
                     size_kb = src.stat().st_size // 1024
-                    print(f"  [OK] {dll}  ({size_kb:,} KB)  →  {dst}")
+                    print(f"  [OK] {dll}  ({size_kb:,} KB)  ->  {dst}")
 
     if missing:
         print(f"\n[WARNING] {len(missing)} DLL(s) not found:")
@@ -143,7 +143,7 @@ def collect(output_dir: pathlib.Path, no_confirm: bool = False) -> bool:
         print("The GPU build will still work if these DLLs are on the system")
         print("or if 3Deflatten's auto-discovery finds them at runtime.")
     else:
-        print(f"\n[OK] All DLLs collected → {output_dir}")
+        print(f"\n[OK] All DLLs collected -> {output_dir}")
         print("\nThese DLLs are redistributable under the CUDA EULA and cuDNN EULA.")
         print("Distribute them alongside 3Deflatten_x64.ax in your release package.")
 
@@ -151,6 +151,15 @@ def collect(output_dir: pathlib.Path, no_confirm: bool = False) -> bool:
 
 
 def main():
+    # Reconfigure stdout to UTF-8 on Windows where the console codepage may
+    # default to cp1252 and choke on any non-ASCII in print() output.
+    import sys, io
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(
         description="Collect CUDA 12 / cuDNN 9 runtime DLLs for 3Deflatten GPU build",
         formatter_class=argparse.RawDescriptionHelpFormatter,
