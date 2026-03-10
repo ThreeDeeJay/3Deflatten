@@ -366,7 +366,7 @@ def check_tensorrt() -> dict:
         "    This bundles TRT DLLs in Win64_GPU -- no system install needed.\n"
         "  Option 2: download TRT 10.15.1 (CUDA 13 build):\n"
         "    https://developer.nvidia.com/downloads/compute/machine-learning/"
-        "tensorrt/10.15.1/zip/TensorRT-10.15.1.Windows.win10.cuda-13.1.zip\n"
+        "tensorrt/10.15.1/zip/TensorRT-10.15.1.29.Windows.amd64.cuda-13.1.zip\n"
         r"  After extracting, set: TRT_LIB_PATH=<TRT root>\lib"
         "\n"
         "  IMPORTANT: set env vars BEFORE launching the host application.\n"
@@ -790,7 +790,7 @@ cuDNN 9.19.1 (required for CUDA and TensorRT EPs):
     CUDNN_PATH=C:\\Program Files\\NVIDIA\\CUDNN\\v9.19\\bin\\13.1\\x64
 
 TensorRT 10.15.1 CUDA 13 build (optional; fastest EP):
-  https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.15.1/zip/TensorRT-10.15.1.Windows.win10.cuda-13.1.zip
+  https://developer.download.nvidia.com/compute/machine-learning/tensorrt/10.15.1/zip/TensorRT-10.15.1.29.Windows.amd64.cuda-13.1.zip
   Or run  python collect_runtime_dlls.py --trt-zip <path>  to bundle DLLs.
   NOTE: TRT 10.7.x and earlier are CUDA 12 builds -- do NOT use those.
   After extracting, set: TRT_LIB_PATH=<TRT root>\\lib

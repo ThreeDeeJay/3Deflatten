@@ -13,7 +13,7 @@ Sources (official NVIDIA URLs):
   cuDNN 9.19.1  : https://developer.download.nvidia.com/compute/cudnn/9.19.1/
                    local_installers/cudnn_9.19.1_windows_x86_64.exe
   TensorRT 10.15: https://developer.nvidia.com/downloads/compute/machine-learning/
-                   tensorrt/10.15.1/zip/TensorRT-10.15.1.Windows.win10.cuda-13.1.zip
+                   tensorrt/10.15.1/zip/TensorRT-10.15.1.29.Windows.amd64.cuda-13.1.zip
 
 DLLs collected:
   CUDA 13:  cudart64_13, cublas64_13, cublasLt64_13, cufft64_12, nvJitLink_130_0
