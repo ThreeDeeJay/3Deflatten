@@ -31,7 +31,8 @@ Usage:
   python collect_runtime_dlls.py --trt-zip <file>    # use local TRT zip
   python collect_runtime_dlls.py --no-confirm        # CI / unattended
 
-The .exe installers are 7-zip SFX archives extracted via py7zr (pure Python).
+The .exe installers are NSIS archives extracted via 7z.exe (found in common
+install paths, or 7zr.exe is auto-downloaded from 7-zip.org if not installed).
 Downloads are cached in %LOCALAPPDATA%/3Deflatten/dlcache to avoid
 re-downloading on repeated runs (~5 GB total on first run).
 """
@@ -147,31 +148,65 @@ def download(url: str, cache_dir: pathlib.Path) -> pathlib.Path:
 
 
 # ---------------------------------------------------------------------------
-# Extraction helpers
+# 7-Zip helper  (CUDA and cuDNN installers are NSIS archives; py7zr cannot
+# handle them, but the real 7z.exe can.  We try common install paths first,
+# then download the tiny 7zr.exe standalone binary from 7-zip.org if needed.)
 # ---------------------------------------------------------------------------
 
-def _ensure_py7zr():
-    """Return the py7zr module, installing it with pip if necessary."""
+# 7zr.exe standalone (no DLL deps) from the official 7-zip.org sourceforge mirror
+_7ZR_URL    = "https://www.7-zip.org/a/7zr.exe"
+_7ZR_CACHE  = CACHE_DIR / "7zr.exe"
+
+# Common 7-Zip install locations on Windows
+_7Z_CANDIDATES = [
+    r"C:\Program Files\7-Zip\7z.exe",
+    r"C:\Program Files (x86)\7-Zip\7z.exe",
+]
+
+
+def _find_7z_exe() -> pathlib.Path | None:
+    """Return path to 7z.exe / 7zr.exe, downloading 7zr.exe if necessary."""
+    # 1. Check common install paths
+    for p in _7Z_CANDIDATES:
+        if pathlib.Path(p).exists():
+            return pathlib.Path(p)
+    # 2. Check PATH
+    found = shutil.which("7z") or shutil.which("7za") or shutil.which("7zr")
+    if found:
+        return pathlib.Path(found)
+    # 3. Cached 7zr.exe from a previous run
+    if _7ZR_CACHE.exists():
+        return _7ZR_CACHE
+    # 4. Download 7zr.exe (~1.5 MB standalone, no install needed)
+    print("  7-Zip not found on this system.  Downloading 7zr.exe (~1.5 MB)...")
+    print(f"  Source: {_7ZR_URL}")
+    _7ZR_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _7ZR_CACHE.with_suffix(".tmp")
     try:
-        import py7zr
-        return py7zr
-    except ImportError:
-        pass
-    print("  py7zr not found -- installing (pure-Python 7-zip extractor)...")
+        urllib.request.urlretrieve(_7ZR_URL, str(tmp), reporthook=_progress_hook)
+        print()
+        tmp.rename(_7ZR_CACHE)
+        print(f"  Saved 7zr.exe to {_7ZR_CACHE}")
+        return _7ZR_CACHE
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to download 7zr.exe: {exc}") from exc
+
+
+def extract_with_7z(archive: pathlib.Path, out_dir: pathlib.Path):
+    """Extract *archive* (any format 7-Zip supports) to *out_dir* using 7z.exe."""
     import subprocess
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "--quiet", "py7zr"])
-    import py7zr
-    return py7zr
-
-
-def extract_7z_sfx(archive: pathlib.Path, out_dir: pathlib.Path):
-    """Extract a 7-zip SFX .exe using py7zr."""
-    py7zr = _ensure_py7zr()
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  Extracting {archive.name}  (this may take a few minutes)...")
-    with py7zr.SevenZipFile(archive, mode="r") as z:
-        z.extractall(path=str(out_dir))
+    exe = _find_7z_exe()
+    print(f"  Extracting {archive.name}  (using {exe.name}, may take a few minutes)...")
+    result = subprocess.run(
+        [str(exe), "x", str(archive), f"-o{out_dir}", "-y", "-bso0", "-bsp1"],
+        capture_output=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"7-Zip extraction failed (exit {result.returncode}) for {archive.name}"
+        )
     print(f"  Extracted to {out_dir}")
 
 
@@ -287,7 +322,7 @@ def run(output_dir: pathlib.Path,
     cuda_archive = download(CUDA_URL, CACHE_DIR)
     cuda_ext     = CACHE_DIR / "cuda_extracted"
     if not cuda_ext.exists():
-        extract_7z_sfx(cuda_archive, cuda_ext)
+        extract_with_7z(cuda_archive, cuda_ext)
     missing = collect_named_dlls(cuda_ext, CUDA_DLLS, output_dir,
                                  "CUDA 13 DLLs")
     all_missing.extend(missing)
@@ -297,7 +332,7 @@ def run(output_dir: pathlib.Path,
     cudnn_archive = download(CUDNN_URL, CACHE_DIR)
     cudnn_ext     = CACHE_DIR / "cudnn_extracted"
     if not cudnn_ext.exists():
-        extract_7z_sfx(cudnn_archive, cudnn_ext)
+        extract_with_7z(cudnn_archive, cudnn_ext)
     missing = collect_named_dlls(cudnn_ext, CUDNN_DLLS, output_dir,
                                  "cuDNN 9 DLLs")
     all_missing.extend(missing)
