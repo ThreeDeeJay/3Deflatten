@@ -32,15 +32,16 @@ BANNER = """
 ================================================================="""
 
 # ORT version string bundled in the current release
-ORT_VERSION = "1.24.3"
-# ORT 1.24.x pre-built GPU Windows binary requires CUDA 12.x (NOT 13.x).
-# CUDA 13.x builds are source-build only; the released zip uses CUDA 12.
-# CUDA 12.x and 13.x can coexist on the same machine -- no need to uninstall 13.x.
-CUDA_MAJOR   = 12
-CUDA_RT_DLL  = f"cudart64_{CUDA_MAJOR}.dll"     # cudart64_12.dll
-CUBLAS_DLL   = f"cublas64_{CUDA_MAJOR}.dll"
-CUBLASLT_DLL = f"cublasLt64_{CUDA_MAJOR}.dll"
-CUFFT_DLL    = "cufft64_11.dll"                 # cuFFT API version shipped with CUDA 12
+ORT_VERSION  = "1.24.3"
+# ORT 1.24.3 gpu_cuda13 build requires CUDA 13.x at runtime.
+# CUDA 12.x (cudart64_12.dll) is NOT compatible with this build.
+# Driver 572+ required for CUDA 13.x.
+CUDA_MAJOR    = 13
+CUDA_RT_DLL   = "cudart64_13.dll"
+CUBLAS_DLL    = "cublas64_13.dll"
+CUBLASLT_DLL  = "cublasLt64_13.dll"
+CUFFT_DLL     = "cufft64_12.dll"     # cuFFT API stays at version 12 inside CUDA 13 toolkit
+NVJITLINK_DLL = "nvJitLink_130_0.dll"
 
 # ---------------------------------------------------------------------------
 # Model catalogue
@@ -165,49 +166,43 @@ def check_cuda() -> dict:
     result = {"ok": False, "version": None, "path": None,
               "how": None, "notes": []}
 
-    # ── Step 1: env vars set by CUDA installer ───────────────────────────────
-    # Prefer CUDA_MAJOR.x; also accept older 12.x in case user has mixed install
+    # ── Step 0: bundled DLLs in Win64_GPU (from collect_runtime_dlls.py) ────
+    hit = find_in_release_dirs(CUDA_RT_DLL)
+    if hit:
+        result.update(ok=True, version="13.x", path=str(hit), how="bundled")
+        return result
+
+    # ── Step 1: env vars set by CUDA 13 installer ───────────────────────────
     cuda_env_vars = [
-        (f"CUDA_PATH_V{CUDA_MAJOR}_2", f"{CUDA_MAJOR}.2"),
-        (f"CUDA_PATH_V{CUDA_MAJOR}_1", f"{CUDA_MAJOR}.1"),
-        (f"CUDA_PATH_V{CUDA_MAJOR}_0", f"{CUDA_MAJOR}.0"),
-        ("CUDA_PATH_V12_9", "12.9"), ("CUDA_PATH_V12_8", "12.8"),
-        ("CUDA_PATH_V12_7", "12.7"), ("CUDA_PATH_V12_6", "12.6"),
-        ("CUDA_PATH", "?"),
+        ("CUDA_PATH_V13_2", "13.2"), ("CUDA_PATH_V13_1", "13.1"),
+        ("CUDA_PATH_V13_0", "13.0"), ("CUDA_PATH", "?"),
     ]
     for var, ver in cuda_env_vars:
         p = env(var)
         if not p:
             continue
-        bin_dir = pathlib.Path(p) / "bin"
-        dll = bin_dir / CUDA_RT_DLL
-        if dll.exists():
-            result.update(ok=True, version=ver, path=str(dll), how="env")
-            if not str(CUDA_MAJOR) in ver:
-                result["notes"].append(
-                    f"Found CUDA {ver} via {var}, but ORT {ORT_VERSION} "
-                    f"requires CUDA {CUDA_MAJOR}.x.\n"
-                    f"  Please install CUDA {CUDA_MAJOR}: "
-                    "https://developer.nvidia.com/cuda-downloads"
-                )
-            return result
-        # env var exists but wrong CUDA major -- note for diagnostics
-        # Env var points to wrong CUDA major -- will be caught below
+        # CUDA 13 on Windows stores DLLs in bin\x64\ (toolkit) or bin\
+        for bin_sub in (r"bin\x64", "bin"):
+            dll = pathlib.Path(p) / bin_sub / CUDA_RT_DLL
+            if dll.exists():
+                result.update(ok=True, version=ver, path=str(dll), how="env")
+                return result
 
     # ── Step 2: registry ─────────────────────────────────────────────────────
     reg_base = r"SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA"
     for sub in reg_enum_subkeys(winreg.HKEY_LOCAL_MACHINE, reg_base):
-        if not sub.startswith("v12."):
+        if not sub.startswith("v13."):
             continue
         inst = reg_read(winreg.HKEY_LOCAL_MACHINE,
                         f"{reg_base}\\{sub}", "InstallDir")
         if not inst:
             continue
-        dll = pathlib.Path(inst) / "bin" / CUDA_RT_DLL
-        if dll.exists():
-            result.update(ok=True, version=sub.lstrip("v"),
-                          path=str(dll), how="registry")
-            return result
+        for bin_sub in (r"bin\x64", "bin"):
+            dll = pathlib.Path(inst) / bin_sub / CUDA_RT_DLL
+            if dll.exists():
+                result.update(ok=True, version=sub.lstrip("v"),
+                              path=str(dll), how="registry")
+                return result
 
     # ── Step 3: default filesystem scan ──────────────────────────────────────
     cuda_root = pathlib.Path(
@@ -215,7 +210,6 @@ def check_cuda() -> dict:
     hit = find_file_recursive(cuda_root, CUDA_RT_DLL)
     if hit:
         result.update(ok=True, path=str(hit), how="filesystem")
-        # Extract version from path component like "v13.0"
         for part in hit.parts:
             if part.lower().startswith("v") and "." in part:
                 result["version"] = part.lstrip("vV")
@@ -223,27 +217,23 @@ def check_cuda() -> dict:
         return result
 
     # ── Not found ─────────────────────────────────────────────────────────────
-    # Check whether a wrong CUDA major is installed
-    wrong = find_file_recursive(cuda_root, "cudart64_12.dll")
-    if wrong:
+    wrong12 = find_file_recursive(cuda_root, "cudart64_12.dll")
+    if wrong12:
         result["notes"].append(
-            f"CUDA 12.x found at {wrong} but ORT {ORT_VERSION} requires "
-            f"CUDA {CUDA_MAJOR}.x.\n"
-            f"  Install CUDA {CUDA_MAJOR}: https://developer.nvidia.com/cuda-downloads"
-        )
-    else:
-        cuda13 = find_file_recursive(cuda_root, "cudart64_13.dll")
-    if cuda13:
-        result["notes"].append(
-            "CUDA 13.x found but ORT 1.24.x pre-built GPU binary requires CUDA 12.x.\n"
-            "  GOOD NEWS: CUDA 12.x and 13.x can coexist on the same machine.\n"
-            "  Install CUDA 12.6 alongside 13.x (do NOT uninstall 13.x):\n"
-            "    https://developer.nvidia.com/cuda-12-6-0-download-archive"
+            f"CUDA 12.x found at {wrong12}, but ORT {ORT_VERSION} (gpu_cuda13)\n"
+            f"  requires CUDA 13.x (cudart64_13.dll), not CUDA 12.x.\n"
+            f"  Run collect_runtime_dlls.py to bundle CUDA 13 DLLs, or\n"
+            f"  install CUDA 13.1: https://developer.download.nvidia.com/compute/"
+            f"cuda/13.1.1/local_installers/cuda_13.1.1_windows.exe"
         )
     else:
         result["notes"].append(
-            "CUDA 12.x not found.\n"
-            "  Install CUDA 12.6: https://developer.nvidia.com/cuda-12-6-0-download-archive"
+            "CUDA 13.x not found.\n"
+            "  Option 1 (recommended): run  python collect_runtime_dlls.py\n"
+            "    This bundles CUDA 13 DLLs in Win64_GPU so no system install is needed.\n"
+            "  Option 2: install CUDA 13.1:\n"
+            "    https://developer.download.nvidia.com/compute/cuda/13.1.1/"
+            "local_installers/cuda_13.1.1_windows.exe"
         )
     return result
 
@@ -256,10 +246,15 @@ def check_cudnn() -> dict:
     result = {"ok": False, "version": None, "path": None,
               "how": None, "notes": []}
 
+    # ── Step 0: bundled DLLs in Win64_GPU (from collect_runtime_dlls.py) ────
+    hit = find_in_release_dirs("cudnn64_9.dll")
+    if hit:
+        result.update(ok=True, version="9.x", path=str(hit), how="bundled")
+        return result
+
     # ── Step 1: CUDNN_PATH env var ────────────────────────────────────────────
     # NOTE: The cuDNN standalone installer does NOT set CUDNN_PATH automatically.
-    # Users must set it manually: CUDNN_PATH=<install root>
-    # (e.g. C:\Program Files\NVIDIA\CUDNN\v9.19\bin\12.9\x64)
+    # Users must set it manually: CUDNN_PATH=<folder containing cudnn64_9.dll>
     cudnn_env = env("CUDNN_PATH")
     if cudnn_env:
         hit = find_file_recursive(cudnn_env, "cudnn64_9.dll")
@@ -293,11 +288,13 @@ def check_cudnn() -> dict:
     # ── Not found ─────────────────────────────────────────────────────────────
     result["notes"].append(
         "cuDNN 9.x not found.\n"
-        "  Download: https://developer.nvidia.com/cudnn\n"
+        "  Option 1 (recommended): run  python collect_runtime_dlls.py\n"
+        "    This bundles cuDNN 9 DLLs in Win64_GPU so no system install is needed.\n"
+        "  Option 2: install cuDNN 9.19.1:\n"
+        "    https://developer.download.nvidia.com/compute/cudnn/9.19.1/"
+        "local_installers/cudnn_9.19.1_windows_x86_64.exe\n"
         "  The standalone installer does NOT set CUDNN_PATH automatically.\n"
-        "  After installing, set CUDNN_PATH to the folder containing "
-        "cudnn64_9.dll\n"
-        r"  e.g. CUDNN_PATH=C:\Program Files\NVIDIA\CUDNN\v9.19\bin\12.9\x64"
+        r"  After installing, set: CUDNN_PATH=C:\Program Files\NVIDIA\CUDNN\v9.19\bin\13.1\x64"
     )
     return result
 
@@ -309,6 +306,12 @@ def check_cudnn() -> dict:
 def check_tensorrt() -> dict:
     result = {"ok": False, "version": None, "path": None,
               "how": None, "notes": []}
+
+    # ── Step 0: bundled DLLs in Win64_GPU (from collect_runtime_dlls.py) ────
+    hit = find_in_release_dirs("nvinfer_10.dll")
+    if hit:
+        result.update(ok=True, path=str(hit), how="bundled")
+        return result
 
     # ── Step 1: TRT_LIB_PATH (should point to lib\ folder) ───────────────────
     trt_lib = env("TRT_LIB_PATH")
@@ -358,13 +361,16 @@ def check_tensorrt() -> dict:
 
     # ── Not found ─────────────────────────────────────────────────────────────
     result["notes"].append(
-        "TensorRT 10.x not found (optional; required only for TRT EP).\n"
-        "  Download: https://developer.nvidia.com/tensorrt\n"
-        "  After extracting the zip, set:\n"
-        r"    TRT_LIB_PATH=C:\Program Files\NVIDIA\TensorRT-10.x.y.z\lib"
+        "TensorRT 10.15.x not found (optional; required only for TRT EP).\n"
+        "  Option 1 (recommended): run  python collect_runtime_dlls.py\n"
+        "    This bundles TRT DLLs in Win64_GPU -- no system install needed.\n"
+        "  Option 2: download TRT 10.15.1 (CUDA 13 build):\n"
+        "    https://developer.nvidia.com/downloads/compute/machine-learning/"
+        "tensorrt/10.15.1/zip/TensorRT-10.15.1.Windows.win10.cuda-13.1.zip\n"
+        r"  After extracting, set: TRT_LIB_PATH=<TRT root>\lib"
         "\n"
-        "  IMPORTANT: set this BEFORE launching the host app (PotPlayer etc.)\n"
-        "  as env vars are inherited at process-creation time."
+        "  IMPORTANT: set env vars BEFORE launching the host application.\n"
+        "  NOTE: TRT 10.7.x and earlier are CUDA 12 builds -- do NOT use those."
     )
     return result
 
@@ -771,24 +777,23 @@ def main():
             print(f"""
 --- Dependency Download Links ---
 
-CUDA 12.x (required for CUDA and TensorRT EPs with ORT 1.24.x):
-  https://developer.nvidia.com/cuda-12-6-0-download-archive
-  NOTE: ORT 1.24.x pre-built binary requires CUDA 12.x, NOT 13.x.
-  CUDA 12.x and 13.x can coexist -- no need to uninstall 13.x.
+CUDA 13.1 (required for CUDA and TensorRT EPs with ORT {ORT_VERSION} gpu_cuda13):
+  https://developer.download.nvidia.com/compute/cuda/13.1.1/local_installers/cuda_13.1.1_windows.exe
+  NOTE: Driver 572+ required.  ORT {ORT_VERSION} uses the gpu_cuda13 build.
+  Or run  python collect_runtime_dlls.py  to bundle DLLs without a system install.
 
-cuDNN 9.x (required for CUDA and TensorRT EPs):
-  https://developer.nvidia.com/cudnn
+cuDNN 9.19.1 (required for CUDA and TensorRT EPs):
+  https://developer.download.nvidia.com/compute/cudnn/9.19.1/local_installers/cudnn_9.19.1_windows_x86_64.exe
+  Or run  python collect_runtime_dlls.py  to bundle DLLs without a system install.
   NOTE: The standalone installer does NOT set CUDNN_PATH automatically.
   After installing, set CUDNN_PATH to the folder containing cudnn64_9.dll:
-    CUDNN_PATH=C:\\Program Files\\NVIDIA\\CUDNN\\v9.xx\\bin\\12.x\\x64
+    CUDNN_PATH=C:\\Program Files\\NVIDIA\\CUDNN\\v9.19\\bin\\13.1\\x64
 
-TensorRT 10.x (optional; fastest EP):
-  https://developer.nvidia.com/tensorrt
-  After extracting, set TRT_LIB_PATH=<TRT root>\\lib
-  IMPORTANT: set env vars BEFORE launching the host application.
-  Both TRT_LIB_PATH and CUDNN_PATH must be SYSTEM environment variables
-  (or set before launching PotPlayer) -- user env vars are not inherited
-  by already-running processes.
+TensorRT 10.15.1 CUDA 13 build (optional; fastest EP):
+  https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.15.1/zip/TensorRT-10.15.1.Windows.win10.cuda-13.1.zip
+  Or run  python collect_runtime_dlls.py --trt-zip <path>  to bundle DLLs.
+  NOTE: TRT 10.7.x and earlier are CUDA 12 builds -- do NOT use those.
+  After extracting, set: TRT_LIB_PATH=<TRT root>\\lib
 
 DirectML: built into Windows 10 1809+ (no extra install needed).
   The x64 DirectML build of 3Deflatten bundles directml.dll.

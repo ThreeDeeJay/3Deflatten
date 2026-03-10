@@ -1,94 +1,97 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-r"""
-Collect ALL runtime DLLs required for the Win64_GPU build of 3Deflatten
-so that users do NOT need system-wide CUDA/cuDNN/TensorRT installs.
+"""
+Collect ALL runtime DLLs required for the Win64_GPU build of 3Deflatten.
 
-ORT 1.24.3 gpu_cuda13 build requires CUDA 13.x at runtime.
-All DLLs listed below are redistributable under their respective EULAs.
+ORT 1.24.3 gpu_cuda13 requires CUDA 13.x at runtime.  This script downloads
+the official NVIDIA installers / zip and extracts ONLY the DLLs needed, so
+users do NOT need to run the full CUDA / cuDNN / TensorRT system installers.
 
-── What this script collects ────────────────────────────────────────────
-  From CUDA 13 pip wheels (nvidia-*-cu13):
-    cudart64_13.dll          CUDA 13 runtime
-    cublas64_13.dll          cuBLAS 13
-    cublasLt64_13.dll        cuBLAS-Lt 13
-    cufft64_12.dll           cuFFT  (API ver 12, ships in CUDA 13 toolkit)
-    nvJitLink_130_0.dll      CUDA JIT-linker (required by ORT CUDA EP)
+Sources (official NVIDIA URLs):
+  CUDA 13.1.1   : https://developer.download.nvidia.com/compute/cuda/13.1.1/
+                   local_installers/cuda_13.1.1_windows.exe
+  cuDNN 9.19.1  : https://developer.download.nvidia.com/compute/cudnn/9.19.1/
+                   local_installers/cudnn_9.19.1_windows_x86_64.exe
+  TensorRT 10.15: https://developer.nvidia.com/downloads/compute/machine-learning/
+                   tensorrt/10.15.1/zip/TensorRT-10.15.1.Windows.win10.cuda-13.1.zip
 
-  From cuDNN 9 pip wheel (nvidia-cudnn-cu13):
-    cudnn64_9.dll                            main library
-    cudnn_ops64_9.dll                        ops
-    cudnn_adv64_9.dll                        advanced
-    cudnn_cnn64_9.dll                        CNN
-    cudnn_graph64_9.dll                      graph
-    cudnn_engines_runtime_compiled64_9.dll   engines
-    cudnn_engines_precompiled64_9.dll        precompiled engines
-    cudnn_heuristic64_9.dll                  heuristics
+DLLs collected:
+  CUDA 13:  cudart64_13, cublas64_13, cublasLt64_13, cufft64_12, nvJitLink_130_0
+  cuDNN 9:  cudnn64_9, cudnn_ops64_9, cudnn_adv64_9, cudnn_cnn64_9,
+            cudnn_graph64_9, cudnn_engines_runtime_compiled64_9,
+            cudnn_engines_precompiled64_9, cudnn_heuristic64_9
+  TRT 10.15: all *.dll from TRT lib folder (nvinfer_10, nvonnxparser_10,
+             nvinfer_builder_resource_10, nvinfer_plugin_10, zlibwapi, ...)
 
-  From TensorRT 10.15.x lib\ (set TRT_LIB_PATH env var, or pass --trt-lib):
-    nvinfer_10.dll
-    nvonnxparser_10.dll
-    nvinfer_builder_resource_10.dll
-    nvinfer_plugin_10.dll
-    zlibwapi.dll
-    (all other *.dll in lib\)
+NOT bundled (always present as a driver component in System32):
+  nvcuda.dll
 
-── NOT bundled (always in System32, never redistributed) ────────────────
-    nvcuda.dll  -- NVIDIA driver component
+Usage:
+  python collect_runtime_dlls.py                     # download everything
+  python collect_runtime_dlls.py --trt-zip <file>    # use local TRT zip
+  python collect_runtime_dlls.py --no-confirm        # CI / unattended
 
-── Usage ────────────────────────────────────────────────────────────────
-  Local (from the release root):
-    python collect_runtime_dlls.py
-    python collect_runtime_dlls.py --trt-lib "C:\TRT\lib"
-
-  CI (from repo root):
-    python scripts/collect_runtime_dlls.py \
-        --output build\Win64_GPU \
-        --trt-lib <path> \
-        --no-confirm
+The .exe installers are 7-zip SFX archives extracted via py7zr (pure Python).
+Downloads are cached in %LOCALAPPDATA%/3Deflatten/dlcache to avoid
+re-downloading on repeated runs (~5 GB total on first run).
 """
 
 import argparse
 import os
 import pathlib
 import shutil
-import subprocess
 import sys
 import tempfile
+import urllib.request
+import zipfile
 
-# Force UTF-8 output
+# Force UTF-8 output on Windows consoles
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
-DEFAULT_OUTPUT = SCRIPT_DIR / "Win64_GPU"
+# After packaging, this script lives at the release root next to Win64_GPU/.
+# When run from scripts/ during development, go up one level.
+_candidate     = SCRIPT_DIR / "Win64_GPU"
+DEFAULT_OUTPUT = _candidate if _candidate.exists() else SCRIPT_DIR.parent / "Win64_GPU"
 
-# ── pip packages → DLL names ─────────────────────────────────────────────────
-CUDA_PACKAGES = {
-    "nvidia-cuda-runtime-cu13": ["cudart64_13.dll"],
-    "nvidia-cublas-cu13":       ["cublas64_13.dll", "cublasLt64_13.dll"],
-    "nvidia-cufft-cu13":        ["cufft64_12.dll"],
-    "nvidia-nvjitlink-cu13":    ["nvJitLink_130_0.dll"],
-}
+CUDA_URL  = ("https://developer.download.nvidia.com/compute/cuda/13.1.1/"
+             "local_installers/cuda_13.1.1_windows.exe")
+CUDNN_URL = ("https://developer.download.nvidia.com/compute/cudnn/9.19.1/"
+             "local_installers/cudnn_9.19.1_windows_x86_64.exe")
+TRT_URL   = ("https://developer.nvidia.com/downloads/compute/machine-learning/"
+             "tensorrt/10.15.1/zip/TensorRT-10.15.1.Windows.win10.cuda-13.1.zip")
 
-CUDNN_PACKAGES = {
-    "nvidia-cudnn-cu13": [
-        "cudnn64_9.dll",
-        "cudnn_ops64_9.dll",
-        "cudnn_adv64_9.dll",
-        "cudnn_cnn64_9.dll",
-        "cudnn_graph64_9.dll",
-        "cudnn_engines_runtime_compiled64_9.dll",
-        "cudnn_engines_precompiled64_9.dll",
-        "cudnn_heuristic64_9.dll",
-    ],
-}
+# DLLs to copy from the CUDA installer
+CUDA_DLLS = [
+    "cudart64_13.dll",
+    "cublas64_13.dll",
+    "cublasLt64_13.dll",
+    "cufft64_12.dll",       # cuFFT API version stays at 12 inside CUDA 13 toolkit
+    "nvJitLink_130_0.dll",
+]
 
-# Key TRT DLLs we require (we copy ALL lib\ DLLs, but warn if these are absent)
-TRT_KEY_DLLS = [
+# DLLs to copy from the cuDNN installer
+CUDNN_DLLS = [
+    "cudnn64_9.dll",
+    "cudnn_ops64_9.dll",
+    "cudnn_adv64_9.dll",
+    "cudnn_cnn64_9.dll",
+    "cudnn_graph64_9.dll",
+    "cudnn_engines_runtime_compiled64_9.dll",
+    "cudnn_engines_precompiled64_9.dll",
+    "cudnn_heuristic64_9.dll",
+]
+
+# Key TRT DLLs -- we copy ALL *.dll from the TRT archive but warn if absent
+TRT_REQUIRED_DLLS = [
     "nvinfer_10.dll",
     "nvonnxparser_10.dll",
     "nvinfer_builder_resource_10.dll",
@@ -96,150 +99,179 @@ TRT_KEY_DLLS = [
     "zlibwapi.dll",
 ]
 
-SEARCH_SUBDIRS = ["bin", "lib", ""]
+# Download cache (avoids re-downloading ~5 GB on repeated runs)
+_appdata  = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+CACHE_DIR = pathlib.Path(_appdata) / "3Deflatten" / "dlcache"
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Download helper
+# ---------------------------------------------------------------------------
 
-def install_packages(packages, target_dir):
-    print(f"  pip install {' '.join(packages)}")
-    cmd = [
-        sys.executable, "-m", "pip", "install",
-        "--quiet", "--target", str(target_dir), "--only-binary=:all:",
-    ] + packages
-    try:
-        subprocess.check_call(cmd)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"  [WARN] pip install failed: {e}")
-        return False
-
-
-def find_in_pip_target(target_dir, pkg_name, dll_name):
-    """Search for dll_name inside an nvidia pip package unpacked into target_dir."""
-    short = (pkg_name
-             .replace("nvidia-", "")
-             .replace("-cu13", "").replace("-cu12", "")
-             .replace("-", "_"))
-    bases = [
-        target_dir / "nvidia" / short,
-        target_dir / "nvidia" / short.split("_cu")[0],
-    ]
-    for base in bases:
-        if not base.exists():
-            continue
-        for sub in SEARCH_SUBDIRS:
-            p = (base / sub / dll_name) if sub else (base / dll_name)
-            if p.exists():
-                return p
-        for hit in base.rglob(dll_name):
-            return hit
-    for hit in target_dir.rglob(dll_name):
-        return hit
-    return None
-
-
-def find_in_system(dll_name):
-    """Fall back to system CUDA/cuDNN install."""
-    cuda_vars = [
-        "CUDA_PATH_V13_2", "CUDA_PATH_V13_1", "CUDA_PATH_V13_0",
-        "CUDA_PATH_V12_9", "CUDA_PATH",
-    ]
-    roots = []
-    for var in cuda_vars:
-        v = os.environ.get(var, "").strip()
-        if v:
-            roots.append(pathlib.Path(v))
-            break
-    roots.append(pathlib.Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"))
-    cudnn_env = os.environ.get("CUDNN_PATH", "").strip()
-    if cudnn_env:
-        roots.append(pathlib.Path(cudnn_env))
-    roots.append(pathlib.Path(r"C:\Program Files\NVIDIA\CUDNN"))
-    for root in roots:
-        if root.exists():
-            for hit in root.rglob(dll_name):
-                return hit
-    return None
-
-
-def collect_dll(pkg_name, dll_name, target_dir, pip_ok, output_dir):
-    """Try pip → system fallback. Returns True if found and copied."""
-    src = None
-    if pip_ok:
-        src = find_in_pip_target(target_dir, pkg_name, dll_name)
-    if src is None:
-        src = find_in_system(dll_name)
-    if src is None:
-        for hit in pathlib.Path(sys.prefix).rglob(dll_name):
-            src = hit
-            break
-    if src is None:
-        return False
-    dst = output_dir / dll_name
-    shutil.copy2(src, dst)
-    kb = src.stat().st_size // 1024
-    print(f"  [OK] {dll_name:<52} {kb:>6,} KB  ← {src.parent}")
-    return True
-
-
-def copy_trt_dlls(trt_lib_path, output_dir):
-    """Copy ALL DLLs from TRT lib\ into output_dir. Returns list of copied names."""
-    if not trt_lib_path:
-        return []
-    trt = pathlib.Path(trt_lib_path)
-    if not trt.exists():
-        print(f"  [SKIP] TRT lib path not found: {trt}")
-        return []
-
-    all_dlls = sorted(set(list(trt.rglob("*.dll")) + list(trt.rglob("*.DLL"))))
-    if not all_dlls:
-        print(f"  [SKIP] No DLLs found in {trt}")
-        return []
-
-    print(f"\n  Copying ALL TRT DLLs from {trt}:")
-    copied = []
-    for src in all_dlls:
-        dst = output_dir / src.name
-        shutil.copy2(src, dst)
-        kb = src.stat().st_size // 1024
-        print(f"  [OK] {src.name:<52} {kb:>6,} KB")
-        copied.append(src.name)
-
-    missing_key = [d for d in TRT_KEY_DLLS
-                   if d.lower() not in {c.lower() for c in copied}]
-    if missing_key:
-        print()
-        for dll in missing_key:
-            print(f"  [WARN] Key TRT DLL missing: {dll}")
-            if dll == "zlibwapi.dll":
-                print("         zlibwapi.dll is required by TRT.  It should be in the TRT lib\\ folder.")
-                print("         Download: https://www.dll-files.com/zlibwapi.dll.html")
-    return copied
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-def collect(output_dir, trt_lib_path=None, no_confirm=False):
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    all_pkgs = {**CUDA_PACKAGES, **CUDNN_PACKAGES}
-
-    print("\n3Deflatten — Collect GPU Runtime DLLs (CUDA 13 + cuDNN 9 + TRT 10.15)")
-    print("=" * 70)
-    print(f"Output: {output_dir}\n")
-    print("ORT 1.24.3 gpu_cuda13 requires CUDA 13.x at runtime.")
-    print("All CUDA/cuDNN DLLs below are redistributable under NVIDIA EULAs.\n")
-    print("CUDA 13 packages:")
-    for pkg, dlls in CUDA_PACKAGES.items():
-        print(f"  {pkg}  →  {', '.join(dlls)}")
-    print("cuDNN 9 package:")
-    for pkg, dlls in CUDNN_PACKAGES.items():
-        print(f"  {pkg}  →  {len(dlls)} DLLs")
-    if trt_lib_path:
-        print(f"TRT lib path: {trt_lib_path}")
+def _progress_hook(count, block_size, total_size):
+    done = count * block_size
+    if total_size > 0:
+        pct     = min(100, done * 100 // total_size)
+        mb_done = done / 1_048_576
+        mb_tot  = total_size / 1_048_576
+        bar     = "#" * (pct // 5)
+        print(f"\r  [{bar:<20}] {pct:3d}%  {mb_done:7.1f}/{mb_tot:.1f} MB",
+              end="", flush=True)
     else:
-        print("TRT: not provided (pass --trt-lib or set TRT_LIB_PATH env var)")
+        mb = done / 1_048_576
+        print(f"\r  {mb:.1f} MB downloaded...", end="", flush=True)
+
+
+def download(url: str, cache_dir: pathlib.Path) -> pathlib.Path:
+    """Download *url* into *cache_dir* (skip if already cached).  Returns path."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fname = url.split("/")[-1]
+    out   = cache_dir / fname
+    if out.exists():
+        mb = out.stat().st_size / 1_048_576
+        print(f"  [CACHED] {fname}  ({mb:.0f} MB)")
+        return out
+    print(f"  Downloading {fname} ...")
+    print(f"  Source: {url}")
+    tmp = out.with_suffix(out.suffix + ".part")
+    try:
+        urllib.request.urlretrieve(url, str(tmp), reporthook=_progress_hook)
+        print()
+        tmp.rename(out)
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"Download failed for {fname}: {exc}") from exc
+    mb = out.stat().st_size / 1_048_576
+    print(f"  Saved {fname}  ({mb:.0f} MB)")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Extraction helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_py7zr():
+    """Return the py7zr module, installing it with pip if necessary."""
+    try:
+        import py7zr
+        return py7zr
+    except ImportError:
+        pass
+    print("  py7zr not found -- installing (pure-Python 7-zip extractor)...")
+    import subprocess
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "--quiet", "py7zr"])
+    import py7zr
+    return py7zr
+
+
+def extract_7z_sfx(archive: pathlib.Path, out_dir: pathlib.Path):
+    """Extract a 7-zip SFX .exe using py7zr."""
+    py7zr = _ensure_py7zr()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  Extracting {archive.name}  (this may take a few minutes)...")
+    with py7zr.SevenZipFile(archive, mode="r") as z:
+        z.extractall(path=str(out_dir))
+    print(f"  Extracted to {out_dir}")
+
+
+def extract_zip_file(archive: pathlib.Path, out_dir: pathlib.Path):
+    """Extract a standard zip file using Python's built-in zipfile module."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  Extracting {archive.name}  (this may take a minute)...")
+    with zipfile.ZipFile(archive, "r") as z:
+        z.extractall(str(out_dir))
+    print(f"  Extracted to {out_dir}")
+
+
+# ---------------------------------------------------------------------------
+# DLL collection helpers
+# ---------------------------------------------------------------------------
+
+def _find_dll(search_root: pathlib.Path, dll_name: str) -> pathlib.Path | None:
+    """Recursively find the first file matching *dll_name* (case-insensitive)."""
+    target = dll_name.lower()
+    for p in search_root.rglob("*"):
+        if p.is_file() and p.name.lower() == target:
+            return p
+    return None
+
+
+def collect_named_dlls(search_root: pathlib.Path,
+                       dll_names: list,
+                       output_dir: pathlib.Path,
+                       label: str) -> list:
+    """Find each DLL name in *search_root* and copy to *output_dir*.
+    Returns list of names that could not be found."""
+    missing = []
+    print(f"\n  {label}:")
+    for dll in dll_names:
+        src = _find_dll(search_root, dll)
+        if src is None:
+            print(f"  [MISSING] {dll}")
+            missing.append(dll)
+            continue
+        dst = output_dir / dll
+        shutil.copy2(str(src), str(dst))
+        kb = src.stat().st_size // 1024
+        print(f"  [OK] {dll:<56} {kb:>6,} KB")
+    return missing
+
+
+def collect_all_trt_dlls(search_root: pathlib.Path,
+                          output_dir: pathlib.Path) -> list:
+    """Copy every *.dll found under *search_root* to *output_dir*.
+    Returns list of key DLL names that were absent."""
+    all_dlls = list(search_root.rglob("*.dll"))
+    if not all_dlls:
+        print("  [WARN] No DLLs found in TRT archive.")
+        return TRT_REQUIRED_DLLS
+
+    # De-duplicate by name, preferring the shallowest copy
+    seen: dict = {}
+    for p in all_dlls:
+        key = p.name.lower()
+        if key not in seen or len(p.parts) < len(seen[key].parts):
+            seen[key] = p
+
+    print(f"\n  TensorRT ({len(seen)} DLLs):")
+    for name_lower in sorted(seen):
+        src = seen[name_lower]
+        dst = output_dir / src.name
+        shutil.copy2(str(src), str(dst))
+        kb = src.stat().st_size // 1024
+        print(f"  [OK] {src.name:<56} {kb:>6,} KB")
+
+    copied_lower = set(seen.keys())
+    return [d for d in TRT_REQUIRED_DLLS if d.lower() not in copied_lower]
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def run(output_dir: pathlib.Path,
+        trt_zip_path,
+        no_confirm: bool) -> bool:
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    print()
+    print("3Deflatten -- Collect GPU Runtime DLLs (CUDA 13 + cuDNN 9 + TRT 10.15)")
+    print("=" * 70)
+    print(f"Output : {output_dir}")
+    print(f"Cache  : {CACHE_DIR}")
+    print()
+    print("First-run downloads (~5 GB total; cached for subsequent runs):")
+    print(f"  CUDA 13.1.1  installer  : {CUDA_URL.split('/')[-1]}")
+    print(f"  cuDNN 9.19.1 installer  : {CUDNN_URL.split('/')[-1]}")
+    if trt_zip_path:
+        print(f"  TRT 10.15.1 zip (local): {trt_zip_path}")
+    else:
+        print(f"  TRT 10.15.1 zip         : {TRT_URL.split('/')[-1]}")
+    print()
+    print("Only the required DLLs will be copied; all are NVIDIA-redistributable.")
     print()
 
     if not no_confirm:
@@ -248,61 +280,89 @@ def collect(output_dir, trt_lib_path=None, no_confirm=False):
             print("Cancelled.")
             return False
 
-    missing = []
+    all_missing = []
 
-    with tempfile.TemporaryDirectory(prefix="3df_gpu_") as tmp:
-        tmp_path = pathlib.Path(tmp)
-        pip_ok = install_packages(list(all_pkgs.keys()), tmp_path)
+    # ── CUDA 13 ───────────────────────────────────────────────────────────────
+    print("\n[1/3]  CUDA 13.1.1")
+    cuda_archive = download(CUDA_URL, CACHE_DIR)
+    cuda_ext     = CACHE_DIR / "cuda_extracted"
+    if not cuda_ext.exists():
+        extract_7z_sfx(cuda_archive, cuda_ext)
+    missing = collect_named_dlls(cuda_ext, CUDA_DLLS, output_dir,
+                                 "CUDA 13 DLLs")
+    all_missing.extend(missing)
 
-        print("\n  Collecting CUDA 13 DLLs:")
-        for pkg, dlls in all_pkgs.items():
-            for dll in dlls:
-                if not collect_dll(pkg, dll, tmp_path, pip_ok, output_dir):
-                    print(f"  [MISSING] {dll}  (from {pkg})")
-                    missing.append((pkg, dll))
+    # ── cuDNN 9 ───────────────────────────────────────────────────────────────
+    print("\n[2/3]  cuDNN 9.19.1")
+    cudnn_archive = download(CUDNN_URL, CACHE_DIR)
+    cudnn_ext     = CACHE_DIR / "cudnn_extracted"
+    if not cudnn_ext.exists():
+        extract_7z_sfx(cudnn_archive, cudnn_ext)
+    missing = collect_named_dlls(cudnn_ext, CUDNN_DLLS, output_dir,
+                                 "cuDNN 9 DLLs")
+    all_missing.extend(missing)
 
-    # TRT DLLs
-    trt_path = trt_lib_path or os.environ.get("TRT_LIB_PATH", "").strip()
-    trt_copied = copy_trt_dlls(trt_path, output_dir)
-    if not trt_copied:
-        print("\n  [INFO] TRT DLLs not copied — no TRT lib path provided.")
-        print("         Pass --trt-lib <TRT_root>\\lib  or set TRT_LIB_PATH.")
-        print("         Required TRT version: 10.15.x (CUDA 13 build).")
-        print("         Download: https://developer.nvidia.com/tensorrt")
-
-    print()
-    if missing:
-        print(f"[WARN] {len(missing)} CUDA/cuDNN DLL(s) not collected:")
-        for pkg, dll in missing:
-            print(f"  {dll}  (from {pkg})")
-        print("Install CUDA 13: https://developer.nvidia.com/cuda-downloads")
-        print("These DLLs are required for CUDA EP; without them ORT falls back to CPU.")
+    # ── TensorRT 10.15 ────────────────────────────────────────────────────────
+    print("\n[3/3]  TensorRT 10.15.1")
+    if trt_zip_path:
+        trt_archive = pathlib.Path(trt_zip_path)
+        if not trt_archive.exists():
+            print(f"  [ERROR] TRT zip not found: {trt_archive}")
+            return False
     else:
-        print(f"[OK] All CUDA 13 + cuDNN 9 DLLs collected → {output_dir}")
+        trt_archive = download(TRT_URL, CACHE_DIR)
+    trt_ext = CACHE_DIR / "trt_extracted"
+    if not trt_ext.exists():
+        extract_zip_file(trt_archive, trt_ext)
+    trt_missing = collect_all_trt_dlls(trt_ext, output_dir)
+    if trt_missing:
+        print()
+        for dll in trt_missing:
+            print(f"  [WARN] Key TRT DLL not found in archive: {dll}")
+        all_missing.extend(trt_missing)
 
-    if trt_copied:
-        print(f"[OK] TRT DLLs copied ({len(trt_copied)} files)")
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print()
+    print("=" * 70)
+    if all_missing:
+        print(f"[WARN] {len(all_missing)} DLL(s) not found in the extracted archives:")
+        for d in all_missing:
+            print(f"  {d}")
+        print()
+        print("The archive layout may differ from what was expected.")
+        print("Inspect the extracted contents at:")
+        print(f"  {CACHE_DIR}")
+        print("To clear the cache and retry: delete that folder.")
+        return False
 
-    return len(missing) == 0
+    count = sum(1 for _ in output_dir.glob("*.dll"))
+    print(f"[OK] All DLLs collected -- {count} *.dll files in {output_dir}")
+    print()
+    print("Run  python Setup.py --check  to verify detection.")
+    return True
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Collect CUDA 13 / cuDNN 9 / TRT 10.15 DLLs for 3Deflatten GPU build",
+        description="Download and bundle CUDA 13 / cuDNN 9 / TRT 10.15 DLLs "
+                    "for the 3Deflatten GPU build",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--output", default=str(DEFAULT_OUTPUT),
-                        help=f"Output directory (default: {DEFAULT_OUTPUT})")
-    parser.add_argument("--trt-lib", default=None,
-                        help=r"Path to TensorRT lib\ folder (e.g. C:\TRT\TensorRT-10.15.x\lib)")
-    parser.add_argument("--no-confirm", action="store_true",
-                        help="Skip confirmation prompt (CI use)")
+    parser.add_argument(
+        "--output", default=str(DEFAULT_OUTPUT),
+        help=f"Output directory (default: {DEFAULT_OUTPUT})")
+    parser.add_argument(
+        "--trt-zip", default=None, metavar="PATH",
+        help="Path to a locally downloaded TRT zip (skips TRT download)")
+    parser.add_argument(
+        "--no-confirm", action="store_true",
+        help="Skip the confirmation prompt (CI / unattended use)")
     args = parser.parse_args()
 
-    ok = collect(
-        pathlib.Path(args.output).resolve(),
-        trt_lib_path=args.trt_lib,
+    ok = run(
+        output_dir=pathlib.Path(args.output).resolve(),
+        trt_zip_path=args.trt_zip,
         no_confirm=args.no_confirm,
     )
     sys.exit(0 if ok else 1)
