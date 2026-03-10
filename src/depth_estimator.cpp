@@ -364,6 +364,7 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
         //
         bool isTrt = (std::wstring(path).find(L"tensorrt") != std::wstring::npos);
         LOG_WARN(name, " load failed error=1114 (DLL init failed).");
+        if (isTrt) {
             LOG_WARN("  For TensorRT: TRT 10.7.x is built against CUDA 12.6 and is");
             LOG_WARN("    INCOMPATIBLE with ORT 1.24.x (which requires CUDA 13).");
             LOG_WARN("  Use TRT 10.15.x or newer (the CUDA 13 build):");
