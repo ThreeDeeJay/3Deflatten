@@ -67,8 +67,8 @@ CUDA_URL  = ("https://developer.download.nvidia.com/compute/cuda/13.1.1/"
              "local_installers/cuda_13.1.1_windows.exe")
 CUDNN_URL = ("https://developer.download.nvidia.com/compute/cudnn/9.19.1/"
              "local_installers/cudnn_9.19.1_windows_x86_64.exe")
-TRT_URL   = ("https://developer.nvidia.com/downloads/compute/machine-learning/"
-             "tensorrt/10.15.1/zip/TensorRT-10.15.1.Windows.win10.cuda-13.1.zip")
+TRT_URL   = ("https://developer.download.nvidia.com/compute/machine-learning/"
+             "tensorrt/10.15.1/zip/TensorRT-10.15.1.29.Windows.amd64.cuda-13.1.zip")
 
 # DLLs to copy from the CUDA installer
 CUDA_DLLS = [
