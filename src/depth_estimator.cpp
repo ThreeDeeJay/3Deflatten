@@ -351,15 +351,36 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
             LOG_WARN("       Or ensure TRT_LIB_PATH was set before launching the host app.");
         }
     } else if (e == 1114) {
-        // ERROR_DLL_INIT_FAILED: DLL loaded but its init (DllMain) threw.
-        // For CUDA/TRT providers this almost always means a CUDA version mismatch.
+        // ERROR_DLL_INIT_FAILED: DLL loaded but its DllMain threw an exception
+        // or returned FALSE.  For CUDA/TRT providers this has two common causes:
+        //
+        //   A) CUDA version mismatch -- ORT 1.24.x GPU requires CUDA 13.x.
+        //      Even if cudart64_13.dll is present, CUDA 13.x needs driver 572+.
+        //      Installing CUDA 12.x later DOWNGRADES the driver to 561.x which
+        //      breaks CUDA 13 even though the toolkit files remain on disk.
+        //
+        //   B) TensorRT version mismatch -- TRT 10.7.x is built against CUDA 12.6
+        //      and will NOT work with ORT 1.24.x (CUDA 13). Use TRT 10.15+ for CUDA 13.
+        //
+        bool isTrt = (std::wstring(path).find(L"tensorrt") != std::wstring::npos);
         LOG_WARN(name, " load failed error=1114 (DLL init failed).");
-        LOG_WARN("  This almost always means a CUDA version mismatch:");
-        LOG_WARN("  ORT 1.24.x GPU build requires CUDA 13.x (cudart64_13.dll).");
-        LOG_WARN("  If you have CUDA 12.x, upgrade to CUDA 13:");
-        LOG_WARN("    https://developer.nvidia.com/cuda-downloads");
-        LOG_WARN("  If you have CUDA 13.x, ensure the DLL search path includes");
-        LOG_WARN("    the CUDA 13 bin\\ folder before launching the host app.");
+            LOG_WARN("  For TensorRT: TRT 10.7.x is built against CUDA 12.6 and is");
+            LOG_WARN("    INCOMPATIBLE with ORT 1.24.x (which requires CUDA 13).");
+            LOG_WARN("  Use TRT 10.15.x or newer (the CUDA 13 build):");
+            LOG_WARN("    https://developer.nvidia.com/tensorrt");
+            LOG_WARN("  Check your TRT version: look at the nvinfer_10.dll filename or");
+            LOG_WARN("    the folder name (TensorRT-10.7.x = CUDA 12, TensorRT-10.15.x = CUDA 13).");
+        } else {
+            LOG_WARN("  Most likely cause: NVIDIA driver is too old for CUDA 13.");
+            LOG_WARN("  CUDA 13.1 requires driver 572.xx or newer.");
+            LOG_WARN("  Installing CUDA 12.x DOWNGRADES the driver (e.g. to 561.17),");
+            LOG_WARN("  which breaks CUDA 13 even if cudart64_13.dll is still on disk.");
+            LOG_WARN("  FIX: Update NVIDIA driver to 572+ (do NOT install CUDA 12.x):");
+            LOG_WARN("    https://www.nvidia.com/drivers  (select Game Ready or Studio driver)");
+            LOG_WARN("  Or reinstall CUDA 13.1 (bundles driver 572.xx):");
+            LOG_WARN("    https://developer.nvidia.com/cuda-downloads");
+            LOG_WARN("  Verify current driver with: nvidia-smi  (look for 'Driver Version')");
+        }
     } else {
         LOG_WARN(name, " load failed error=", e, " path='", narrow, "'");
     }
@@ -499,7 +520,14 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 LOG_INFO("Execution provider: DirectML");
                 LOG_INFO("  NOTE: DirectML compiles GPU shaders on first inference.");
                 LOG_INFO("  First frame may take 5-30 s; subsequent frames are fast.");
-                LOG_INFO("  Expected throughput for DA V2 Small on RTX/RX: ~100-400 ms/frame.");
+                LOG_INFO("  Expected throughput for DA V2 Small (depth_anything_v2_small.onnx):");
+                LOG_INFO("    High-end GPU (RTX 3070+, RX 6700+): ~100-300 ms/frame");
+                LOG_INFO("    Mid-range GPU (GTX 1060-1080, RX 580, RTX 3060): ~300-600 ms/frame");
+                LOG_INFO("    Low-end / integrated GPU: 600ms-2s/frame");
+                LOG_INFO("  If performance is lower than expected, check GPU utilization in");
+                LOG_INFO("  Task Manager -> Performance -> GPU. Low utilization (<50%) with");
+                LOG_INFO("  slow inference is normal for smaller models on high-end GPUs.");
+                LOG_INFO("  The GPU name is logged at startup (search log for 'GPU:').");
                 return true;
             } catch (const Ort::Exception& e) {
                 LOG_WARN("DirectML EP init failed: ", e.what());

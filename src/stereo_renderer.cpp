@@ -2,6 +2,7 @@
 #include "stereo_renderer.h"
 #include "logger.h"
 #include <d3dcompiler.h>
+#include <dxgi.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -118,6 +119,25 @@ HRESULT StereoRenderer::InitGPU() {
         return hr;
     }
     LOG_INFO("D3D11 device created  feature_level=0x", std::hex, (unsigned)fl, std::dec);
+
+    // Log GPU adapter name and VRAM for diagnostics (helps explain performance)
+    {
+        IDXGIDevice* dxgiDev = nullptr;
+        if (SUCCEEDED(m_dev->QueryInterface(__uuidof(IDXGIDevice),
+                                            reinterpret_cast<void**>(&dxgiDev)))) {
+            IDXGIAdapter* adapter = nullptr;
+            if (SUCCEEDED(dxgiDev->GetAdapter(&adapter))) {
+                DXGI_ADAPTER_DESC desc{};
+                if (SUCCEEDED(adapter->GetDesc(&desc))) {
+                    size_t vramMB = desc.DedicatedVideoMemory / (1024 * 1024);
+                    LOG_INFO("GPU: ", std::wstring(desc.Description),
+                             "  VRAM=", vramMB, " MB");
+                }
+                adapter->Release();
+            }
+            dxgiDev->Release();
+        }
+    }
 
     hr = CreateShaders();
     if (FAILED(hr)) {

@@ -163,7 +163,7 @@ static void AddCudaDir(const std::wstring& cudaDllDir, const wchar_t* probeDll,
     }
 }
 
-// Discover CUDA 12.x, cuDNN 9.x, and TensorRT 10.x install directories and
+// Discover CUDA 13.x, cuDNN 9.x, and TensorRT 10.x install directories and
 // register them as DLL search paths so ORT can find provider DLLs without
 // requiring the user to modify PATH.
 //
@@ -175,14 +175,13 @@ static void AddCudaDir(const std::wstring& cudaDllDir, const wchar_t* probeDll,
 // Call AFTER SetDefaultDllDirectories and AFTER logger is live.
 static void RegisterGpuRuntimeDirs() {
     LOG_INFO("--- GPU runtime path discovery ---");
-    LOG_INFO("  (searching for CUDA 12.x, cuDNN 9.x, TensorRT 10.x)");
+    LOG_INFO("  (searching for CUDA 13.x, cuDNN 9.x, TensorRT 10.x)");
 
     // ── CUDA Toolkit bin ─────────────────────────────────────────────────────
-    // CUDA 12.6 installer sets CUDA_PATH_V12_6 and CUDA_PATH.
-    // Multiple CUDA versions can coexist; we pick the highest 12.x present.
+    // ORT 1.24.x GPU binary requires CUDA 13.x (cudart64_13.dll).
+    // CUDA 12.x (cudart64_12.dll) is NOT compatible.
+    // Multiple CUDA versions can coexist; we prefer 13.x, accept 12.x as fallback.
     bool foundCuda = false;
-    // Probe for CUDA 13.x first (required by ORT 1.24.x GPU build).
-    // Fall back to CUDA 12.x in case user still has an older ORT build.
     const wchar_t* cudaEnvVars[] = {
         L"CUDA_PATH_V13_2", L"CUDA_PATH_V13_1", L"CUDA_PATH_V13_0",
         L"CUDA_PATH_V12_9", L"CUDA_PATH_V12_8", L"CUDA_PATH_V12_7",
