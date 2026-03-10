@@ -224,14 +224,16 @@ static bool ProbeDep(const wchar_t* name, const wchar_t* purpose) {
 // dependency picture, not just the first missing piece.
 static void LogCudaDependencies(bool includeTrt) {
     LOG_INFO("--- CUDA/TRT dependency scan ---");
-    LOG_INFO("  ORT 1.24.x GPU build requirements:");
+    LOG_INFO("  ORT 1.24.3 gpu_cuda13 build requirements:");
     LOG_INFO("    CUDA 13.x runtime  (install: https://developer.nvidia.com/cuda-downloads)");
     LOG_INFO("    cuDNN 9.x          (install: https://developer.nvidia.com/cudnn)");
     if (includeTrt)
-        LOG_INFO("    TensorRT 10.x      (install: https://developer.nvidia.com/tensorrt)");
-    LOG_INFO("  NOTE: ORT 1.24.x GPU build requires CUDA 13.x (cudart64_13.dll).");
-    LOG_INFO("        CUDA 12.x ships cudart64_12.dll and is NOT compatible with this build.");
-    LOG_INFO("  NOTE: Driver 545+ required for CUDA 13.");
+        LOG_INFO("    TensorRT 10.15.x   (CUDA 13 build, https://developer.nvidia.com/tensorrt)");
+    LOG_INFO("  NOTE: ORT 1.24.3 gpu_cuda13 requires CUDA 13.x (cudart64_13.dll).");
+    LOG_INFO("        CUDA 12.x (cudart64_12.dll) is NOT compatible with this build.");
+    LOG_INFO("  NOTE: Driver 572+ required for CUDA 13.x.");
+    LOG_INFO("        TRT must be the CUDA 13 build (TensorRT-10.15.x or newer).");
+    LOG_INFO("        TRT 10.7.x and earlier are CUDA 12 builds -- do not use those here.");
     LOG_INFO("");
 
     // NVIDIA driver (kernel proxy -- loaded by nvcuda.dll consumers)

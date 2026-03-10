@@ -135,8 +135,13 @@ if(ORT_BACKEND STREQUAL "GPU")
                             "Use ORT_BACKEND=DirectML for x86.")
     endif()
 
+    # ORT 1.24.3 ships TWO GPU zips:
+    #   gpu          -> built against CUDA 12  (onnxruntime-win-x64-gpu-*.zip)
+    #   gpu_cuda13   -> built against CUDA 13  (onnxruntime-win-x64-gpu_cuda13-*.zip)
+    # We use gpu_cuda13 so users only need CUDA 13.x at runtime.
+    set(ORT_GPU_ZIP_VARIANT "gpu_cuda13")
     FetchContent_Declare(ort_gpu
-        URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-gpu-${ORT_VERSION}.zip"
+        URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_GPU_ZIP_VARIANT}-${ORT_VERSION}.zip"
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     )
     FetchContent_MakeAvailable(ort_gpu)
@@ -144,9 +149,9 @@ if(ORT_BACKEND STREQUAL "GPU")
     # The GitHub release zip may extract to a nested subdirectory OR directly
     # into SOURCE_DIR depending on the archive structure and CMake version.
     # Probe both layouts so the build is robust against version changes:
-    #   Layout A (nested):  SOURCE_DIR/onnxruntime-win-x64-gpu-<ver>/lib/
+    #   Layout A (nested):  SOURCE_DIR/onnxruntime-win-x64-gpu_cuda13-<ver>/lib/
     #   Layout B (flat):    SOURCE_DIR/lib/
-    set(_ORT_NESTED "${ort_gpu_SOURCE_DIR}/onnxruntime-win-x64-gpu-${ORT_VERSION}")
+    set(_ORT_NESTED "${ort_gpu_SOURCE_DIR}/onnxruntime-win-x64-${ORT_GPU_ZIP_VARIANT}-${ORT_VERSION}")
     if(EXISTS "${_ORT_NESTED}/lib/onnxruntime.lib")
         set(ORT_ZIP_ROOT "${_ORT_NESTED}")
         message(STATUS "ORT GPU zip: nested layout detected (${ORT_ZIP_ROOT})")
