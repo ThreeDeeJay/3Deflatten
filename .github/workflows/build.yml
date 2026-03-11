@@ -55,7 +55,7 @@ jobs:
             cmake_arch:     x64
             vcpkg_triplet:  x64-windows
             ort_backend:    GPU
-            ax_dir:         Win64_GPU
+            ax_dir:         Win64_GPU11
             artifact_name:  3Deflatten_x64_GPU
 
     env:
