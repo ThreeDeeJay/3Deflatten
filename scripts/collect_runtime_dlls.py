@@ -3,25 +3,24 @@
 """
 Collect ALL runtime DLLs required for the Win64_GPU build of 3Deflatten.
 
-ORT 1.24.3 gpu_cuda13 requires CUDA 13.x at runtime.  This script downloads
-the official NVIDIA installers / zip and extracts ONLY the DLLs needed, so
-users do NOT need to run the full CUDA / cuDNN / TensorRT system installers.
+ORT 1.24.3 gpu_cuda13 was compiled against CUDA 13.0 and TRT 10.13.3.9.
+This script downloads the matching NVIDIA installers / zip and extracts ONLY
+the DLLs needed, so users do NOT need system-wide installs.
 
 Sources (official NVIDIA URLs):
-  CUDA 13.1.1   : https://developer.download.nvidia.com/compute/cuda/13.1.1/
-                   local_installers/cuda_13.1.1_windows.exe
+  CUDA 13.0.0   : https://developer.download.nvidia.com/compute/cuda/13.0.0/
+                   local_installers/cuda_13.0.0_windows.exe
   cuDNN 9.19.1  : https://developer.download.nvidia.com/compute/cudnn/9.19.1/
                    local_installers/cudnn_9.19.1_windows_x86_64.exe
-  TensorRT 10.15: https://developer.nvidia.com/downloads/compute/machine-learning/
-                   tensorrt/10.15.1/zip/TensorRT-10.15.1.29.Windows.amd64.cuda-13.1.zip
+  TensorRT 10.13: https://developer.download.nvidia.com/compute/machine-learning/
+                   tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.amd64.cuda-13.0.zip
 
 DLLs collected:
   CUDA 13:  cudart64_13, cublas64_13, cublasLt64_13, cufft64_12, nvJitLink_130_0
   cuDNN 9:  cudnn64_9, cudnn_ops64_9, cudnn_adv64_9, cudnn_cnn64_9,
             cudnn_graph64_9, cudnn_engines_runtime_compiled64_9,
             cudnn_engines_precompiled64_9, cudnn_heuristic64_9
-  TRT 10.15: all *.dll from TRT lib folder (nvinfer_10, nvonnxparser_10,
-             nvinfer_builder_resource_10, nvinfer_plugin_10, zlibwapi, ...)
+  TRT 10.13: all *.dll from TRT lib folder (nvinfer_10, nvonnxparser_10, ...)
 
 NOT bundled (always present as a driver component in System32):
   nvcuda.dll
@@ -63,12 +62,12 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 _candidate     = SCRIPT_DIR / "Win64_GPU"
 DEFAULT_OUTPUT = _candidate if _candidate.exists() else SCRIPT_DIR.parent / "Win64_GPU"
 
-CUDA_URL  = ("https://developer.download.nvidia.com/compute/cuda/13.1.1/"
-             "local_installers/cuda_13.1.1_windows.exe")
+CUDA_URL  = ("https://developer.download.nvidia.com/compute/cuda/13.0.0/"
+             "local_installers/cuda_13.0.0_windows.exe")
 CUDNN_URL = ("https://developer.download.nvidia.com/compute/cudnn/9.19.1/"
              "local_installers/cudnn_9.19.1_windows_x86_64.exe")
 TRT_URL   = ("https://developer.download.nvidia.com/compute/machine-learning/"
-             "tensorrt/10.15.1/zip/TensorRT-10.15.1.29.Windows.amd64.cuda-13.1.zip")
+             "tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.amd64.cuda-13.0.zip")
 
 # DLLs to copy from the CUDA installer
 CUDA_DLLS = [
@@ -92,16 +91,13 @@ CUDNN_DLLS = [
 ]
 
 # Key TRT DLLs -- we copy ALL *.dll from the TRT archive but warn if absent.
-# TRT 10.15 changes vs earlier releases:
-#   - nvinfer_builder_resource_10.dll GONE (split into per-SM DLLs)
-#   - zlibwapi.dll NOT REQUIRED (dependency removed in TRT 10.15)
-#   - nvinfer_dispatch_10.dll and nvinfer_lean_10.dll are new key DLLs
+# ORT 1.24.3 gpu_cuda13 was built with TRT 10.13.3.9 (CUDA 13.0).
+# TRT 10.13+ removed the zlibwapi.dll dependency.
+# nvinfer_builder_resource_10.dll presence varies by TRT minor version;
+# nvinfer_dispatch_10.dll and nvinfer_lean_10.dll are present from TRT 10.x onwards.
 TRT_REQUIRED_DLLS = [
     "nvinfer_10.dll",
     "nvonnxparser_10.dll",
-    "nvinfer_dispatch_10.dll",
-    "nvinfer_lean_10.dll",
-    "nvinfer_plugin_10.dll",
 ]
 
 # Download cache (avoids re-downloading ~5 GB on repeated runs)
@@ -297,18 +293,19 @@ def run(output_dir: pathlib.Path,
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     print()
-    print("3Deflatten -- Collect GPU Runtime DLLs (CUDA 13 + cuDNN 9 + TRT 10.15)")
+    print("3Deflatten -- Collect GPU Runtime DLLs (CUDA 13.0 + cuDNN 9 + TRT 10.13)")
     print("=" * 70)
     print(f"Output : {output_dir}")
     print(f"Cache  : {CACHE_DIR}")
     print()
+    print("ORT 1.24.3 gpu_cuda13 was compiled against CUDA 13.0 / TRT 10.13.3.9.")
     print("First-run downloads (~5 GB total; cached for subsequent runs):")
-    print(f"  CUDA 13.1.1  installer  : {CUDA_URL.split('/')[-1]}")
+    print(f"  CUDA 13.0.0  installer  : {CUDA_URL.split('/')[-1]}")
     print(f"  cuDNN 9.19.1 installer  : {CUDNN_URL.split('/')[-1]}")
     if trt_zip_path:
-        print(f"  TRT 10.15.1 zip (local): {trt_zip_path}")
+        print(f"  TRT 10.13.3 zip (local) : {trt_zip_path}")
     else:
-        print(f"  TRT 10.15.1 zip         : {TRT_URL.split('/')[-1]}")
+        print(f"  TRT 10.13.3 zip         : {TRT_URL.split('/')[-1]}")
     print()
     print("Only the required DLLs will be copied; all are NVIDIA-redistributable.")
     print()
@@ -322,7 +319,7 @@ def run(output_dir: pathlib.Path,
     all_missing = []
 
     # ── CUDA 13 ───────────────────────────────────────────────────────────────
-    print("\n[1/3]  CUDA 13.1.1")
+    print("\n[1/3]  CUDA 13.0.0")
     cuda_archive = download(CUDA_URL, CACHE_DIR)
     cuda_ext     = CACHE_DIR / "cuda_extracted"
     if not cuda_ext.exists():
@@ -341,8 +338,8 @@ def run(output_dir: pathlib.Path,
                                  "cuDNN 9 DLLs")
     all_missing.extend(missing)
 
-    # ── TensorRT 10.15 ────────────────────────────────────────────────────────
-    print("\n[3/3]  TensorRT 10.15.1")
+    # ── TensorRT 10.13 ───────────────────────────────────────────────────────
+    print("\n[3/3]  TensorRT 10.13.3.9")
     if trt_zip_path:
         trt_archive = pathlib.Path(trt_zip_path)
         if not trt_archive.exists():
@@ -383,7 +380,7 @@ def run(output_dir: pathlib.Path,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download and bundle CUDA 13 / cuDNN 9 / TRT 10.15 DLLs "
+        description="Download and bundle CUDA 13.0 / cuDNN 9 / TRT 10.13 DLLs "
                     "for the 3Deflatten GPU build",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,

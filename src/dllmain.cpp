@@ -183,7 +183,7 @@ static void RegisterGpuRuntimeDirs() {
     // Multiple CUDA versions can coexist; we prefer 13.x, accept 12.x as fallback.
     bool foundCuda = false;
     const wchar_t* cudaEnvVars[] = {
-        L"CUDA_PATH_V13_2", L"CUDA_PATH_V13_1", L"CUDA_PATH_V13_0",
+        L"CUDA_PATH_V13_0", L"CUDA_PATH_V13_1", L"CUDA_PATH_V13_2",
         L"CUDA_PATH_V12_9", L"CUDA_PATH_V12_8", L"CUDA_PATH_V12_7",
         L"CUDA_PATH_V12_6", L"CUDA_PATH",
         nullptr
@@ -323,11 +323,9 @@ static void RegisterGpuRuntimeDirs() {
                 L"C:\\Program Files\\NVIDIA\\CUDNN",
                 L"cudnn64_9.dll", "cuDNN 9 (default scan)");
 
-        // 4. If still not found: cuDNN may be co-installed into the CUDA Toolkit
-        //    directory, in which case cudnn64_9.dll already lives in the CUDA bin
-        //    folder registered above -- no extra step needed.
+        // 4. If still not found: check if cudnn64_9.dll is already accessible
+        //    via bundled DLLs in the .ax folder.
         if (!foundCuDnn) {
-        {
             HMODULE hBundled = LoadLibraryExW(L"cudnn64_9.dll", nullptr,
                                    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
                                    LOAD_LIBRARY_SEARCH_USER_DIRS);
@@ -342,17 +340,14 @@ static void RegisterGpuRuntimeDirs() {
                 LOG_INFO("  Download: https://developer.nvidia.com/cudnn");
             }
         }
-    }
+    } // end cuDNN block
 
     // ── TensorRT 10.x ────────────────────────────────────────────────────────
-    // TRT 10.15+ uses a different layout from earlier releases:
-    //   - nvinfer_builder_resource_10.dll is gone; replaced by per-SM DLLs
-    //     (nvinfer_builder_resource_sm75_10.dll, sm80, sm86, sm89, sm90, ...)
-    //   - zlibwapi.dll is NOT required by TRT 10.15 (dependency was removed)
-    //   - nvinfer_dispatch_10.dll and nvinfer_lean_10.dll are new key DLLs
-    //
-    // We add the directory containing nvinfer_10.dll plus its siblings to
-    // the DLL search path so that all per-SM builder resources are found.
+    // ORT 1.24.3 gpu_cuda13 was built with TRT 10.13.3.9 (CUDA 13.0 build).
+    // TRT 10.13+ layout: DLLs are in lib\ alongside nvinfer_10.dll.
+    // nvinfer_builder_resource_10.dll may or may not be present depending on
+    // TRT version; nvinfer_dispatch_10.dll and nvinfer_lean_10.dll are new in 10.x.
+    // zlibwapi.dll is NOT required by TRT 10.13+ (dependency was removed).
     {
         wchar_t val[MAX_PATH] = {};
         bool foundTrt = false;
@@ -439,9 +434,9 @@ static void RegisterGpuRuntimeDirs() {
                 LOG_INFO("  is present in the bundled DLLs folder -- OK.");
             } else {
                 LOG_INFO("  TensorRT 10 not found via env/registry/default scan.");
-                LOG_INFO("  Run collect_runtime_dlls.py to bundle TRT 10.15 DLLs, or");
-                LOG_INFO("  extract TensorRT-10.15.1.29.Windows.amd64.cuda-13.1.zip and set:");
-                LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.15.1.29\\lib");
+                LOG_INFO("  Run collect_runtime_dlls.py to bundle TRT 10.13 DLLs, or");
+                LOG_INFO("  extract TensorRT-10.13.3.9.Windows.amd64.cuda-13.0.zip and set:");
+                LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.13.3.9\\lib");
                 LOG_INFO("  NOTE: env vars only take effect after restarting the host app.");
             }
         }

@@ -225,15 +225,13 @@ static bool ProbeDep(const wchar_t* name, const wchar_t* purpose) {
 static void LogCudaDependencies(bool includeTrt) {
     LOG_INFO("--- CUDA/TRT dependency scan ---");
     LOG_INFO("  ORT 1.24.3 gpu_cuda13 build requirements:");
-    LOG_INFO("    CUDA 13.x runtime  (install: https://developer.nvidia.com/cuda-downloads)");
-    LOG_INFO("    cuDNN 9.x          (install: https://developer.nvidia.com/cudnn)");
+    LOG_INFO("    CUDA 13.0     (install: https://developer.nvidia.com/cuda-downloads)");
+    LOG_INFO("    cuDNN 9.x     (install: https://developer.nvidia.com/cudnn)");
     if (includeTrt)
-        LOG_INFO("    TensorRT 10.15.x   (CUDA 13 build, https://developer.nvidia.com/tensorrt)");
-    LOG_INFO("  NOTE: ORT 1.24.3 gpu_cuda13 requires CUDA 13.x (cudart64_13.dll).");
-    LOG_INFO("        CUDA 12.x (cudart64_12.dll) is NOT compatible with this build.");
-    LOG_INFO("  NOTE: Driver 572+ required for CUDA 13.x.");
-    LOG_INFO("        TRT must be the CUDA 13 build (TensorRT-10.15.x or newer).");
-    LOG_INFO("        TRT 10.7.x and earlier are CUDA 12 builds -- do not use those here.");
+        LOG_INFO("    TensorRT 10.13.3.9 (CUDA 13.0 build, https://developer.nvidia.com/tensorrt)");
+    LOG_INFO("  NOTE: ORT 1.24.3 gpu_cuda13 was compiled against CUDA 13.0 specifically.");
+    LOG_INFO("        Using CUDA 13.1+ DLLs at runtime causes error=1114 (version mismatch).");
+    LOG_INFO("  NOTE: Driver 572+ required for CUDA 13.0.");
     LOG_INFO("");
 
     // NVIDIA driver (kernel proxy -- loaded by nvcuda.dll consumers)
@@ -283,14 +281,14 @@ static void LogCudaDependencies(bool includeTrt) {
 
     if (includeTrt) {
         LOG_INFO("");
-        LOG_INFO("  TensorRT 10.15.x libraries (install from https://developer.nvidia.com/tensorrt):");
-        LOG_INFO("  NOTE: TRT 10.15 split nvinfer_builder_resource into per-SM DLLs.");
-        LOG_INFO("        zlibwapi.dll is NOT required by TRT 10.15 (removed dep).");
-        ProbeDep(L"nvinfer_10.dll",       L"TensorRT 10 inference engine");
-        ProbeDep(L"nvonnxparser_10.dll",  L"TensorRT 10 ONNX parser");
-        ProbeDep(L"nvinfer_dispatch_10.dll", L"TRT 10.15 dispatch runtime (replaces builder_resource)");
-        ProbeDep(L"nvinfer_lean_10.dll",  L"TRT 10.15 lean runtime");
-        ProbeDep(L"nvinfer_plugin_10.dll",L"TRT 10 plugins");
+        LOG_INFO("  TensorRT 10.13.x libraries (install from https://developer.nvidia.com/tensorrt):");
+        LOG_INFO("  NOTE: TRT 10.13 removed the zlibwapi.dll dependency.");
+        LOG_INFO("        nvinfer_builder_resource_10.dll may not be present (split into per-SM DLLs).");
+        ProbeDep(L"nvinfer_10.dll",          L"TensorRT 10 inference engine");
+        ProbeDep(L"nvonnxparser_10.dll",     L"TensorRT 10 ONNX parser");
+        ProbeDep(L"nvinfer_dispatch_10.dll", L"TRT 10 dispatch runtime");
+        ProbeDep(L"nvinfer_lean_10.dll",     L"TRT 10 lean runtime");
+        ProbeDep(L"nvinfer_plugin_10.dll",   L"TRT 10 plugins");
     }
     LOG_INFO("--- end dependency scan ---");
 }
@@ -356,7 +354,7 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
         //      breaks CUDA 13 even though the toolkit files remain on disk.
         //
         //   B) TensorRT version mismatch -- TRT 10.7.x is built against CUDA 12.6
-        //      and will NOT work with ORT 1.24.x (CUDA 13). Use TRT 10.15+ for CUDA 13.
+        //      and will NOT work with ORT 1.24.x (CUDA 13). Use TRT 10.13+ for CUDA 13.
         //
         bool isTrt = (std::wstring(path).find(L"tensorrt") != std::wstring::npos);
         LOG_WARN(name, " load failed error=1114 (DLL init failed).");
