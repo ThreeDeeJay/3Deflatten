@@ -277,9 +277,20 @@ static void RegisterGpuRuntimeDirs() {
         }
     }
     if (!foundCuda) {
-        LOG_WARN("  CUDA not found. ORT 1.24.x GPU build requires CUDA 13.x.");
-        LOG_WARN("  Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
-        LOG_WARN("  CUDA 12.x will not work with the ORT 1.24.x GPU build.");
+        // Check if cudart64_13.dll is already accessible via the bundled DLLs
+        // in the .ax folder (added to the search path by DllInit above).
+        HMODULE hBundled = LoadLibraryExW(L"cudart64_13.dll", nullptr,
+                               LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                               LOAD_LIBRARY_SEARCH_USER_DIRS);
+        if (hBundled) {
+            FreeLibrary(hBundled);
+            LOG_INFO("  CUDA 13 not found via system install, but cudart64_13.dll");
+            LOG_INFO("  is present in the bundled DLLs folder -- OK.");
+        } else {
+            LOG_WARN("  CUDA 13 not found (no system install and not bundled).");
+            LOG_WARN("  Run collect_runtime_dlls.py to bundle CUDA 13 DLLs, or");
+            LOG_WARN("  install CUDA 13: https://developer.nvidia.com/cuda-downloads");
+        }
     }
 
     // ── cuDNN 9.x ────────────────────────────────────────────────────────────
@@ -316,24 +327,32 @@ static void RegisterGpuRuntimeDirs() {
         //    directory, in which case cudnn64_9.dll already lives in the CUDA bin
         //    folder registered above -- no extra step needed.
         if (!foundCuDnn) {
-            LOG_INFO("  cuDNN 9 not found via env/registry/default path.");
-            LOG_INFO("  If installed elsewhere: set CUDNN_PATH=<install root>.");
-            LOG_INFO("  NOTE: the cuDNN standalone installer does NOT set CUDNN_PATH.");
-            LOG_INFO("  After installing, run Setup.py which will show the correct path.");
-            LOG_INFO("  Download: https://developer.nvidia.com/cudnn");
+        {
+            HMODULE hBundled = LoadLibraryExW(L"cudnn64_9.dll", nullptr,
+                                   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                                   LOAD_LIBRARY_SEARCH_USER_DIRS);
+            if (hBundled) {
+                FreeLibrary(hBundled);
+                LOG_INFO("  cuDNN 9 not found via system install, but cudnn64_9.dll");
+                LOG_INFO("  is present in the bundled DLLs folder -- OK.");
+            } else {
+                LOG_INFO("  cuDNN 9 not found via env/registry/default path.");
+                LOG_INFO("  Run collect_runtime_dlls.py to bundle cuDNN 9 DLLs, or");
+                LOG_INFO("  if installed elsewhere: set CUDNN_PATH=<install root>.");
+                LOG_INFO("  Download: https://developer.nvidia.com/cudnn");
+            }
         }
     }
 
     // ── TensorRT 10.x ────────────────────────────────────────────────────────
-    // TRT may have DLLs in lib\, bin\, or both depending on version/extraction.
-    // We add every directory we find that contains nvinfer_10.dll, plus its
-    // sibling lib\/bin\ and the TRT root, to cover all sub-dependency layouts.
+    // TRT 10.15+ uses a different layout from earlier releases:
+    //   - nvinfer_builder_resource_10.dll is gone; replaced by per-SM DLLs
+    //     (nvinfer_builder_resource_sm75_10.dll, sm80, sm86, sm89, sm90, ...)
+    //   - zlibwapi.dll is NOT required by TRT 10.15 (dependency was removed)
+    //   - nvinfer_dispatch_10.dll and nvinfer_lean_10.dll are new key DLLs
     //
-    // IMPORTANT: TRT requires zlibwapi.dll which is NOT bundled with CUDA/cuDNN.
-    // In TRT 10.x Windows zips, zlibwapi.dll may be present in lib\.  If not,
-    // download and place it next to the .ax or in TRT_LIB_PATH.
-    // Get it from: https://www.dll-files.com/zlibwapi.dll.html
-    // (or build from https://zlib.net — use the Win64 DLL from contrib\vstudio)
+    // We add the directory containing nvinfer_10.dll plus its siblings to
+    // the DLL search path so that all per-SM builder resources are found.
     {
         wchar_t val[MAX_PATH] = {};
         bool foundTrt = false;
@@ -353,17 +372,6 @@ static void RegisterGpuRuntimeDirs() {
                         LOG_INFO("  added TRT dir: ", sib);
                     }
                 }
-            }
-            // Log presence / absence of zlibwapi.dll
-            std::wstring zlib = nvinferDir + L"\\zlibwapi.dll";
-            if (GetFileAttributesW(zlib.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                AddDllDirectory(nvinferDir.c_str());
-                LOG_INFO("  zlibwapi.dll found in TRT dir");
-            } else {
-                LOG_WARN("  zlibwapi.dll NOT found next to nvinfer_10.dll.");
-                LOG_WARN("  TensorRT requires zlibwapi.dll.  Copy it from the TRT zip");
-                LOG_WARN("  (lib\\ folder) or get it from https://www.dll-files.com/zlibwapi.dll.html");
-                LOG_WARN("  and place it in: ", nvinferDir);
             }
         };
 
@@ -421,11 +429,21 @@ static void RegisterGpuRuntimeDirs() {
             }
         }
         if (!foundTrt) {
-            LOG_INFO("  TensorRT 10 not found via env/registry/default scan.");
-            LOG_INFO("  To use TRT: extract TensorRT-10.x.zip, then set:");
-            LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.x.y.z\\lib");
-            LOG_INFO("  NOTE: env vars only take effect after restarting the host app.");
-            LOG_INFO("  Download: https://developer.nvidia.com/tensorrt");
+            // Check if nvinfer_10.dll is bundled next to the .ax
+            HMODULE hTrt = LoadLibraryExW(L"nvinfer_10.dll", nullptr,
+                               LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+                               LOAD_LIBRARY_SEARCH_USER_DIRS);
+            if (hTrt) {
+                FreeLibrary(hTrt);
+                LOG_INFO("  TRT not found via system install, but nvinfer_10.dll");
+                LOG_INFO("  is present in the bundled DLLs folder -- OK.");
+            } else {
+                LOG_INFO("  TensorRT 10 not found via env/registry/default scan.");
+                LOG_INFO("  Run collect_runtime_dlls.py to bundle TRT 10.15 DLLs, or");
+                LOG_INFO("  extract TensorRT-10.15.1.29.Windows.amd64.cuda-13.1.zip and set:");
+                LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.15.1.29\\lib");
+                LOG_INFO("  NOTE: env vars only take effect after restarting the host app.");
+            }
         }
     }
 

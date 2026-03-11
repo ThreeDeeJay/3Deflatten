@@ -283,20 +283,14 @@ static void LogCudaDependencies(bool includeTrt) {
 
     if (includeTrt) {
         LOG_INFO("");
-        LOG_INFO("  TensorRT 10.x libraries (install from https://developer.nvidia.com/tensorrt):");
-        ProbeDep(L"nvinfer_10.dll",              L"TensorRT 10 inference engine");
-        ProbeDep(L"nvonnxparser_10.dll",         L"TensorRT 10 ONNX parser");
-        ProbeDep(L"nvinfer_builder_resource_10.dll",
-                                                 L"TRT 10 builder resource (sub-dep of nvinfer)");
-        // zlibwapi.dll: required by TensorRT, NOT bundled with CUDA.
-        // TRT 10.x Windows zips may or may not include it in lib\.
-        bool hasZlib = ProbeDep(L"zlibwapi.dll", L"zlib (required by TRT 10)");
-        if (!hasZlib) {
-            LOG_WARN("  zlibwapi.dll NOT found -- TensorRT WILL fail with error 126.");
-            LOG_WARN("  Copy zlibwapi.dll from the TRT zip lib\\ folder, or download:");
-            LOG_WARN("  https://www.dll-files.com/zlibwapi.dll.html");
-            LOG_WARN("  Place it next to 3Deflatten_x64.ax or in TRT_LIB_PATH.");
-        }
+        LOG_INFO("  TensorRT 10.15.x libraries (install from https://developer.nvidia.com/tensorrt):");
+        LOG_INFO("  NOTE: TRT 10.15 split nvinfer_builder_resource into per-SM DLLs.");
+        LOG_INFO("        zlibwapi.dll is NOT required by TRT 10.15 (removed dep).");
+        ProbeDep(L"nvinfer_10.dll",       L"TensorRT 10 inference engine");
+        ProbeDep(L"nvonnxparser_10.dll",  L"TensorRT 10 ONNX parser");
+        ProbeDep(L"nvinfer_dispatch_10.dll", L"TRT 10.15 dispatch runtime (replaces builder_resource)");
+        ProbeDep(L"nvinfer_lean_10.dll",  L"TRT 10.15 lean runtime");
+        ProbeDep(L"nvinfer_plugin_10.dll",L"TRT 10 plugins");
     }
     LOG_INFO("--- end dependency scan ---");
 }
@@ -367,22 +361,28 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
         bool isTrt = (std::wstring(path).find(L"tensorrt") != std::wstring::npos);
         LOG_WARN(name, " load failed error=1114 (DLL init failed).");
         if (isTrt) {
-            LOG_WARN("  For TensorRT: TRT 10.7.x is built against CUDA 12.6 and is");
-            LOG_WARN("    INCOMPATIBLE with ORT 1.24.x (which requires CUDA 13).");
-            LOG_WARN("  Use TRT 10.15.x or newer (the CUDA 13 build):");
-            LOG_WARN("    https://developer.nvidia.com/tensorrt");
-            LOG_WARN("  Check your TRT version: look at the nvinfer_10.dll filename or");
-            LOG_WARN("    the folder name (TensorRT-10.7.x = CUDA 12, TensorRT-10.15.x = CUDA 13).");
+            LOG_WARN("  TRT EP failed to initialize.  If the CUDA EP also failed,");
+            LOG_WARN("  fix CUDA EP first -- TRT EP depends on it.");
         } else {
-            LOG_WARN("  Most likely cause: NVIDIA driver is too old for CUDA 13.");
-            LOG_WARN("  CUDA 13.1 requires driver 572.xx or newer.");
-            LOG_WARN("  Installing CUDA 12.x DOWNGRADES the driver (e.g. to 561.17),");
-            LOG_WARN("  which breaks CUDA 13 even if cudart64_13.dll is still on disk.");
-            LOG_WARN("  FIX: Update NVIDIA driver to 572+ (do NOT install CUDA 12.x):");
-            LOG_WARN("    https://www.nvidia.com/drivers  (select Game Ready or Studio driver)");
-            LOG_WARN("  Or reinstall CUDA 13.1 (bundles driver 572.xx):");
-            LOG_WARN("    https://developer.nvidia.com/cuda-downloads");
-            LOG_WARN("  Verify current driver with: nvidia-smi  (look for 'Driver Version')");
+            // CUDA EP: all DLLs probed [OK] yet DllMain returned FALSE.
+            // This is NOT a missing-DLL issue (that would be error 126).
+            // Most likely cause: CUDA minor version mismatch.
+            //   ORT 1.24.3 gpu_cuda13 was compiled against a specific CUDA 13.x.
+            //   If bundled DLLs are from a different 13.x (e.g. 13.1 vs 13.2),
+            //   CUDA's init code checks the runtime version and aborts.
+            //   Fix: run collect_runtime_dlls.py to pull the correct DLL versions,
+            //        OR check ORT release notes for the exact required CUDA 13.x.
+            // Second possible cause: GPU driver too old (must be 572+ for CUDA 13).
+            //   Verify with: nvidia-smi  (look for 'Driver Version: 5xx.xx')
+            // Third possible cause: GPU not accessible (TCC mode, passthrough VM, etc.)
+            LOG_WARN("  CUDA EP DllMain failed (all dep probes passed).");
+            LOG_WARN("  Most likely: CUDA minor version mismatch between ORT build and bundled DLLs.");
+            LOG_WARN("    ORT 1.24.3 gpu_cuda13 requires a specific CUDA 13.x (e.g. 13.2).");
+            LOG_WARN("    Bundling CUDA 13.1 DLLs when ORT needs 13.2 causes exactly this error.");
+            LOG_WARN("    Check ORT 1.24.3 release notes for the required CUDA 13 minor version.");
+            LOG_WARN("    Then update collect_runtime_dlls.py CUDA_URL to that installer version.");
+            LOG_WARN("  Also verify: nvidia-smi shows Driver Version 572+");
+            LOG_WARN("  Also verify: GPU is not in TCC mode (unlikely for GeForce GPUs).");
         }
     } else {
         LOG_WARN(name, " load failed error=", e, " path='", narrow, "'");

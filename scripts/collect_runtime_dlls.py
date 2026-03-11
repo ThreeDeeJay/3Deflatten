@@ -91,13 +91,17 @@ CUDNN_DLLS = [
     "cudnn_heuristic64_9.dll",
 ]
 
-# Key TRT DLLs -- we copy ALL *.dll from the TRT archive but warn if absent
+# Key TRT DLLs -- we copy ALL *.dll from the TRT archive but warn if absent.
+# TRT 10.15 changes vs earlier releases:
+#   - nvinfer_builder_resource_10.dll GONE (split into per-SM DLLs)
+#   - zlibwapi.dll NOT REQUIRED (dependency removed in TRT 10.15)
+#   - nvinfer_dispatch_10.dll and nvinfer_lean_10.dll are new key DLLs
 TRT_REQUIRED_DLLS = [
     "nvinfer_10.dll",
     "nvonnxparser_10.dll",
-    "nvinfer_builder_resource_10.dll",
+    "nvinfer_dispatch_10.dll",
+    "nvinfer_lean_10.dll",
     "nvinfer_plugin_10.dll",
-    "zlibwapi.dll",
 ]
 
 # Download cache (avoids re-downloading ~5 GB on repeated runs)
