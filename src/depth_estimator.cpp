@@ -224,66 +224,68 @@ static bool ProbeDep(const wchar_t* name, const wchar_t* purpose) {
 // dependency picture, not just the first missing piece.
 static void LogCudaDependencies(bool includeTrt) {
     LOG_INFO("--- CUDA/TRT dependency scan ---");
+#if ORT_CUDA_MAJOR == 13
     LOG_INFO("  ORT 1.24.3 gpu_cuda13 build requirements:");
-    LOG_INFO("    CUDA 13.0     (install: https://developer.nvidia.com/cuda-downloads)");
-    LOG_INFO("    cuDNN 9.x     (install: https://developer.nvidia.com/cudnn)");
+    LOG_INFO("    CUDA 13.0  (cudart64_13.dll)");
+    LOG_INFO("    cuDNN 9.x  (cudnn64_9.dll + 7 split DLLs)");
     if (includeTrt)
-        LOG_INFO("    TensorRT 10.13.3.9 (CUDA 13.0 build, https://developer.nvidia.com/tensorrt)");
-    LOG_INFO("  NOTE: ORT 1.24.3 gpu_cuda13 was compiled against CUDA 13.0 specifically.");
+        LOG_INFO("    TensorRT 10.13.3.9 (CUDA 13.0 build)");
+    LOG_INFO("  NOTE: ORT 1.24.3 gpu_cuda13 was compiled against CUDA 13.0.");
     LOG_INFO("        Using CUDA 13.1+ DLLs at runtime causes error=1114 (version mismatch).");
     LOG_INFO("  NOTE: Driver 572+ required for CUDA 13.0.");
+#else
+    LOG_INFO("  ORT 1.16.3 GPU build requirements:");
+    LOG_INFO("    CUDA 11.x  (cudart64_11.dll)");
+    LOG_INFO("    cuDNN 8.x  (cudnn64_8.dll + split infer/train DLLs)");
+    if (includeTrt)
+        LOG_INFO("    TensorRT 10.13.0.35 (CUDA 11.8 build)");
+    LOG_INFO("  NOTE: nvJitLink is NOT required for CUDA 11 / ORT 1.16.x.");
+    LOG_INFO("  NOTE: Driver 452+ required for CUDA 11.x.");
+#endif
     LOG_INFO("");
 
-    // NVIDIA driver (kernel proxy -- loaded by nvcuda.dll consumers)
-    ProbeDep(L"nvcuda.dll",       L"NVIDIA driver kernel proxy -- must be in System32");
+    // NVIDIA driver kernel proxy
+    ProbeDep(L"nvcuda.dll", L"NVIDIA driver kernel proxy -- must be in System32");
 
-    // CUDA 13 runtime -- required by ORT 1.24.x GPU build
-    bool hasCuda13 = ProbeDep(L"cudart64_13.dll", L"CUDA 13.x runtime");
-    if (!hasCuda13) {
-        if (DllLoadable(L"cudart64_12.dll") == 0)
-            LOG_WARN("  -> CUDA 12.x detected. ORT 1.24.x requires CUDA 13.x. "
-                     "Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
-        else
-            LOG_WARN("  -> No CUDA 13 runtime found at all. "
-                     "Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
-    }
-
-    // cuBLAS 13
-    ProbeDep(L"cublas64_13.dll",   L"cuBLAS 13 -- in CUDA Toolkit bin");
-    ProbeDep(L"cublasLt64_13.dll", L"cuBLAS-Lt 13 -- in CUDA Toolkit bin");
-
-    // cuDNN 9 -- often the missing piece after CUDA itself
-    bool hasCudnn9 = ProbeDep(L"cudnn64_9.dll", L"cuDNN 9.x main library");
-    if (!hasCudnn9) {
-        // cuDNN 9 also ships as split libraries on some installs
-        ProbeDep(L"cudnn_ops64_9.dll", L"cuDNN 9.x ops -- alternative layout");
-    }
-
-    // cuFFT (12 = part of CUDA 13 toolkit)
-    ProbeDep(L"cufft64_12.dll",    L"cuFFT 12 -- in CUDA Toolkit bin");
-
-    // nvJitLink: CUDA JIT-linking library required by ORT 1.22+ CUDA EP.
-    // In CUDA 13.x this is nvJitLink_130_0.dll in the CUDA bin directory.
-    // NOTE: if all other CUDA DLLs are [OK] but onnxruntime_providers_cuda.dll
-    // still fails with error 126, this is almost always the missing piece.
-    bool hasJitLink = ProbeDep(L"nvJitLink_130_0.dll",
-                               L"CUDA 13 JIT-Link (required by ORT CUDA EP)");
-    if (!hasJitLink) {
-        // Older naming convention (CUDA 12 used this format)
-        hasJitLink = ProbeDep(L"nvJitLink_120_0.dll",
-                              L"CUDA 12 JIT-Link (fallback)");
-        if (!hasJitLink)
-            LOG_WARN("  nvJitLink not found -- onnxruntime_providers_cuda.dll WILL fail");
-            LOG_WARN("  with error 126 even if all other CUDA DLLs are present.");
-            LOG_WARN("  nvJitLink_130_0.dll should be in the CUDA 13 bin\\ directory.");
-            LOG_WARN("  If using CUDA 13 from bin\\x64\\, also add the parent bin\\ dir.");
-    }
+#if ORT_CUDA_MAJOR == 13
+    // ── CUDA 13.0 ─────────────────────────────────────────────────────────
+    bool hasCuda = ProbeDep(L"cudart64_13.dll", L"CUDA 13.x runtime");
+    if (!hasCuda) LOG_WARN("  -> cudart64_13.dll not found. Run collect_runtime_dlls_cuda13.py.");
+    ProbeDep(L"cublas64_13.dll",    L"cuBLAS 13 -- in CUDA Toolkit bin");
+    ProbeDep(L"cublasLt64_13.dll",  L"cuBLAS-Lt 13 -- in CUDA Toolkit bin");
+    ProbeDep(L"cufft64_12.dll",     L"cuFFT 12 -- in CUDA Toolkit bin");
+    // nvJitLink: required by ORT 1.22+ CUDA EP (JIT kernel compilation)
+    bool hasJitLink = ProbeDep(L"nvJitLink_130_0.dll", L"CUDA 13 JIT-Link (required by ORT CUDA EP)");
+    if (!hasJitLink) LOG_WARN("  nvJitLink_130_0.dll missing -- CUDA EP will fail even if other DLLs are present.");
+    // cuSolver + cuRand: loaded by ORT CUDA EP at init time (not lazy)
+    ProbeDep(L"cusolver64_11.dll",  L"cuSolver 11 -- loaded by ORT CUDA EP at startup");
+    ProbeDep(L"curand64_10.dll",    L"cuRand 10 -- loaded by ORT CUDA EP at startup");
+    // cuDNN 9 (split library layout)
+    bool hasCudnn = ProbeDep(L"cudnn64_9.dll", L"cuDNN 9.x main library");
+    if (!hasCudnn) LOG_WARN("  -> cudnn64_9.dll not found. Run collect_runtime_dlls_cuda13.py.");
+#else
+    // ── CUDA 11.x ─────────────────────────────────────────────────────────
+    bool hasCuda = ProbeDep(L"cudart64_11.dll", L"CUDA 11.x runtime");
+    if (!hasCuda) LOG_WARN("  -> cudart64_11.dll not found. Run collect_runtime_dlls.py.");
+    ProbeDep(L"cublas64_11.dll",   L"cuBLAS 11 -- in CUDA Toolkit bin");
+    ProbeDep(L"cublasLt64_11.dll", L"cuBLAS-Lt 11 -- in CUDA Toolkit bin");
+    ProbeDep(L"cufft64_10.dll",    L"cuFFT 10 -- in CUDA Toolkit bin");
+    // cuSolver + cuRand: loaded by ORT CUDA EP at init time
+    ProbeDep(L"cusolver64_11.dll", L"cuSolver 11 -- loaded by ORT CUDA EP at startup");
+    ProbeDep(L"curand64_10.dll",   L"cuRand 10 -- loaded by ORT CUDA EP at startup");
+    // cuDNN 8 (monolithic + split infer/train DLLs)
+    bool hasCudnn = ProbeDep(L"cudnn64_8.dll", L"cuDNN 8.x main library");
+    if (!hasCudnn) LOG_WARN("  -> cudnn64_8.dll not found. Run collect_runtime_dlls.py.");
+#endif
 
     if (includeTrt) {
         LOG_INFO("");
-        LOG_INFO("  TensorRT 10.13.x libraries (install from https://developer.nvidia.com/tensorrt):");
-        LOG_INFO("  NOTE: TRT 10.13 removed the zlibwapi.dll dependency.");
-        LOG_INFO("        nvinfer_builder_resource_10.dll may not be present (split into per-SM DLLs).");
+#if ORT_CUDA_MAJOR == 13
+        LOG_INFO("  TensorRT 10.13.x libraries (CUDA 13.0 build):");
+        LOG_INFO("  NOTE: zlibwapi.dll is NOT required by TRT 10.13+.");
+#else
+        LOG_INFO("  TensorRT 10.13.0.x libraries (CUDA 11.8 build):");
+#endif
         ProbeDep(L"nvinfer_10.dll",          L"TensorRT 10 inference engine");
         ProbeDep(L"nvonnxparser_10.dll",     L"TensorRT 10 ONNX parser");
         ProbeDep(L"nvinfer_dispatch_10.dll", L"TRT 10 dispatch runtime");
@@ -295,26 +297,24 @@ static void LogCudaDependencies(bool includeTrt) {
 #endif // ORT_ENABLE_CUDA || ORT_ENABLE_TENSORRT
 
 #if defined(ORT_ENABLE_CUDA) || defined(ORT_ENABLE_TENSORRT)
-// Probe for nvcuda.dll + CUDA 12 runtime.  Returns false and logs clearly if
-// either is absent or the wrong version.
+// Probe for nvcuda.dll + CUDA runtime. Returns false if absent.
 static bool CudaDriverPresent() {
     DWORD e = DllLoadable(L"nvcuda.dll");
     if (e != 0) {
         LOG_WARN("nvcuda.dll not loadable (error ", e, ") – no NVIDIA driver detected.");
-        if (e == 87)
-            LOG_WARN("  (Error 87 = invalid parameter -- this is a 3Deflatten internal bug; "
-                     "please report it.)");
         return false;
     }
+#if ORT_CUDA_MAJOR == 13
     if (DllLoadable(L"cudart64_13.dll") != 0) {
-        if (DllLoadable(L"cudart64_12.dll") == 0)
-            LOG_WARN("CUDA 12.x detected. ORT 1.24.x requires CUDA 13.x. "
-                     "Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
-        else
-            LOG_WARN("No CUDA 13 runtime found. "
-                     "Install CUDA 13: https://developer.nvidia.com/cuda-downloads");
+        LOG_WARN("cudart64_13.dll not found. Run collect_runtime_dlls_cuda13.py.");
         return false;
     }
+#else
+    if (DllLoadable(L"cudart64_11.dll") != 0) {
+        LOG_WARN("cudart64_11.dll not found. Run collect_runtime_dlls.py.");
+        return false;
+    }
+#endif
     return true;
 }
 
@@ -364,23 +364,17 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
         } else {
             // CUDA EP: all DLLs probed [OK] yet DllMain returned FALSE.
             // This is NOT a missing-DLL issue (that would be error 126).
-            // Most likely cause: CUDA minor version mismatch.
-            //   ORT 1.24.3 gpu_cuda13 was compiled against a specific CUDA 13.x.
-            //   If bundled DLLs are from a different 13.x (e.g. 13.1 vs 13.2),
-            //   CUDA's init code checks the runtime version and aborts.
-            //   Fix: run collect_runtime_dlls.py to pull the correct DLL versions,
-            //        OR check ORT release notes for the exact required CUDA 13.x.
-            // Second possible cause: GPU driver too old (must be 572+ for CUDA 13).
-            //   Verify with: nvidia-smi  (look for 'Driver Version: 5xx.xx')
-            // Third possible cause: GPU not accessible (TCC mode, passthrough VM, etc.)
+            // Possible causes:
+            //   A) Wrong CUDA DLL version: ORT 1.16.3 requires CUDA 11.x (cudart64_11.dll).
+            //      If Win64_GPU contains DLLs from a previous CUDA 13 run, delete the
+            //      folder contents and re-run collect_runtime_dlls.py.
+            //   B) Driver too old: CUDA 11.x requires driver 452+.
+            //      Verify with: nvidia-smi  (look for 'Driver Version: 4xx+')
+            //   C) GPU not accessible in this process (TCC mode, VM passthrough, etc.)
             LOG_WARN("  CUDA EP DllMain failed (all dep probes passed).");
-            LOG_WARN("  Most likely: CUDA minor version mismatch between ORT build and bundled DLLs.");
-            LOG_WARN("    ORT 1.24.3 gpu_cuda13 requires a specific CUDA 13.x (e.g. 13.2).");
-            LOG_WARN("    Bundling CUDA 13.1 DLLs when ORT needs 13.2 causes exactly this error.");
-            LOG_WARN("    Check ORT 1.24.3 release notes for the required CUDA 13 minor version.");
-            LOG_WARN("    Then update collect_runtime_dlls.py CUDA_URL to that installer version.");
-            LOG_WARN("  Also verify: nvidia-smi shows Driver Version 572+");
-            LOG_WARN("  Also verify: GPU is not in TCC mode (unlikely for GeForce GPUs).");
+            LOG_WARN("  Check: are DLLs in Win64_GPU from CUDA 11.x? Delete and re-run");
+            LOG_WARN("  collect_runtime_dlls.py if they were previously from CUDA 13.");
+            LOG_WARN("  Verify: nvidia-smi shows Driver Version 452+");
         }
     } else {
         LOG_WARN(name, " load failed error=", e, " path='", narrow, "'");

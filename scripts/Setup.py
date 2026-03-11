@@ -32,18 +32,16 @@ BANNER = """
 ================================================================="""
 
 # ORT version string bundled in the current release
-ORT_VERSION  = "1.24.3"
-# ORT 1.24.3 gpu_cuda13 build requires CUDA 13.x at runtime.
-# CUDA 12.x (cudart64_12.dll) is NOT compatible with this build.
-# Driver 572+ required for CUDA 13.x.
-CUDA_MAJOR    = 13
-CUDA_RT_DLL   = "cudart64_13.dll"
-CUBLAS_DLL    = "cublas64_13.dll"
-CUBLASLT_DLL  = "cublasLt64_13.dll"
-CUFFT_DLL     = "cufft64_12.dll"     # cuFFT API stays at version 12 inside CUDA 13 toolkit
-NVJITLINK_DLL = "nvJitLink_130_0.dll"
-# ORT 1.24.3 gpu_cuda13 was compiled against CUDA 13.0 and TRT 10.13.3.9.
-# Using CUDA 13.1+ DLLs at runtime causes error=1114 (DllMain version check fails).
+ORT_VERSION  = "1.16.3"
+# ORT 1.16.3 GPU build was compiled against CUDA 11.8.
+# Runtime DLLs must be CUDA 11.x (cudart64_11.dll). Driver 452+ required.
+CUDA_MAJOR    = 11
+CUDA_RT_DLL   = "cudart64_11.dll"
+CUBLAS_DLL    = "cublas64_11.dll"
+CUBLASLT_DLL  = "cublasLt64_11.dll"
+CUFFT_DLL     = "cufft64_10.dll"     # cuFFT API stays at version 10 inside CUDA 11 toolkit
+# nvJitLink was introduced in CUDA 12; NOT present in CUDA 11 / ORT 1.16.x
+CUDNN_DLL     = "cudnn64_8.dll"      # cuDNN 8.x monolithic DLL (cuDNN 9 uses cudnn64_9)
 
 # ---------------------------------------------------------------------------
 # Model catalogue
@@ -219,23 +217,20 @@ def check_cuda() -> dict:
         return result
 
     # ── Not found ─────────────────────────────────────────────────────────────
-    wrong12 = find_file_recursive(cuda_root, "cudart64_12.dll")
-    if wrong12:
+    wrong13 = find_file_recursive(cuda_root, "cudart64_13.dll")
+    if wrong13:
         result["notes"].append(
-            f"CUDA 12.x found at {wrong12}, but ORT {ORT_VERSION} (gpu_cuda13)\n"
-            f"  requires CUDA 13.0 (cudart64_13.dll), not CUDA 12.x.\n"
-            f"  Run collect_runtime_dlls.py to bundle CUDA 13.0 DLLs, or\n"
-            f"  install CUDA 13.0: https://developer.download.nvidia.com/compute/"
-            f"cuda/13.0.0/local_installers/cuda_13.0.0_windows.exe"
+            f"CUDA 13.x found at {wrong13}, but ORT {ORT_VERSION} requires CUDA 11.x.\n"
+            f"  Delete Win64_GPU DLLs and re-run collect_runtime_dlls.py to get CUDA 11."
         )
     else:
         result["notes"].append(
-            "CUDA 13.x not found.\n"
+            "CUDA 11.x not found.\n"
             "  Option 1 (recommended): run  python collect_runtime_dlls.py\n"
-            "    This bundles CUDA 13.0 DLLs in Win64_GPU so no system install is needed.\n"
-            "  Option 2: install CUDA 13.0:\n"
-            "    https://developer.download.nvidia.com/compute/cuda/13.0.0/"
-            "local_installers/cuda_13.0.0_windows.exe"
+            "    This bundles CUDA 11.7 DLLs in Win64_GPU so no system install is needed.\n"
+            "  Option 2: install CUDA 11.7:\n"
+            "    https://developer.download.nvidia.com/compute/cuda/11.7.0/"
+            "local_installers/cuda_11.7.0_516.01_windows.exe"
         )
     return result
 
@@ -249,23 +244,21 @@ def check_cudnn() -> dict:
               "how": None, "notes": []}
 
     # ── Step 0: bundled DLLs in Win64_GPU (from collect_runtime_dlls.py) ────
-    hit = find_in_release_dirs("cudnn64_9.dll")
+    hit = find_in_release_dirs("cudnn64_8.dll")
     if hit:
-        result.update(ok=True, version="9.x", path=str(hit), how="bundled")
+        result.update(ok=True, version="8.x", path=str(hit), how="bundled")
         return result
 
     # ── Step 1: CUDNN_PATH env var ────────────────────────────────────────────
-    # NOTE: The cuDNN standalone installer does NOT set CUDNN_PATH automatically.
-    # Users must set it manually: CUDNN_PATH=<folder containing cudnn64_9.dll>
     cudnn_env = env("CUDNN_PATH")
     if cudnn_env:
-        hit = find_file_recursive(cudnn_env, "cudnn64_9.dll")
+        hit = find_file_recursive(cudnn_env, "cudnn64_8.dll")
         if hit:
-            result.update(ok=True, version="9.x", path=str(hit), how="env")
+            result.update(ok=True, version="8.x", path=str(hit), how="env")
             return result
         else:
             result["notes"].append(
-                f"CUDNN_PATH={cudnn_env} is set but cudnn64_9.dll was not "
+                f"CUDNN_PATH={cudnn_env} is set but cudnn64_8.dll was not "
                 f"found inside it."
             )
 
@@ -273,28 +266,28 @@ def check_cudnn() -> dict:
     inst = reg_read(winreg.HKEY_LOCAL_MACHINE,
                     r"SOFTWARE\NVIDIA Corporation\cuDNN", "InstallPath")
     if inst:
-        hit = find_file_recursive(inst, "cudnn64_9.dll")
+        hit = find_file_recursive(inst, "cudnn64_8.dll")
         if hit:
-            result.update(ok=True, version="9.x",
+            result.update(ok=True, version="8.x",
                           path=str(hit), how="registry")
             return result
 
     # ── Step 3: default filesystem scan ──────────────────────────────────────
     cudnn_root = pathlib.Path(r"C:\Program Files\NVIDIA\CUDNN")
-    hit = find_file_recursive(cudnn_root, "cudnn64_9.dll")
+    hit = find_file_recursive(cudnn_root, "cudnn64_8.dll")
     if hit:
-        result.update(ok=True, version="9.x",
+        result.update(ok=True, version="8.x",
                       path=str(hit), how="filesystem")
         return result
 
     # ── Not found ─────────────────────────────────────────────────────────────
     result["notes"].append(
-        "cuDNN 9.x not found.\n"
+        "cuDNN 8.x not found.\n"
         "  Option 1 (recommended): run  python collect_runtime_dlls.py\n"
-        "    This bundles cuDNN 9 DLLs in Win64_GPU so no system install is needed.\n"
-        "  Option 2: install cuDNN 9.19.1:\n"
-        "    https://developer.download.nvidia.com/compute/cudnn/9.19.1/"
-        "local_installers/cudnn_9.19.1_windows_x86_64.exe\n"
+        "    This bundles cuDNN 8 DLLs in Win64_GPU so no system install is needed.\n"
+        "  Option 2: download cuDNN 8.9.3 for CUDA 11:\n"
+        "    https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/"
+        "windows-x86_64/cudnn-windows-x86_64-8.9.3.28_cuda11-archive.zip\n"
         "  The standalone installer does NOT set CUDNN_PATH automatically.\n"
         r"  After installing, set: CUDNN_PATH=C:\Program Files\NVIDIA\CUDNN\v9.19\bin\13.1\x64"
     )
@@ -366,9 +359,9 @@ def check_tensorrt() -> dict:
         "TensorRT 10.13.x not found (optional; required only for TRT EP).\n"
         "  Option 1 (recommended): run  python collect_runtime_dlls.py\n"
         "    This bundles TRT DLLs in Win64_GPU -- no system install needed.\n"
-        "  Option 2: download TRT 10.13.3.9 (CUDA 13.0 build):\n"
-        "    https://developer.download.nvidia.com/compute/machine-learning/"
-        "tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.amd64.cuda-13.0.zip\n"
+        "  Option 2: download TRT 10.13.0.35 (CUDA 11.8 build):\n"
+        "    https://developer.nvidia.com/downloads/compute/machine-learning/"
+        "tensorrt/10.13.0/zip/TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip\n"
         r"  After extracting, set: TRT_LIB_PATH=<TRT root>\lib"
         "\n"
         "  NOTE: TRT 10.7.x and earlier are CUDA 12 builds -- do NOT use those."
@@ -552,14 +545,14 @@ def run_diagnostics() -> dict:
     results["cudnn"] = r
     sym = _sym(r["ok"], warn_if_fail=True)
     if r["ok"]:
-        print(f"{sym}  cuDNN 9.x    -- {r['path']}")
+        print(f"{sym}  cuDNN 8.x    -- {r['path']}")
         print(f"           ({_how_label(r['how'])})")
         note = _env_restart_note(r["how"])
         if note:
             for line in note.splitlines():
                 print(f"           {line}")
     else:
-        print(f"{sym}  cuDNN 9.x    -- NOT FOUND  (required for CUDA/TRT EPs)")
+        print(f"{sym}  cuDNN 8.x    -- NOT FOUND  (required for CUDA/TRT EPs)")
     for n in r["notes"]:
         for line in n.splitlines():
             print(f"           {line}")
@@ -778,18 +771,16 @@ def main():
             print(f"""
 --- Dependency Download Links ---
 
-CUDA 13.0 (required for ORT {ORT_VERSION} gpu_cuda13 build):
-  https://developer.download.nvidia.com/compute/cuda/13.0.0/local_installers/cuda_13.0.0_windows.exe
-  NOTE: ORT 1.24.3 was compiled against CUDA 13.0 specifically.
-  Using CUDA 13.1+ DLLs causes error 1114 (runtime version mismatch).
-  Recommended: run  python collect_runtime_dlls.py  to bundle the correct DLLs.
+CUDA 11.7 (required for ORT {ORT_VERSION} GPU build):
+  https://developer.download.nvidia.com/compute/cuda/11.7.0/local_installers/cuda_11.7.0_516.01_windows.exe
+  Or run  python collect_runtime_dlls.py  to bundle CUDA 11 DLLs automatically.
 
-cuDNN 9.19.1 (required for CUDA and TensorRT EPs):
-  https://developer.download.nvidia.com/compute/cudnn/9.19.1/local_installers/cudnn_9.19.1_windows_x86_64.exe
-  Or run  python collect_runtime_dlls.py  to bundle DLLs without a system install.
+cuDNN 8.9.3 for CUDA 11 (required for CUDA and TensorRT EPs):
+  https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-8.9.3.28_cuda11-archive.zip
+  Or run  python collect_runtime_dlls.py  to bundle DLLs automatically.
 
-TensorRT 10.13.3.9 CUDA 13.0 build (optional; fastest EP):
-  https://developer.download.nvidia.com/compute/machine-learning/tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.amd64.cuda-13.0.zip
+TensorRT 10.13.0.35 CUDA 11.8 build (optional; fastest EP):
+  https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.13.0/zip/TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip
   Or run  python collect_runtime_dlls.py  to bundle DLLs.
   After extracting, set: TRT_LIB_PATH=<TRT root>\\lib
 

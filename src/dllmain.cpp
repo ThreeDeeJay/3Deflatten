@@ -151,19 +151,11 @@ static void AddCudaDir(const std::wstring& cudaDllDir, const wchar_t* probeDll,
             AddDllDirectory(parent.c_str());
             LOG_INFO("  added CUDA parent dir: ", parent);
         }
-        // CUDA 13+ ships nvJitLink in its own subdirectory on some platforms
-        for (auto* sub : {L"nvJitLink\\bin", L"nvJitLink"}) {
-            std::wstring jitDir = parent + L"\\" + sub;
-            if (GetFileAttributesW(jitDir.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                AddDllDirectory(jitDir.c_str());
-                LOG_INFO("  added CUDA nvJitLink dir: ", jitDir);
-                break;
-            }
-        }
+        // nvJitLink sub-directories exist only in CUDA 12+; not needed for CUDA 11.
     }
 }
 
-// Discover CUDA 13.x, cuDNN 9.x, and TensorRT 10.x install directories and
+// Discover CUDA 11.x, cuDNN 8.x, and TensorRT 10.x install directories and
 // register them as DLL search paths so ORT can find provider DLLs without
 // requiring the user to modify PATH.
 //
@@ -175,37 +167,49 @@ static void AddCudaDir(const std::wstring& cudaDllDir, const wchar_t* probeDll,
 // Call AFTER SetDefaultDllDirectories and AFTER logger is live.
 static void RegisterGpuRuntimeDirs() {
     LOG_INFO("--- GPU runtime path discovery ---");
+#if ORT_CUDA_MAJOR == 13
     LOG_INFO("  (searching for CUDA 13.x, cuDNN 9.x, TensorRT 10.x)");
-
-    // ── CUDA Toolkit bin ─────────────────────────────────────────────────────
-    // ORT 1.24.x GPU binary requires CUDA 13.x (cudart64_13.dll).
-    // CUDA 12.x (cudart64_12.dll) is NOT compatible.
-    // Multiple CUDA versions can coexist; we prefer 13.x, accept 12.x as fallback.
-    bool foundCuda = false;
+    constexpr wchar_t CUDA_RT_DLL[] = L"cudart64_13.dll";
+    constexpr wchar_t CUDNN_DLL[]   = L"cudnn64_9.dll";
+    constexpr char    CUDA_LABEL[]  = "CUDA 13";
+    constexpr char    CUDNN_LABEL[] = "cuDNN 9";
+    constexpr char    CUDA_COLLECT[]= "collect_runtime_dlls_cuda13.py";
+    constexpr char    CUDNN_COLLECT[]="collect_runtime_dlls_cuda13.py";
     const wchar_t* cudaEnvVars[] = {
-        L"CUDA_PATH_V13_0", L"CUDA_PATH_V13_1", L"CUDA_PATH_V13_2",
-        L"CUDA_PATH_V12_9", L"CUDA_PATH_V12_8", L"CUDA_PATH_V12_7",
-        L"CUDA_PATH_V12_6", L"CUDA_PATH",
+        L"CUDA_PATH_V13_0", L"CUDA_PATH_V13_1", L"CUDA_PATH_V13_2", L"CUDA_PATH",
         nullptr
     };
+    auto versionMatch = [](const wchar_t* s) { return wcsncmp(s, L"v13.", 4) == 0; };
+#else
+    LOG_INFO("  (searching for CUDA 11.x, cuDNN 8.x, TensorRT 10.x)");
+    constexpr wchar_t CUDA_RT_DLL[] = L"cudart64_11.dll";
+    constexpr wchar_t CUDNN_DLL[]   = L"cudnn64_8.dll";
+    constexpr char    CUDA_LABEL[]  = "CUDA 11";
+    constexpr char    CUDNN_LABEL[] = "cuDNN 8";
+    constexpr char    CUDA_COLLECT[]= "collect_runtime_dlls.py";
+    constexpr char    CUDNN_COLLECT[]="collect_runtime_dlls.py";
+    const wchar_t* cudaEnvVars[] = {
+        L"CUDA_PATH_V11_8", L"CUDA_PATH_V11_7", L"CUDA_PATH_V11_6",
+        L"CUDA_PATH_V11_5", L"CUDA_PATH_V11_4", L"CUDA_PATH",
+        nullptr
+    };
+    auto versionMatch = [](const wchar_t* s) { return wcsncmp(s, L"v11.", 4) == 0; };
+#endif
+
+    // ── CUDA Toolkit bin ─────────────────────────────────────────────────────
+    bool foundCuda = false;
     for (int i = 0; cudaEnvVars[i] && !foundCuda; ++i) {
         wchar_t val[MAX_PATH] = {};
         if (GetEnvironmentVariableW(cudaEnvVars[i], val, MAX_PATH) && val[0]) {
             std::wstring binDir = std::wstring(val) + L"\\bin";
-            // Prefer cudart64_13.dll (ORT 1.24.x), also accept cudart64_12.dll
-            for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
-                std::wstring probe = binDir + L"\\" + dll;
-                if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                    AddCudaDir(binDir, dll, "CUDA bin (env var)");
-                    foundCuda = true;
-                    break;
-                }
+            std::wstring probe  = binDir + L"\\" + CUDA_RT_DLL;
+            if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                AddCudaDir(binDir, CUDA_RT_DLL, "CUDA bin (env var)");
+                foundCuda = true;
             }
         }
     }
     if (!foundCuda) {
-        // Registry fallback: enumerate all subkeys under the CUDA key so we
-        // don't need to hard-code version strings (works for 12.7, 12.8, etc.)
         const wchar_t* regBase =
             L"SOFTWARE\\NVIDIA Corporation\\GPU Computing Toolkit\\CUDA";
         HKEY hBase = nullptr;
@@ -217,136 +221,98 @@ static void RegisterGpuRuntimeDirs() {
                 if (RegEnumKeyExW(hBase, idx, subName, &nameLen,
                                   nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
                     break;
-                // Accept v13.x (primary for ORT 1.24.x) and v12.x (legacy)
-                if (wcsncmp(subName, L"v13.", 4) != 0 &&
-                    wcsncmp(subName, L"v12.", 4) != 0) continue;
+                if (!versionMatch(subName)) continue;
                 std::wstring inst = RegReadSz(hBase, subName, L"InstallDir");
                 if (inst.empty()) continue;
                 std::wstring binDir = inst + L"\\bin";
-                for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
-                    std::wstring probe = binDir + L"\\" + dll;
-                    if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                        AddCudaDir(binDir, dll, "CUDA bin (registry)");
-                        foundCuda = true;
-                        break;
-                    }
+                std::wstring probe  = binDir + L"\\" + CUDA_RT_DLL;
+                if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    AddCudaDir(binDir, CUDA_RT_DLL, "CUDA bin (registry)");
+                    foundCuda = true;
                 }
             }
             RegCloseKey(hBase);
         }
     }
     if (!foundCuda) {
-        // Recursive scan of the CUDA Toolkit base directory.
-        // Try CUDA 13 (ORT 1.24.x requirement) then CUDA 12 as fallback.
-        // NOTE: CUDA 13 on Windows may store DLLs in bin\x64\ not bin\.
-        // AddCudaDir adds both the found directory AND its parent (bin\) so
-        // that nvJitLink_130_0.dll and nvrtc64_130_0.dll are also reachable.
-        {
-            std::wstring cudaBase =
-                L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA";
-            for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
-                WIN32_FIND_DATAW fd{}; // reuse RecursiveFindPath logic inline
-                // Use RecursiveFindAndAdd to locate the DLL, then fix up dirs
-                // by also adding the parent.  We do a quick two-pass scan:
-                // pass 1: find the directory containing the DLL
-                std::function<std::wstring(const std::wstring&, int)> findDir;
-                findDir = [&](const std::wstring& dir, int depth) -> std::wstring {
-                    if (depth <= 0 || dir.empty()) return {};
-                    if (GetFileAttributesW((dir + L"\\" + dll).c_str()) !=
-                        INVALID_FILE_ATTRIBUTES) return dir;
-                    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
-                    if (h == INVALID_HANDLE_VALUE) return {};
-                    std::wstring r;
-                    do {
-                        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-                        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-                        r = findDir(dir + L"\\" + fd.cFileName, depth - 1);
-                    } while (r.empty() && FindNextFileW(h, &fd));
-                    FindClose(h);
-                    return r;
-                };
-                std::wstring dir = findDir(cudaBase, 6);
-                if (!dir.empty()) {
-                    AddCudaDir(dir, dll,
-                               dll[9] == '1' ? "CUDA 13 bin (default scan)"
-                                             : "CUDA 12 bin (default scan -- needs CUDA 13)");
-                    foundCuda = true;
-                    break;
-                }
-            }
+        std::wstring cudaBase =
+            L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA";
+        WIN32_FIND_DATAW fd{};
+        std::function<std::wstring(const std::wstring&, int)> findDir;
+        findDir = [&](const std::wstring& dir, int depth) -> std::wstring {
+            if (depth <= 0 || dir.empty()) return {};
+            if (GetFileAttributesW((dir + L"\\" + CUDA_RT_DLL).c_str()) !=
+                INVALID_FILE_ATTRIBUTES) return dir;
+            HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) return {};
+            std::wstring r;
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+                r = findDir(dir + L"\\" + fd.cFileName, depth - 1);
+            } while (r.empty() && FindNextFileW(h, &fd));
+            FindClose(h);
+            return r;
+        };
+        std::wstring dir = findDir(cudaBase, 5);
+        if (!dir.empty()) {
+            AddCudaDir(dir, CUDA_RT_DLL, "CUDA bin (default scan)");
+            foundCuda = true;
         }
     }
     if (!foundCuda) {
-        // Check if cudart64_13.dll is already accessible via the bundled DLLs
-        // in the .ax folder (added to the search path by DllInit above).
-        HMODULE hBundled = LoadLibraryExW(L"cudart64_13.dll", nullptr,
+        HMODULE hBundled = LoadLibraryExW(CUDA_RT_DLL, nullptr,
                                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
                                LOAD_LIBRARY_SEARCH_USER_DIRS);
         if (hBundled) {
             FreeLibrary(hBundled);
-            LOG_INFO("  CUDA 13 not found via system install, but cudart64_13.dll");
-            LOG_INFO("  is present in the bundled DLLs folder -- OK.");
+            LOG_INFO("  ", CUDA_LABEL, " not found via system install, but ", CUDA_RT_DLL,
+                     " is in the bundled DLLs folder -- OK.");
         } else {
-            LOG_WARN("  CUDA 13 not found (no system install and not bundled).");
-            LOG_WARN("  Run collect_runtime_dlls.py to bundle CUDA 13 DLLs, or");
-            LOG_WARN("  install CUDA 13: https://developer.nvidia.com/cuda-downloads");
+            LOG_WARN("  ", CUDA_LABEL, " not found (no system install and not bundled).");
+            LOG_WARN("  Run ", CUDA_COLLECT, " to bundle CUDA DLLs.");
         }
     }
 
-    // ── cuDNN 9.x ────────────────────────────────────────────────────────────
-    // The cuDNN standalone installer nests DLLs in a version-specific path like
-    //   bin\<cuda-ver>\<arch>\    e.g. bin\13.1\x64\  (v9.19, Mar 2026)
-    // Rather than hard-coding these version strings we recursively scan the
-    // install root for cudnn64_9.dll at any depth.
+    // ── cuDNN ─────────────────────────────────────────────────────────────────
     {
         bool foundCuDnn = false;
         wchar_t val[MAX_PATH] = {};
 
-        // 1. CUDNN_PATH env var (set by standalone installer)
         if (!foundCuDnn &&
             GetEnvironmentVariableW(L"CUDNN_PATH", val, MAX_PATH) && val[0])
-            foundCuDnn = RecursiveFindAndAdd(val, L"cudnn64_9.dll",
-                                             "cuDNN 9 (CUDNN_PATH)");
-
-        // 2. Registry key written by standalone installer
+            foundCuDnn = RecursiveFindAndAdd(val, CUDNN_DLL,
+                                             "cuDNN (CUDNN_PATH)");
         if (!foundCuDnn) {
             std::wstring inst = RegReadSz(HKEY_LOCAL_MACHINE,
                 L"SOFTWARE\\NVIDIA Corporation\\cuDNN", L"InstallPath");
             if (!inst.empty())
-                foundCuDnn = RecursiveFindAndAdd(inst, L"cudnn64_9.dll",
-                                                  "cuDNN 9 (registry)");
+                foundCuDnn = RecursiveFindAndAdd(inst, CUDNN_DLL,
+                                                  "cuDNN (registry)");
         }
-
-        // 3. Recursive scan of default base dir -- handles any version layout
         if (!foundCuDnn)
             foundCuDnn = RecursiveFindAndAdd(
                 L"C:\\Program Files\\NVIDIA\\CUDNN",
-                L"cudnn64_9.dll", "cuDNN 9 (default scan)");
+                CUDNN_DLL, "cuDNN (default scan)");
 
-        // 4. If still not found: check if cudnn64_9.dll is already accessible
-        //    via bundled DLLs in the .ax folder.
         if (!foundCuDnn) {
-            HMODULE hBundled = LoadLibraryExW(L"cudnn64_9.dll", nullptr,
+            HMODULE hBundled = LoadLibraryExW(CUDNN_DLL, nullptr,
                                    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
                                    LOAD_LIBRARY_SEARCH_USER_DIRS);
             if (hBundled) {
                 FreeLibrary(hBundled);
-                LOG_INFO("  cuDNN 9 not found via system install, but cudnn64_9.dll");
-                LOG_INFO("  is present in the bundled DLLs folder -- OK.");
+                LOG_INFO("  ", CUDNN_LABEL, " not found via system install, but ", CUDNN_DLL,
+                         " is in the bundled DLLs folder -- OK.");
             } else {
-                LOG_INFO("  cuDNN 9 not found via env/registry/default path.");
-                LOG_INFO("  Run collect_runtime_dlls.py to bundle cuDNN 9 DLLs, or");
+                LOG_INFO("  ", CUDNN_LABEL, " not found via env/registry/default path.");
+                LOG_INFO("  Run ", CUDNN_COLLECT, " to bundle cuDNN DLLs, or");
                 LOG_INFO("  if installed elsewhere: set CUDNN_PATH=<install root>.");
-                LOG_INFO("  Download: https://developer.nvidia.com/cudnn");
             }
         }
     } // end cuDNN block
 
     // ── TensorRT 10.x ────────────────────────────────────────────────────────
-    // ORT 1.24.3 gpu_cuda13 was built with TRT 10.13.3.9 (CUDA 13.0 build).
-    // TRT 10.13+ layout: DLLs are in lib\ alongside nvinfer_10.dll.
-    // nvinfer_builder_resource_10.dll may or may not be present depending on
-    // TRT version; nvinfer_dispatch_10.dll and nvinfer_lean_10.dll are new in 10.x.
+    // TRT 10.13+ layout: nvinfer_10.dll in lib\ alongside all other TRT DLLs.
     // zlibwapi.dll is NOT required by TRT 10.13+ (dependency was removed).
     {
         wchar_t val[MAX_PATH] = {};
@@ -434,9 +400,15 @@ static void RegisterGpuRuntimeDirs() {
                 LOG_INFO("  is present in the bundled DLLs folder -- OK.");
             } else {
                 LOG_INFO("  TensorRT 10 not found via env/registry/default scan.");
-                LOG_INFO("  Run collect_runtime_dlls.py to bundle TRT 10.13 DLLs, or");
-                LOG_INFO("  extract TensorRT-10.13.3.9.Windows.amd64.cuda-13.0.zip and set:");
+#if ORT_CUDA_MAJOR == 13
+                LOG_INFO("  Run collect_runtime_dlls_cuda13.py to bundle TRT 10.13.3 DLLs, or");
+                LOG_INFO("  extract TensorRT-10.13.3.9.Windows.win10.cuda-13.0.zip and set:");
                 LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.13.3.9\\lib");
+#else
+                LOG_INFO("  Run collect_runtime_dlls.py to bundle TRT 10.13.0 DLLs, or");
+                LOG_INFO("  extract TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip and set:");
+                LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.13.0.35\\lib");
+#endif
                 LOG_INFO("  NOTE: env vars only take effect after restarting the host app.");
             }
         }
@@ -476,24 +448,18 @@ struct DllInit {
         // delay-load fires before the logger initialises (unlikely but safe).
         {
             const wchar_t* vars[] = {
-                L"CUDA_PATH_V13_2",L"CUDA_PATH_V13_1",L"CUDA_PATH_V13_0",
-                L"CUDA_PATH_V12_9",L"CUDA_PATH_V12_8",L"CUDA_PATH_V12_7",
-                L"CUDA_PATH_V12_6",L"CUDA_PATH", nullptr
+                L"CUDA_PATH_V11_8",L"CUDA_PATH_V11_7",L"CUDA_PATH_V11_6",
+                L"CUDA_PATH_V11_5",L"CUDA_PATH", nullptr
             };
             for (int i = 0; vars[i]; ++i) {
                 wchar_t v[MAX_PATH] = {};
                 if (GetEnvironmentVariableW(vars[i], v, MAX_PATH) && v[0]) {
                     std::wstring bin = std::wstring(v) + L"\\bin";
-                    bool found = false;
-                    for (auto* dll : { L"cudart64_13.dll", L"cudart64_12.dll" }) {
-                        std::wstring chk = bin + L"\\" + dll;
-                        if (GetFileAttributesW(chk.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                            AddDllDirectory(bin.c_str());
-                            found = true;
-                            break;
-                        }
+                    std::wstring chk = bin + L"\\cudart64_11.dll";
+                    if (GetFileAttributesW(chk.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                        AddDllDirectory(bin.c_str());
+                        break;
                     }
-                    if (found) break;
                 }
             }
             // TRT: register both TRT_LIB_PATH (has nvinfer_10.dll) and TENSORRT_DIR/lib

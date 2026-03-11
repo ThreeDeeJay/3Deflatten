@@ -62,19 +62,33 @@ target_compile_options(strmbase PRIVATE
 #       Defines: ORT_ENABLE_DML
 #       Good for: AMD, Intel, NVIDIA without needing CUDA installed
 #
-#   GPU                 –  ORT official GitHub release zip (CUDA + TRT)
+#   GPU                 –  ORT 1.16.3 GitHub release zip (CUDA 11.8 compatible)
+#       EPs available at runtime: TensorRT (if CUDA 11.8 TRT present), CUDA, CPU
+#       Defines: ORT_ENABLE_TENSORRT, ORT_ENABLE_CUDA, ORT_CUDA_MAJOR=11
+#       Use collect_runtime_dlls.py to bundle CUDA 11.7 + cuDNN 8 + TRT 10.13.0.35 DLLs.
+#       CUDA 11 test/reference build -- use GPU13 for production NVIDIA.
+#       Note: x64 only.
+#
+#   GPU13               –  ORT 1.24.3 github release zip (CUDA 13.0 / TRT 10.13.3)
 #       EPs available at runtime: TensorRT, CUDA, CPU
-#       Defines: ORT_ENABLE_TENSORRT, ORT_ENABLE_CUDA
-#       Good for: NVIDIA with CUDA 13.x Toolkit + (optionally) TensorRT SDK
-#       ORT 1.24.x GPU build requires CUDA 13.x at runtime.
-#       Note: x64 only. CUDA/TRT DLLs NOT bundled; user must have them installed.
+#       Defines: ORT_ENABLE_TENSORRT, ORT_ENABLE_CUDA, ORT_CUDA_MAJOR=13
+#       Use collect_runtime_dlls_cuda13.py to bundle CUDA 13.0 + cuDNN 9 + TRT DLLs.
+#       Note: x64 only.
 #
-# Select with:  cmake -B build -DORT_BACKEND=GPU   (or DirectML, the default)
+# Select with:  cmake -B build -DORT_BACKEND=GPU13  (or GPU, DirectML)
 #
-set(ORT_VERSION "1.24.3")
-set(ORT_BACKEND "DirectML" CACHE STRING "ORT inference backend: DirectML or GPU")
-set_property(CACHE ORT_BACKEND PROPERTY STRINGS "DirectML" "GPU")
+set(ORT_BACKEND "DirectML" CACHE STRING "ORT inference backend: DirectML, GPU, or GPU13")
+set_property(CACHE ORT_BACKEND PROPERTY STRINGS "DirectML" "GPU" "GPU13")
 message(STATUS "ORT backend: ${ORT_BACKEND}")
+
+# ORT version per backend
+if(ORT_BACKEND STREQUAL "GPU13")
+    set(ORT_VERSION "1.24.3")
+elseif(ORT_BACKEND STREQUAL "GPU")
+    set(ORT_VERSION "1.16.3")
+else()
+    set(ORT_VERSION "1.24.3")   # DirectML / CPU NuGet
+endif()
 
 # ── Helper macro: resolve ORT paths from an extracted NuGet/zip directory ────
 # NuGet packages (.nupkg are zips) are extracted by FetchContent directly into
@@ -128,18 +142,31 @@ macro(ort_resolve_nuget_paths SOURCE_VAR ARCH_RID)
     endif()
 endmacro()
 
-if(ORT_BACKEND STREQUAL "GPU")
-    # ── GPU backend (TensorRT + CUDA + CPU) ───────────────────────────────────
+if(ORT_BACKEND STREQUAL "GPU" OR ORT_BACKEND STREQUAL "GPU13")
     if(NOT ARCH_SUFFIX STREQUAL "x64")
-        message(FATAL_ERROR "ORT_BACKEND=GPU is only supported for x64 builds. "
+        message(FATAL_ERROR "ORT_BACKEND=${ORT_BACKEND} is only supported for x64 builds. "
                             "Use ORT_BACKEND=DirectML for x86.")
     endif()
 
-    # ORT 1.24.3 ships TWO GPU zips:
-    #   gpu          -> built against CUDA 12  (onnxruntime-win-x64-gpu-*.zip)
-    #   gpu_cuda13   -> built against CUDA 13  (onnxruntime-win-x64-gpu_cuda13-*.zip)
-    # We use gpu_cuda13 so users only need CUDA 13.x at runtime.
-    set(ORT_GPU_ZIP_VARIANT "gpu_cuda13")
+    if(ORT_BACKEND STREQUAL "GPU13")
+        # ── GPU13 backend: ORT 1.24.3 / CUDA 13.0 / TRT 10.13.3 ─────────────
+        # Runtime DLLs required (from collect_runtime_dlls_cuda13.py):
+        #   cudart64_13, cublas64_13, cublasLt64_13, cufft64_12, nvJitLink_130_0,
+        #   cusolver64_11, curand64_10, cudnn64_9 (+ 7 split libs), TRT 10.13.3 DLLs.
+        set(ORT_GPU_ZIP_VARIANT "gpu_cuda13")
+        set(ORT_CUDA_MAJOR_VAL  13)
+        set(ORT_CI_CACHE_KEY    "ort-gpu-cuda13-${ORT_VERSION}")
+    else()
+        # ── GPU backend: ORT 1.16.3 / CUDA 11.7 reference build ──────────────
+        # Runtime DLLs required (from collect_runtime_dlls.py):
+        #   cudart64_11, cublas64_11, cublasLt64_11, cufft64_10,
+        #   cusolver64_11, curand64_10, cudnn64_8 (+ split libs),
+        #   optionally TRT 10.13.0.35 (CUDA 11.8 build).
+        set(ORT_GPU_ZIP_VARIANT "gpu")
+        set(ORT_CUDA_MAJOR_VAL  11)
+        set(ORT_CI_CACHE_KEY    "ort-gpu-cuda11-${ORT_VERSION}")
+    endif()
+
     FetchContent_Declare(ort_gpu
         URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_GPU_ZIP_VARIANT}-${ORT_VERSION}.zip"
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
@@ -148,9 +175,6 @@ if(ORT_BACKEND STREQUAL "GPU")
 
     # The GitHub release zip may extract to a nested subdirectory OR directly
     # into SOURCE_DIR depending on the archive structure and CMake version.
-    # Probe both layouts so the build is robust against version changes:
-    #   Layout A (nested):  SOURCE_DIR/onnxruntime-win-x64-gpu_cuda13-<ver>/lib/
-    #   Layout B (flat):    SOURCE_DIR/lib/
     set(_ORT_NESTED "${ort_gpu_SOURCE_DIR}/onnxruntime-win-x64-${ORT_GPU_ZIP_VARIANT}-${ORT_VERSION}")
     if(EXISTS "${_ORT_NESTED}/lib/onnxruntime.lib")
         set(ORT_ZIP_ROOT "${_ORT_NESTED}")
@@ -159,7 +183,6 @@ if(ORT_BACKEND STREQUAL "GPU")
         set(ORT_ZIP_ROOT "${ort_gpu_SOURCE_DIR}")
         message(STATUS "ORT GPU zip: flat layout detected (${ORT_ZIP_ROOT})")
     else()
-        # Last resort: glob for onnxruntime.lib anywhere under SOURCE_DIR
         file(GLOB_RECURSE _ORT_LIB_CANDIDATES
              "${ort_gpu_SOURCE_DIR}/*/onnxruntime.lib")
         list(GET _ORT_LIB_CANDIDATES 0 _ORT_LIB_FOUND)
@@ -168,7 +191,6 @@ if(ORT_BACKEND STREQUAL "GPU")
             get_filename_component(ORT_ZIP_ROOT "${ORT_ZIP_ROOT}" DIRECTORY)
             message(STATUS "ORT GPU zip: found via glob at ${ORT_ZIP_ROOT}")
         else()
-            # Will be caught by the existence check below with a clear message
             set(ORT_ZIP_ROOT "${_ORT_NESTED}")
         endif()
     endif()
@@ -181,7 +203,7 @@ if(ORT_BACKEND STREQUAL "GPU")
         "${ORT_ZIP_ROOT}/lib/onnxruntime_providers_cuda.dll"
         "${ORT_ZIP_ROOT}/lib/onnxruntime_providers_tensorrt.dll"
     )
-    set(ORT_COMPILE_DEFS ORT_ENABLE_TENSORRT ORT_ENABLE_CUDA)
+    set(ORT_COMPILE_DEFS ORT_ENABLE_TENSORRT ORT_ENABLE_CUDA "ORT_CUDA_MAJOR=${ORT_CUDA_MAJOR_VAL}")
 
 elseif(ARCH_SUFFIX STREQUAL "x64")
     # ── DirectML backend, x64 (DirectML + CPU) ────────────────────────────────
@@ -338,9 +360,11 @@ set(HEADERS
 
 add_library(3Deflatten SHARED ${SOURCES} ${HEADERS})
 
-# Output directory name encodes the backend so both builds can coexist
-if(ORT_BACKEND STREQUAL "GPU")
-    set(AX_SUBDIR "Win64_GPU")
+# Output directory name encodes the backend so all builds can coexist
+if(ORT_BACKEND STREQUAL "GPU13")
+    set(AX_SUBDIR "Win64_GPU")       # same folder as before -- the "production" GPU build
+elseif(ORT_BACKEND STREQUAL "GPU")
+    set(AX_SUBDIR "Win64_GPU11")     # distinct folder for the CUDA 11 test build
 else()
     if(ARCH_SUFFIX STREQUAL "x64")
         set(AX_SUBDIR "Win64")
