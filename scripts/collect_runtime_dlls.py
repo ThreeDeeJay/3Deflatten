@@ -64,10 +64,10 @@ DEFAULT_OUTPUT = _candidate if _candidate.exists() else SCRIPT_DIR.parent / "Win
 
 CUDA_URL  = ("https://developer.download.nvidia.com/compute/cuda/13.0.0/"
              "local_installers/cuda_13.0.0_windows.exe")
-CUDNN_URL = ("https://developer.download.nvidia.com/compute/cudnn/9.19.1/"
-             "local_installers/cudnn_9.19.1_windows_x86_64.exe")
-TRT_URL   = ("https://developer.download.nvidia.com/compute/machine-learning/"
-             "tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.amd64.cuda-13.0.zip")
+CUDNN_URL = ("https://developer.download.nvidia.com/compute/cudnn/9.12.0/"
+             "local_installers/cudnn_9.12.0_windows.exe")
+TRT_URL   = ("https://developer.nvidia.com/downloads/compute/machine-learning/"
+             "tensorrt/10.13.3/zip/TensorRT-10.13.3.9.Windows.win10.cuda-13.0.zip")
 
 # DLLs to copy from the CUDA installer
 CUDA_DLLS = [
