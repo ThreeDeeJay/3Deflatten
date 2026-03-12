@@ -33,16 +33,19 @@ BANNER = """
 ================================================================="""
 
 # ORT version string bundled in the current release
-ORT_VERSION  = "1.16.3"
-# ORT 1.16.3 GPU build was compiled against CUDA 11.8.
-# Runtime DLLs must be CUDA 11.x (cudart64_11.dll). Driver 452+ required.
+ORT_VERSION  = "1.18.1"
+# ORT 1.18.1 GPU build was compiled against CUDA 11.8 exactly.
+# Using CUDA 11.7 DLLs causes error=1114 (CUDA runtime version self-check fails).
+# Runtime DLLs: cudart64_110.dll ("110" = CUDA 11.0 API level, all 11.x).
 CUDA_MAJOR    = 11
-CUDA_RT_DLL   = "cudart64_11.dll"
+CUDA_RT_DLL   = "cudart64_110.dll"   # CUDA 11.x -- "110" NOT "11"
 CUBLAS_DLL    = "cublas64_11.dll"
 CUBLASLT_DLL  = "cublasLt64_11.dll"
 CUFFT_DLL     = "cufft64_10.dll"     # cuFFT API stays at version 10 inside CUDA 11 toolkit
-# nvJitLink was introduced in CUDA 12; NOT present in CUDA 11 / ORT 1.16.x
-CUDNN_DLL     = "cudnn64_8.dll"      # cuDNN 8.x monolithic DLL (cuDNN 9 uses cudnn64_9)
+# nvJitLink was introduced in CUDA 12; NOT present in CUDA 11 / ORT 1.18.x
+CUDNN_DLL     = "cudnn64_8.dll"      # cuDNN 8.x monolithic DLL
+# TRT 10.0.x uses plain names: nvinfer.dll (no _10 suffix -- that's TRT 10.3+)
+TRT_MAIN_DLL  = "nvinfer.dll"
 
 # ---------------------------------------------------------------------------
 # Model catalogue
@@ -170,20 +173,20 @@ def check_cuda() -> dict:
     # ── Step 0: bundled DLLs in Win64_GPU (from collect_runtime_dlls.py) ────
     hit = find_in_release_dirs(CUDA_RT_DLL)
     if hit:
-        result.update(ok=True, version="13.x", path=str(hit), how="bundled")
+        result.update(ok=True, version="11.x", path=str(hit), how="bundled")
         return result
 
-    # ── Step 1: env vars set by CUDA 13 installer ───────────────────────────
+    # ── Step 1: env vars set by the CUDA 11 installer ────────────────────────
     cuda_env_vars = [
-        ("CUDA_PATH_V13_2", "13.2"), ("CUDA_PATH_V13_1", "13.1"),
-        ("CUDA_PATH_V13_0", "13.0"), ("CUDA_PATH", "?"),
+        ("CUDA_PATH_V11_8", "11.8"), ("CUDA_PATH_V11_7", "11.7"),
+        ("CUDA_PATH_V11_6", "11.6"), ("CUDA_PATH_V11_5", "11.5"),
+        ("CUDA_PATH", "11.x"),
     ]
     for var, ver in cuda_env_vars:
         p = env(var)
         if not p:
             continue
-        # CUDA 13 on Windows stores DLLs in bin\x64\ (toolkit) or bin\
-        for bin_sub in (r"bin\x64", "bin"):
+        for bin_sub in ("bin",):
             dll = pathlib.Path(p) / bin_sub / CUDA_RT_DLL
             if dll.exists():
                 result.update(ok=True, version=ver, path=str(dll), how="env")
@@ -192,18 +195,17 @@ def check_cuda() -> dict:
     # ── Step 2: registry ─────────────────────────────────────────────────────
     reg_base = r"SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA"
     for sub in reg_enum_subkeys(winreg.HKEY_LOCAL_MACHINE, reg_base):
-        if not sub.startswith("v13."):
+        if not sub.startswith("v11."):
             continue
         inst = reg_read(winreg.HKEY_LOCAL_MACHINE,
                         f"{reg_base}\\{sub}", "InstallDir")
         if not inst:
             continue
-        for bin_sub in (r"bin\x64", "bin"):
-            dll = pathlib.Path(inst) / bin_sub / CUDA_RT_DLL
-            if dll.exists():
-                result.update(ok=True, version=sub.lstrip("v"),
-                              path=str(dll), how="registry")
-                return result
+        dll = pathlib.Path(inst) / "bin" / CUDA_RT_DLL
+        if dll.exists():
+            result.update(ok=True, version=sub.lstrip("v"),
+                          path=str(dll), how="registry")
+            return result
 
     # ── Step 3: default filesystem scan ──────────────────────────────────────
     cuda_root = pathlib.Path(
@@ -221,17 +223,18 @@ def check_cuda() -> dict:
     wrong13 = find_file_recursive(cuda_root, "cudart64_13.dll")
     if wrong13:
         result["notes"].append(
-            f"CUDA 13.x found at {wrong13}, but ORT {ORT_VERSION} requires CUDA 11.x.\n"
-            f"  Delete Win64_GPU DLLs and re-run collect_runtime_dlls.py to get CUDA 11."
+            f"CUDA 13.x found at {wrong13}, but ORT {ORT_VERSION} requires CUDA 11.8.\n"
+            f"  Delete Win64_GPU DLLs and re-run collect_runtime_dlls.py to get CUDA 11.8."
         )
     else:
         result["notes"].append(
-            "CUDA 11.x not found.\n"
+            "CUDA 11.8 not found.\n"
             "  Option 1 (recommended): run  python collect_runtime_dlls.py\n"
-            "    This bundles CUDA 11.7 DLLs in Win64_GPU so no system install is needed.\n"
-            "  Option 2: install CUDA 11.7:\n"
-            "    https://developer.download.nvidia.com/compute/cuda/11.7.0/"
-            "local_installers/cuda_11.7.0_516.01_windows.exe"
+            "    This bundles CUDA 11.8 DLLs in Win64_GPU so no system install is needed.\n"
+            "  Option 2: install CUDA 11.8:\n"
+            "    https://developer.download.nvidia.com/compute/cuda/11.8.0/"
+            "local_installers/cuda_11.8.0_522.06_windows.exe\n"
+            "  NOTE: CUDA 11.7 causes error=1114 -- ORT 1.18.1 requires 11.8 exactly."
         )
     return result
 
@@ -304,7 +307,7 @@ def check_tensorrt() -> dict:
               "how": None, "notes": []}
 
     # ── Step 0: bundled DLLs in Win64_GPU (from collect_runtime_dlls.py) ────
-    hit = find_in_release_dirs("nvinfer_10.dll")
+    hit = find_in_release_dirs(TRT_MAIN_DLL)
     if hit:
         result.update(ok=True, path=str(hit), how="bundled")
         return result
@@ -312,7 +315,7 @@ def check_tensorrt() -> dict:
     # ── Step 1: TRT_LIB_PATH (should point to lib\ folder) ───────────────────
     trt_lib = env("TRT_LIB_PATH")
     if trt_lib:
-        hit = find_file_recursive(trt_lib, "nvinfer_10.dll", max_depth=2)
+        hit = find_file_recursive(trt_lib, TRT_MAIN_DLL, max_depth=2)
         if hit:
             result.update(ok=True, path=str(hit), how="env:TRT_LIB_PATH")
             for part in hit.parts:
@@ -321,17 +324,19 @@ def check_tensorrt() -> dict:
                     break
             return result
         result["notes"].append(
-            f"TRT_LIB_PATH={trt_lib} set but nvinfer_10.dll not found there.\n"
+            f"TRT_LIB_PATH={trt_lib} set but {TRT_MAIN_DLL} not found there.\n"
             r"  TRT_LIB_PATH should point to the lib\ folder inside the TRT zip:"
             "\n"
-            r"    TRT_LIB_PATH=C:\Program Files\NVIDIA\TensorRT-10.x.y.z\lib"
+            r"    TRT_LIB_PATH=C:\path\to\TensorRT-10.0.0.6\lib"
+            "\n"
+            f"  NOTE: TRT 10.0.x uses plain names ({TRT_MAIN_DLL}), not nvinfer_10.dll."
         )
 
     # ── Step 2: TENSORRT_DIR ──────────────────────────────────────────────────
     trt_dir = env("TENSORRT_DIR")
     if trt_dir:
         lib_dir = pathlib.Path(trt_dir) / "lib"
-        hit = find_file_recursive(lib_dir, "nvinfer_10.dll", max_depth=2)
+        hit = find_file_recursive(lib_dir, TRT_MAIN_DLL, max_depth=2)
         if hit:
             result.update(ok=True, path=str(hit), how="env:TENSORRT_DIR")
             return result
@@ -340,13 +345,13 @@ def check_tensorrt() -> dict:
     inst = reg_read(winreg.HKEY_LOCAL_MACHINE,
                     r"SOFTWARE\NVIDIA Corporation\TensorRT", "InstallPath")
     if inst:
-        hit = find_file_recursive(inst, "nvinfer_10.dll")
+        hit = find_file_recursive(inst, TRT_MAIN_DLL)
         if hit:
             result.update(ok=True, path=str(hit), how="registry")
             return result
 
     # ── Step 4: default scan under C:\Program Files\NVIDIA ───────────────────
-    hit = find_file_recursive(r"C:\Program Files\NVIDIA", "nvinfer_10.dll")
+    hit = find_file_recursive(r"C:\Program Files\NVIDIA", TRT_MAIN_DLL)
     if hit:
         result.update(ok=True, path=str(hit), how="filesystem")
         for part in hit.parts:
@@ -357,15 +362,15 @@ def check_tensorrt() -> dict:
 
     # ── Not found ─────────────────────────────────────────────────────────────
     result["notes"].append(
-        "TensorRT 10.13.x not found (optional; required only for TRT EP).\n"
+        "TensorRT 10.0.0.6 not found (optional; required only for TRT EP).\n"
         "  Option 1 (recommended): run  python collect_runtime_dlls.py\n"
         "    This bundles TRT DLLs in Win64_GPU -- no system install needed.\n"
-        "  Option 2: download TRT 10.13.0.35 (CUDA 11.8 build):\n"
+        "  Option 2: download TRT 10.0.0.6 (CUDA 11.8 build):\n"
         "    https://developer.nvidia.com/downloads/compute/machine-learning/"
-        "tensorrt/10.13.0/zip/TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip\n"
+        "tensorrt/10.0.0/zip/TensorRT-10.0.0.6.Windows10.win10.cuda-11.8.zip\n"
         r"  After extracting, set: TRT_LIB_PATH=<TRT root>\lib"
         "\n"
-        "  NOTE: TRT 10.7.x and earlier are CUDA 12 builds -- do NOT use those."
+        f"  NOTE: TRT 10.0.x uses plain DLL names ({TRT_MAIN_DLL}, not nvinfer_10.dll)."
     )
     return result
 
@@ -772,18 +777,20 @@ def main():
             print(f"""
 --- Dependency Download Links ---
 
-CUDA 11.7 (required for ORT {ORT_VERSION} GPU build):
-  https://developer.download.nvidia.com/compute/cuda/11.7.0/local_installers/cuda_11.7.0_516.01_windows.exe
-  Or run  python collect_runtime_dlls.py  to bundle CUDA 11 DLLs automatically.
+CUDA 11.8 (required for ORT {ORT_VERSION} GPU build):
+  https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_522.06_windows.exe
+  Or run  python collect_runtime_dlls.py  to bundle CUDA 11.8 DLLs automatically.
+  NOTE: CUDA 11.7 causes error=1114 on driver 520+ -- use 11.8.
 
 cuDNN 8.9.3 for CUDA 11 (required for CUDA and TensorRT EPs):
   https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-8.9.3.28_cuda11-archive.zip
   Or run  python collect_runtime_dlls.py  to bundle DLLs automatically.
 
-TensorRT 10.13.0.35 CUDA 11.8 build (optional; fastest EP):
-  https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.13.0/zip/TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip
+TensorRT 10.0.0.6 CUDA 11.8 build (optional; fastest EP):
+  https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.0.0/zip/TensorRT-10.0.0.6.Windows10.win10.cuda-11.8.zip
   Or run  python collect_runtime_dlls.py  to bundle DLLs.
   After extracting, set: TRT_LIB_PATH=<TRT root>\\lib
+  NOTE: TRT 10.0.x uses plain DLL names (nvinfer.dll, not nvinfer_10.dll).
 
 DirectML: built into Windows 10 1809+ (no extra install needed).
   The x64 DirectML build of 3Deflatten bundles directml.dll.

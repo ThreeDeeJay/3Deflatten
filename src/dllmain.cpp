@@ -312,16 +312,35 @@ static void RegisterGpuRuntimeDirs() {
     } // end cuDNN block
 
     // ── TensorRT 10.x ────────────────────────────────────────────────────────
-    // TRT 10.13+ layout: nvinfer_10.dll in lib\ alongside all other TRT DLLs.
-    // zlibwapi.dll is NOT required by TRT 10.13+ (dependency was removed).
+    // TRT 10.0.x (CUDA 11): DLLs named nvinfer.dll (no version suffix).
+    // TRT 10.3+  (CUDA 13): DLLs named nvinfer_10.dll.
     {
         wchar_t val[MAX_PATH] = {};
         bool foundTrt = false;
 
+#if ORT_CUDA_MAJOR == 13
+        constexpr wchar_t TRT_MAIN_DLL[] = L"nvinfer_10.dll";
+        constexpr char    TRT_VER_STR[]  = "TRT 10.13 (CUDA 13)";
+        constexpr char    TRT_NOT_FOUND_1[] =
+            "  Run collect_runtime_dlls_cuda13.py to bundle TRT 10.13.3 DLLs, or";
+        constexpr char    TRT_NOT_FOUND_2[] =
+            "  extract TensorRT-10.13.3.9.Windows.win10.cuda-13.0.zip and set:";
+        constexpr char    TRT_NOT_FOUND_3[] =
+            "    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.13.3.9\\lib";
+#else
+        constexpr wchar_t TRT_MAIN_DLL[] = L"nvinfer.dll";   // TRT 10.0.x plain name
+        constexpr char    TRT_VER_STR[]  = "TRT 10.0 (CUDA 11)";
+        constexpr char    TRT_NOT_FOUND_1[] =
+            "  Run collect_runtime_dlls.py to bundle TRT 10.0.0.6 DLLs, or";
+        constexpr char    TRT_NOT_FOUND_2[] =
+            "  extract TensorRT-10.0.0.6.Windows10.win10.cuda-11.8.zip and set:";
+        constexpr char    TRT_NOT_FOUND_3[] =
+            "    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.0.0.6\\lib";
+#endif
+
         // Helper: add nvinfer directory + siblings to maximise sub-dep coverage
         auto addTrtRoot = [&](const std::wstring& nvinferDir, const char* label) {
-            TryAddDir(nvinferDir, L"nvinfer_10.dll", label);
-            // Walk up to TRT root and add sibling directories
+            TryAddDir(nvinferDir, TRT_MAIN_DLL, label);
             auto sl2 = nvinferDir.find_last_of(L"\\/");
             if (sl2 != std::wstring::npos) {
                 std::wstring trtRoot = nvinferDir.substr(0, sl2);
@@ -338,20 +357,20 @@ static void RegisterGpuRuntimeDirs() {
 
         if (GetEnvironmentVariableW(L"TRT_LIB_PATH", val, MAX_PATH) && val[0]) {
             std::wstring dir = val;
-            std::wstring probe = dir + L"\\nvinfer_10.dll";
+            std::wstring probe = dir + L"\\" + TRT_MAIN_DLL;
             if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                addTrtRoot(dir, "TRT 10 (TRT_LIB_PATH)");
+                addTrtRoot(dir, TRT_VER_STR " (TRT_LIB_PATH)");
                 foundTrt = true;
             } else {
-                LOG_WARN("  TRT_LIB_PATH set but nvinfer_10.dll not found in: ", dir);
+                LOG_WARN("  TRT_LIB_PATH set but ", TRT_MAIN_DLL, " not found in: ", dir);
             }
         }
         if (!foundTrt &&
             GetEnvironmentVariableW(L"TENSORRT_DIR", val, MAX_PATH) && val[0]) {
             std::wstring libDir = std::wstring(val) + L"\\lib";
-            std::wstring probe  = libDir + L"\\nvinfer_10.dll";
+            std::wstring probe  = libDir + L"\\" + TRT_MAIN_DLL;
             if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                addTrtRoot(libDir, "TRT 10 (TENSORRT_DIR/lib)");
+                addTrtRoot(libDir, TRT_VER_STR " (TENSORRT_DIR/lib)");
                 foundTrt = true;
             }
         }
@@ -359,18 +378,16 @@ static void RegisterGpuRuntimeDirs() {
             std::wstring inst = RegReadSz(HKEY_LOCAL_MACHINE,
                 L"SOFTWARE\\NVIDIA Corporation\\TensorRT", L"InstallPath");
             if (!inst.empty())
-                foundTrt = RecursiveFindAndAdd(inst, L"nvinfer_10.dll",
-                                               "TRT 10 (registry)");
+                foundTrt = RecursiveFindAndAdd(inst, TRT_MAIN_DLL,
+                                               TRT_VER_STR " (registry)");
         }
-        // Default scan: TensorRT zips typically extract under C:\Program Files\NVIDIA
         if (!foundTrt) {
-            // Use lambda to find nvinfer_10.dll then call addTrtRoot
             std::wstring base = L"C:\\Program Files\\NVIDIA";
             WIN32_FIND_DATAW fd2{};
             std::function<std::wstring(const std::wstring&, int)> findTrt;
             findTrt = [&](const std::wstring& dir, int depth) -> std::wstring {
                 if (depth <= 0 || dir.empty()) return {};
-                std::wstring p = dir + L"\\nvinfer_10.dll";
+                std::wstring p = dir + L"\\" + TRT_MAIN_DLL;
                 if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return dir;
                 HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd2);
                 if (h == INVALID_HANDLE_VALUE) return {};
@@ -385,30 +402,23 @@ static void RegisterGpuRuntimeDirs() {
             };
             std::wstring trtDir = findTrt(base, 5);
             if (!trtDir.empty()) {
-                addTrtRoot(trtDir, "TRT 10 (default scan)");
+                addTrtRoot(trtDir, TRT_VER_STR " (default scan)");
                 foundTrt = true;
             }
         }
         if (!foundTrt) {
-            // Check if nvinfer_10.dll is bundled next to the .ax
-            HMODULE hTrt = LoadLibraryExW(L"nvinfer_10.dll", nullptr,
+            HMODULE hTrt = LoadLibraryExW(TRT_MAIN_DLL, nullptr,
                                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
                                LOAD_LIBRARY_SEARCH_USER_DIRS);
             if (hTrt) {
                 FreeLibrary(hTrt);
-                LOG_INFO("  TRT not found via system install, but nvinfer_10.dll");
-                LOG_INFO("  is present in the bundled DLLs folder -- OK.");
+                LOG_INFO("  TRT not found via system install, but ", TRT_MAIN_DLL,
+                         " is in the bundled DLLs folder -- OK.");
             } else {
                 LOG_INFO("  TensorRT 10 not found via env/registry/default scan.");
-#if ORT_CUDA_MAJOR == 13
-                LOG_INFO("  Run collect_runtime_dlls_cuda13.py to bundle TRT 10.13.3 DLLs, or");
-                LOG_INFO("  extract TensorRT-10.13.3.9.Windows.win10.cuda-13.0.zip and set:");
-                LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.13.3.9\\lib");
-#else
-                LOG_INFO("  Run collect_runtime_dlls.py to bundle TRT 10.13.0 DLLs, or");
-                LOG_INFO("  extract TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip and set:");
-                LOG_INFO("    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.13.0.35\\lib");
-#endif
+                LOG_INFO(TRT_NOT_FOUND_1);
+                LOG_INFO(TRT_NOT_FOUND_2);
+                LOG_INFO(TRT_NOT_FOUND_3);
                 LOG_INFO("  NOTE: env vars only take effect after restarting the host app.");
             }
         }
@@ -462,7 +472,7 @@ struct DllInit {
                     }
                 }
             }
-            // TRT: register both TRT_LIB_PATH (has nvinfer_10.dll) and TENSORRT_DIR/lib
+            // TRT: register TRT_LIB_PATH and TENSORRT_DIR/lib
             {
                 wchar_t trtVal[MAX_PATH] = {};
                 if (GetEnvironmentVariableW(L"TRT_LIB_PATH", trtVal, MAX_PATH) && trtVal[0]) {

@@ -234,12 +234,14 @@ static void LogCudaDependencies(bool includeTrt) {
     LOG_INFO("        Using CUDA 13.1+ DLLs at runtime causes error=1114 (version mismatch).");
     LOG_INFO("  NOTE: Driver 572+ required for CUDA 13.0.");
 #else
-    LOG_INFO("  ORT 1.16.3 GPU build requirements:");
+    LOG_INFO("  ORT 1.18.1 GPU build requirements:");
     LOG_INFO("    CUDA 11.x  (cudart64_110.dll)");
     LOG_INFO("    cuDNN 8.x  (cudnn64_8.dll + split infer/train DLLs)");
     if (includeTrt)
-        LOG_INFO("    TensorRT 10.13.0.35 (CUDA 11.8 build)");
-    LOG_INFO("  NOTE: nvJitLink is NOT required for CUDA 11 / ORT 1.16.x.");
+        LOG_INFO("    TensorRT 10.0.0.6 (CUDA 11.8 build)");
+    LOG_INFO("  NOTE: ORT 1.18.1 requires CUDA 11.8 exactly.");
+    LOG_INFO("        Using CUDA 11.7 DLLs causes error=1114 (runtime version check).");
+    LOG_INFO("  NOTE: nvJitLink is NOT required for CUDA 11 / ORT 1.18.x.");
     LOG_INFO("  NOTE: Driver 452+ required for CUDA 11.x.");
 #endif
     LOG_INFO("");
@@ -283,14 +285,19 @@ static void LogCudaDependencies(bool includeTrt) {
 #if ORT_CUDA_MAJOR == 13
         LOG_INFO("  TensorRT 10.13.x libraries (CUDA 13.0 build):");
         LOG_INFO("  NOTE: zlibwapi.dll is NOT required by TRT 10.13+.");
+        ProbeDep(L"nvinfer_10.dll",          L"TRT 10.13+ inference engine");
+        ProbeDep(L"nvonnxparser_10.dll",     L"TRT 10.13+ ONNX parser");
+        ProbeDep(L"nvinfer_dispatch_10.dll", L"TRT 10.13+ dispatch runtime");
+        ProbeDep(L"nvinfer_lean_10.dll",     L"TRT 10.13+ lean runtime");
+        ProbeDep(L"nvinfer_plugin_10.dll",   L"TRT 10.13+ plugins");
 #else
-        LOG_INFO("  TensorRT 10.13.0.x libraries (CUDA 11.8 build):");
+        LOG_INFO("  TensorRT 10.0.x libraries (CUDA 11.8 build):");
+        LOG_INFO("  NOTE: TRT 10.0.x uses plain names (nvinfer.dll, NOT nvinfer_10.dll).");
+        LOG_INFO("        The _10 suffix was introduced in TRT 10.3+.");
+        ProbeDep(L"nvinfer.dll",        L"TRT 10.0 inference engine");
+        ProbeDep(L"nvonnxparser.dll",   L"TRT 10.0 ONNX parser");
+        ProbeDep(L"nvinfer_plugin.dll", L"TRT 10.0 plugins");
 #endif
-        ProbeDep(L"nvinfer_10.dll",          L"TensorRT 10 inference engine");
-        ProbeDep(L"nvonnxparser_10.dll",     L"TensorRT 10 ONNX parser");
-        ProbeDep(L"nvinfer_dispatch_10.dll", L"TRT 10 dispatch runtime");
-        ProbeDep(L"nvinfer_lean_10.dll",     L"TRT 10 lean runtime");
-        ProbeDep(L"nvinfer_plugin_10.dll",   L"TRT 10 plugins");
     }
     LOG_INFO("--- end dependency scan ---");
 }
@@ -468,7 +475,11 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
                       std::wstring(path).find(L"nvinfer")   != std::wstring::npos);
         if (isTrt) {
             LOG_WARN("  TIP: Copy ALL DLLs from TensorRT lib\\ folder next to the .ax,");
+#if ORT_CUDA_MAJOR == 13
             LOG_WARN("       not just nvinfer_10.dll -- TRT has many sub-dependencies.");
+#else
+            LOG_WARN("       not just nvinfer.dll -- TRT has many sub-dependencies.");
+#endif
         }
     } else if (e == 1114) {
         // ERROR_DLL_INIT_FAILED: all dependencies loaded but DllMain returned FALSE.
@@ -489,10 +500,14 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
             LOG_WARN("        Verify: nvidia-smi shows Driver Version 572+");
 #else
             LOG_WARN("  CUDA EP: DllMain failed. Possible causes:");
-            LOG_WARN("    (A) DLLs in Win64_GPU11 may be wrong version -- delete and");
-            LOG_WARN("        re-run collect_runtime_dlls.py to rebuild from CUDA 11.7.");
-            LOG_WARN("    (B) Driver too old -- CUDA 11.x requires driver 452+.");
-            LOG_WARN("        Verify: nvidia-smi shows Driver Version 452+");
+            LOG_WARN("    (A) Wrong CUDA runtime version. ORT 1.18.1 requires CUDA 11.8.");
+            LOG_WARN("        CUDA 11.7 (or older) causes this exact error on drivers 520+.");
+            LOG_WARN("        Fix: delete Win64_GPU DLLs and re-run collect_runtime_dlls.py.");
+            LOG_WARN("        This downloads CUDA 11.8 DLLs automatically.");
+            LOG_WARN("        NOTE: If PyTorch GPU works on this machine, its bundled CUDA 11.8");
+            LOG_WARN("        DLLs confirm CUDA works -- you just need the 11.8 DLLs for us.");
+            LOG_WARN("    (B) Driver too old -- CUDA 11.8 requires driver 520+.");
+            LOG_WARN("        Verify: nvidia-smi shows Driver Version 520+");
 #endif
         }
     } else {
@@ -576,10 +591,14 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 LOG_WARN("  Common causes:");
                 LOG_WARN("    1. TRT version does not match CUDA version.");
                 LOG_WARN("       Check zip filename for the cuda-XX.N suffix.");
-                LOG_WARN("       TRT 10.x must match the CUDA 13.x minor you have installed.");
-                LOG_WARN("    2. Replaced onnxruntime*.dll with a version != " ORT_VER_STR ".");
-                LOG_WARN("       The .ax is ABI-linked to ORT " ORT_VER_STR ". Other versions crash.");
+#if ORT_CUDA_MAJOR == 13
+                LOG_WARN("       TRT 10.13.x (cuda-13.0 build) is required.");
                 LOG_WARN("    3. nvinfer_10.dll / nvonnxparser_10.dll missing or their deps missing.");
+#else
+                LOG_WARN("       TRT 10.0.x (cuda-11.8 build) is required.");
+                LOG_WARN("    3. nvinfer.dll / nvonnxparser.dll missing or their deps missing.");
+                LOG_WARN("       NOTE: TRT 10.0.x uses plain names (no _10 suffix).");
+#endif
                 LOG_WARN("       Ensure TRT_LIB_PATH was set before launching the host app,");
                 LOG_WARN("       or copy all DLLs from TensorRT lib\\ next to the .ax file.");
                 return false;

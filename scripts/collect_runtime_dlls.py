@@ -3,17 +3,17 @@
 """
 Collect ALL runtime DLLs required for the Win64_GPU build of 3Deflatten.
 
-ORT 1.16.3 was compiled against CUDA 11.8.  This script downloads the matching
-NVIDIA installers / zip and extracts ONLY the DLLs needed, so users do NOT need
-system-wide installs.
+ORT 1.18.1 GPU build was compiled against CUDA 11.8.  Using CUDA 11.7 DLLs
+causes error=1114 because the CUDA runtime checks its own version at DllMain
+init time (11.7 < 11.8 required → DllMain returns FALSE).
 
 Sources (official NVIDIA URLs):
-  CUDA 11.7.0   : https://developer.download.nvidia.com/compute/cuda/11.7.0/
-                   local_installers/cuda_11.7.0_516.01_windows.exe
+  CUDA 11.8.0   : https://developer.download.nvidia.com/compute/cuda/11.8.0/
+                   local_installers/cuda_11.8.0_522.06_windows.exe
   cuDNN 8.9.3   : https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/
                    windows-x86_64/cudnn-windows-x86_64-8.9.3.28_cuda11-archive.zip
-  TensorRT 10.13: https://developer.nvidia.com/downloads/compute/machine-learning/
-                   tensorrt/10.13.0/zip/TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip
+  TRT 10.0.0.6  : https://developer.nvidia.com/downloads/compute/machine-learning/
+                   tensorrt/10.0.0/zip/TensorRT-10.0.0.6.Windows10.win10.cuda-11.8.zip
 
 DLLs collected:
   CUDA 11:  cudart64_110, cublas64_11, cublasLt64_11, cufft64_10,
@@ -21,7 +21,8 @@ DLLs collected:
   cuDNN 8:  cudnn64_8, cudnn_ops_infer64_8, cudnn_ops_train64_8,
             cudnn_cnn_infer64_8, cudnn_cnn_train64_8,
             cudnn_adv_infer64_8, cudnn_adv_train64_8
-  TRT 10.13: all *.dll from TRT lib folder (nvinfer_10, nvonnxparser_10, ...)
+  TRT 10.0: all *.dll from TRT lib folder (nvinfer.dll, nvonnxparser.dll, ...)
+            NOTE: TRT 10.0.x uses plain names -- no _10 suffix (that's TRT 10.3+).
 
 NOT bundled (always present as a driver component in System32):
   nvcuda.dll
@@ -66,17 +67,21 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 _candidate     = SCRIPT_DIR / "Win64_GPU"
 DEFAULT_OUTPUT = _candidate if _candidate.exists() else SCRIPT_DIR.parent / "Win64_GPU"
 
-# CUDA 11.7 (NSIS .exe installer → extract with 7z.exe)
-CUDA_URL  = ("https://developer.download.nvidia.com/compute/cuda/11.7.0/"
-             "local_installers/cuda_11.7.0_516.01_windows.exe")
+# CUDA 11.8 (NSIS .exe installer → extract with 7z.exe)
+# ORT 1.18.1 GPU build was compiled against CUDA 11.8. Using 11.7 DLLs causes
+# error=1114 because the CUDA runtime version-checks itself: 11.7 < 11.8 → fail.
+CUDA_URL  = ("https://developer.download.nvidia.com/compute/cuda/11.8.0/"
+             "local_installers/cuda_11.8.0_522.06_windows.exe")
 # cuDNN 8.9.3 for CUDA 11 (plain .zip → extract with zipfile)
 CUDNN_URL = ("https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/"
              "windows-x86_64/cudnn-windows-x86_64-8.9.3.28_cuda11-archive.zip")
-# TRT 10.13.0.35 for CUDA 11.8 (.zip → extract with zipfile)
+# TRT 10.0.0.6 for CUDA 11.8 (.zip → extract with zipfile)
+# NOTE: TRT 10.0.x uses plain DLL names (nvinfer.dll, not nvinfer_10.dll).
+#       The _10 suffix was introduced in TRT 10.3+.
 TRT_URL   = ("https://developer.nvidia.com/downloads/compute/machine-learning/"
-             "tensorrt/10.13.0/zip/TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip")
+             "tensorrt/10.0.0/zip/TensorRT-10.0.0.6.Windows10.win10.cuda-11.8.zip")
 
-# DLLs to copy from the CUDA 11.7 installer.
+# DLLs to copy from the CUDA 11.8 installer.
 # NOTE: cudart uses "110" suffix (= CUDA 11.0 API level, same across all 11.x).
 #       Other CUDA 11 DLLs use "_11" (just the major version).
 #       nvJitLink was introduced in CUDA 12 -- not present in CUDA 11.
@@ -103,9 +108,11 @@ CUDNN_DLLS = [
 ]
 
 # Key TRT DLLs -- we copy ALL *.dll from the TRT archive but warn if absent.
+# TRT 10.0.x DLL names have NO version suffix (nvinfer.dll, not nvinfer_10.dll).
+# The _10 suffix was introduced in TRT 10.3+.
 TRT_REQUIRED_DLLS = [
-    "nvinfer_10.dll",
-    "nvonnxparser_10.dll",
+    "nvinfer.dll",
+    "nvonnxparser.dll",
 ]
 
 # Download cache (avoids re-downloading ~5 GB on repeated runs)
@@ -301,19 +308,20 @@ def run(output_dir: pathlib.Path,
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     print()
-    print("3Deflatten -- Collect GPU Runtime DLLs (CUDA 11.7 + cuDNN 8 + TRT 10.13)")
+    print("3Deflatten -- Collect GPU Runtime DLLs (CUDA 11.8 + cuDNN 8 + TRT 10.0)")
     print("=" * 70)
     print(f"Output : {output_dir}")
     print(f"Cache  : {CACHE_DIR}")
     print()
-    print("ORT 1.16.3 was compiled against CUDA 11.8 / TRT 10.13.0.35.")
+    print("ORT 1.18.1 was compiled against CUDA 11.8 / TRT 10.0.0.6.")
+    print("Using CUDA 11.7 DLLs causes error=1114 (CUDA runtime version check fails).")
     print("First-run downloads (~4 GB total; cached for subsequent runs):")
-    print(f"  CUDA 11.7.0  installer  : {CUDA_URL.split('/')[-1]}")
+    print(f"  CUDA 11.8.0  installer  : {CUDA_URL.split('/')[-1]}")
     print(f"  cuDNN 8.9.3  zip        : {CUDNN_URL.split('/')[-1]}")
     if trt_zip_path:
-        print(f"  TRT 10.13.0 zip (local) : {trt_zip_path}")
+        print(f"  TRT 10.0.0.6 zip (local): {trt_zip_path}")
     else:
-        print(f"  TRT 10.13.0 zip         : {TRT_URL.split('/')[-1]}")
+        print(f"  TRT 10.0.0.6 zip        : {TRT_URL.split('/')[-1]}")
     print()
     print("Only the required DLLs will be copied; all are NVIDIA-redistributable.")
     print()
@@ -326,8 +334,8 @@ def run(output_dir: pathlib.Path,
 
     all_missing = []
 
-    # ── CUDA 11.7 (NSIS installer → 7z.exe) ─────────────────────────────────
-    print("\n[1/3]  CUDA 11.7.0")
+    # ── CUDA 11.8 (NSIS installer → 7z.exe) ─────────────────────────────────
+    print("\n[1/3]  CUDA 11.8.0")
     cuda_archive = download(CUDA_URL, CACHE_DIR)
     cuda_ext     = CACHE_DIR / "cuda_extracted"
     if not cuda_ext.exists():
@@ -346,8 +354,8 @@ def run(output_dir: pathlib.Path,
                                  "cuDNN 8 DLLs")
     all_missing.extend(missing)
 
-    # ── TensorRT 10.13.0.35 (plain zip → zipfile) ────────────────────────────
-    print("\n[3/3]  TensorRT 10.13.0.35")
+    # ── TensorRT 10.0.0.6 (plain zip → zipfile) ──────────────────────────────
+    print("\n[3/3]  TensorRT 10.0.0.6")
     if trt_zip_path:
         trt_archive = pathlib.Path(trt_zip_path)
         if not trt_archive.exists():
@@ -388,8 +396,8 @@ def run(output_dir: pathlib.Path,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download and bundle CUDA 11.7 / cuDNN 8 / TRT 10.13 DLLs "
-                    "for the 3Deflatten GPU build",
+        description="Download and bundle CUDA 11.8 / cuDNN 8 / TRT 10.0.0.6 DLLs "
+                    "for the 3Deflatten GPU build (ORT 1.18.1)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

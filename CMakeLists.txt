@@ -62,11 +62,12 @@ target_compile_options(strmbase PRIVATE
 #       Defines: ORT_ENABLE_DML
 #       Good for: AMD, Intel, NVIDIA without needing CUDA installed
 #
-#   GPU                 –  ORT 1.16.3 GitHub release zip (CUDA 11.8 compatible)
-#       EPs available at runtime: TensorRT (if CUDA 11.8 TRT present), CUDA, CPU
+#   GPU                 –  ORT 1.18.1 GitHub release zip (CUDA 11.8 / TRT 10.0.0.6)
+#       EPs available at runtime: TensorRT (requires TRT 10.0.0.6), CUDA, CPU
 #       Defines: ORT_ENABLE_TENSORRT, ORT_ENABLE_CUDA, ORT_CUDA_MAJOR=11
-#       Use collect_runtime_dlls.py to bundle CUDA 11.7 + cuDNN 8 + TRT 10.13.0.35 DLLs.
-#       CUDA 11 test/reference build -- use GPU13 for production NVIDIA.
+#       Use collect_runtime_dlls.py to bundle CUDA 11.8 + cuDNN 8 + TRT 10.0.0.6 DLLs.
+#       NOTE: ORT 1.18.1 requires CUDA 11.8 exactly (11.7 causes error=1114).
+#       NOTE: TRT 10.0.x uses plain DLL names (nvinfer.dll, not nvinfer_10.dll).
 #       Note: x64 only.
 #
 #   GPU13               –  ORT 1.24.3 github release zip (CUDA 13.0 / TRT 10.13.3)
@@ -75,7 +76,7 @@ target_compile_options(strmbase PRIVATE
 #       Use collect_runtime_dlls_cuda13.py to bundle CUDA 13.0 + cuDNN 9 + TRT DLLs.
 #       Note: x64 only.
 #
-# Select with:  cmake -B build -DORT_BACKEND=GPU13  (or GPU, DirectML)
+# Select with:  cmake -B build -DORT_BACKEND=GPU   (or GPU13, DirectML)
 #
 set(ORT_BACKEND "DirectML" CACHE STRING "ORT inference backend: DirectML, GPU, or GPU13")
 set_property(CACHE ORT_BACKEND PROPERTY STRINGS "DirectML" "GPU" "GPU13")
@@ -85,7 +86,7 @@ message(STATUS "ORT backend: ${ORT_BACKEND}")
 if(ORT_BACKEND STREQUAL "GPU13")
     set(ORT_VERSION "1.24.3")
 elseif(ORT_BACKEND STREQUAL "GPU")
-    set(ORT_VERSION "1.16.3")
+    set(ORT_VERSION "1.18.1")
 else()
     set(ORT_VERSION "1.24.3")   # DirectML / CPU NuGet
 endif()
@@ -157,11 +158,11 @@ if(ORT_BACKEND STREQUAL "GPU" OR ORT_BACKEND STREQUAL "GPU13")
         set(ORT_CUDA_MAJOR_VAL  13)
         set(ORT_CI_CACHE_KEY    "ort-gpu-cuda13-${ORT_VERSION}")
     else()
-        # ── GPU backend: ORT 1.16.3 / CUDA 11.7 reference build ──────────────
+        # ── GPU backend: ORT 1.18.1 / CUDA 11.8 / TRT 10.0.0.6 ─────────────
         # Runtime DLLs required (from collect_runtime_dlls.py):
-        #   cudart64_11, cublas64_11, cublasLt64_11, cufft64_10,
+        #   cudart64_110, cublas64_11, cublasLt64_11, cufft64_10,
         #   cusolver64_11, curand64_10, cudnn64_8 (+ split libs),
-        #   optionally TRT 10.13.0.35 (CUDA 11.8 build).
+        #   TRT 10.0.0.6 DLLs: nvinfer.dll (no _10 suffix -- that's TRT 10.3+).
         set(ORT_GPU_ZIP_VARIANT "gpu")
         set(ORT_CUDA_MAJOR_VAL  11)
         set(ORT_CI_CACHE_KEY    "ort-gpu-cuda11-${ORT_VERSION}")
