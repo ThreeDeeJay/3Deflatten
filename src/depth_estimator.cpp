@@ -323,87 +323,125 @@ static bool CudaDriverPresent() {
 // to report exactly which DLLs it needs and whether each one is loadable.
 // This is the same information Dependencies.exe / depends.exe shows, but
 // embedded directly in the log so no external tool is needed.
+//
+// C2712 rule: __try/__except cannot be in a function that requires object
+// unwinding (i.e. has C++ objects with destructors).  We solve this by
+// splitting into two functions:
+//   ScanPeImports_SEH  -- contains ONLY __try/__except, no C++ objects at all.
+//                         Uses a fixed-size C array to return results.
+//   ScanAndLogMissingImports -- handles all C++ (std::wstring, LOG_*) and
+//                         calls ScanPeImports_SEH.
 // ---------------------------------------------------------------------------
+
+// Max imports we track (practically no DLL has more than 64 direct deps)
+static constexpr int PE_SCAN_MAX = 64;
+
+struct PeScanResult {
+    enum Status : BYTE { EMPTY = 0, OK_DEP, MISSING_DEP, BAD_PE, EXCEPTION };
+    char     names[PE_SCAN_MAX][64];  // import DLL names (truncated to 63 chars)
+    DWORD    errors[PE_SCAN_MAX];     // 0 = loadable, non-zero = error code
+    int      count;                   // number of entries filled
+    Status   status;                  // overall result
+};
+
+// RVA-to-file-offset helper: plain static function so it can be called from
+// inside a __try block without triggering C2712 (no destructor, no lambda).
+static DWORD RvaToFileOffset(const IMAGE_SECTION_HEADER* sec, WORD numSec, DWORD rva) {
+    for (WORD i = 0; i < numSec; ++i) {
+        if (rva >= sec[i].VirtualAddress &&
+            rva <  sec[i].VirtualAddress + sec[i].SizeOfRawData)
+            return rva - sec[i].VirtualAddress + sec[i].PointerToRawData;
+    }
+    return 0;
+}
+
+// Inner function: NO C++ objects, safe for __try/__except.
+static void ScanPeImports_SEH(const BYTE* base, PeScanResult* out) {
+    out->count  = 0;
+    out->status = PeScanResult::BAD_PE;
+    __try {
+        const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+        const IMAGE_NT_HEADERS* nt  = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+
+        WORD numSec = nt->FileHeader.NumberOfSections;
+        const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+
+        DWORD importRVA =
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+        if (!importRVA) { out->status = PeScanResult::OK_DEP; return; }
+        DWORD importOff = RvaToFileOffset(sec, numSec, importRVA);
+        if (!importOff) { out->status = PeScanResult::OK_DEP; return; }
+
+        const IMAGE_IMPORT_DESCRIPTOR* desc =
+            (const IMAGE_IMPORT_DESCRIPTOR*)(base + importOff);
+        for (; desc->Name && out->count < PE_SCAN_MAX; ++desc) {
+            DWORD nameOff = RvaToFileOffset(sec, numSec, desc->Name);
+            if (!nameOff) continue;
+            const char* src = (const char*)(base + nameOff);
+            int j = 0;
+            for (; j < 63 && src[j]; ++j)
+                out->names[out->count][j] = src[j];
+            out->names[out->count][j] = '\0';
+            ++out->count;
+        }
+        out->status = PeScanResult::OK_DEP;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out->status = PeScanResult::EXCEPTION;
+    }
+}
+
+// Outer function: all C++ objects live here; no __try/__except.
 static void ScanAndLogMissingImports(const std::wstring& dllPath) {
     HANDLE hFile = CreateFileW(dllPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                                nullptr, OPEN_EXISTING, 0, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
-        LOG_WARN("  [dep-scan] Cannot open: ", dllPath, " error=", GetLastError());
+        LOG_WARN("  [dep-scan] Cannot open: ", dllPath, " (error=", GetLastError(), ")");
         return;
     }
     HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
     CloseHandle(hFile);
-    if (!hMap) {
-        LOG_WARN("  [dep-scan] CreateFileMapping failed error=", GetLastError());
-        return;
-    }
+    if (!hMap) { LOG_WARN("  [dep-scan] CreateFileMapping failed"); return; }
     const BYTE* base = (const BYTE*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
     CloseHandle(hMap);
-    if (!base) {
-        LOG_WARN("  [dep-scan] MapViewOfFile failed error=", GetLastError());
+    if (!base) { LOG_WARN("  [dep-scan] MapViewOfFile failed"); return; }
+
+    LOG_INFO("  [dep-scan] Direct imports of: ", dllPath);
+
+    PeScanResult res{};
+    ScanPeImports_SEH(base, &res);
+    UnmapViewOfFile(base);
+
+    if (res.status == PeScanResult::EXCEPTION) {
+        LOG_WARN("  [dep-scan] Access violation reading PE headers -- file may be corrupt.");
+        return;
+    }
+    if (res.status == PeScanResult::BAD_PE) {
+        LOG_WARN("  [dep-scan] Not a valid PE/DLL file.");
+        return;
+    }
+    if (res.count == 0) {
+        LOG_INFO("  [dep-scan] No imports found (or import directory empty).");
         return;
     }
 
-    LOG_INFO("  [dep-scan] Direct imports of ", dllPath, ":");
-    __try {
-        const auto* dos = (const IMAGE_DOS_HEADER*)base;
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-            LOG_WARN("  [dep-scan] Not a valid PE file.");
-            UnmapViewOfFile(base); return;
+    // Now check each import name (C++ objects are fine here)
+    int okCnt = 0, missCnt = 0;
+    for (int i = 0; i < res.count; ++i) {
+        const char* name = res.names[i];
+        wchar_t wName[64];
+        for (int j = 0; j < 64; ++j) wName[j] = (wchar_t)(unsigned char)name[j];
+        DWORD e = DllLoadable(wName);
+        if (e == 0) {
+            LOG_INFO("  [dep-scan]   [OK]      ", name);
+            ++okCnt;
+        } else {
+            LOG_WARN("  [dep-scan]   [MISSING] ", name, "  (error=", e, ")");
+            ++missCnt;
         }
-        const auto* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) {
-            LOG_WARN("  [dep-scan] NT signature mismatch.");
-            UnmapViewOfFile(base); return;
-        }
-
-        // RVA → file offset converter using section headers
-        WORD numSec = nt->FileHeader.NumberOfSections;
-        const auto* sections = IMAGE_FIRST_SECTION(nt);
-        auto rvaToOff = [&](DWORD rva) -> DWORD {
-            for (WORD i = 0; i < numSec; ++i) {
-                DWORD va  = sections[i].VirtualAddress;
-                DWORD sz  = sections[i].SizeOfRawData;
-                if (rva >= va && rva < va + sz)
-                    return rva - va + sections[i].PointerToRawData;
-            }
-            return 0;
-        };
-
-        DWORD importRVA =
-            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-        if (!importRVA) {
-            LOG_INFO("  [dep-scan] No import directory found.");
-            UnmapViewOfFile(base); return;
-        }
-        DWORD importOff = rvaToOff(importRVA);
-        if (!importOff) {
-            LOG_INFO("  [dep-scan] Import directory RVA not mapped to a section.");
-            UnmapViewOfFile(base); return;
-        }
-
-        const auto* desc = (const IMAGE_IMPORT_DESCRIPTOR*)(base + importOff);
-        int missing = 0, ok = 0;
-        for (; desc->Name; ++desc) {
-            DWORD nameOff = rvaToOff(desc->Name);
-            if (!nameOff) continue;
-            const char* depName = (const char*)(base + nameOff);
-            // Check loadability
-            std::wstring wDep(depName, depName + strlen(depName));
-            DWORD e = DllLoadable(wDep.c_str());
-            if (e == 0) {
-                LOG_INFO("  [dep-scan]   [OK]     ", depName);
-                ++ok;
-            } else {
-                LOG_WARN("  [dep-scan]   [MISSING] ", depName, "  (error=", e, ")");
-                ++missing;
-            }
-        }
-        LOG_INFO("  [dep-scan] Summary: ", ok, " OK, ", missing, " MISSING");
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LOG_WARN("  [dep-scan] Exception while reading PE headers.");
     }
-    UnmapViewOfFile(base);
+    LOG_INFO("  [dep-scan] Summary: ", okCnt, " OK,  ", missCnt, " MISSING");
 }
 
 // Probe a provider DLL with full-load check, log result with detail on error 126.
