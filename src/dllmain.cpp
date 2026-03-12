@@ -319,22 +319,28 @@ static void RegisterGpuRuntimeDirs() {
         bool foundTrt = false;
 
 #if ORT_CUDA_MAJOR == 13
-        constexpr wchar_t TRT_MAIN_DLL[] = L"nvinfer_10.dll";
-        constexpr char    TRT_VER_STR[]  = "TRT 10.13 (CUDA 13)";
-        constexpr char    TRT_NOT_FOUND_1[] =
+        constexpr wchar_t TRT_MAIN_DLL[]        = L"nvinfer_10.dll";
+        constexpr char    TRT_LABEL_ENVPATH[]   = "TRT 10.13 (CUDA 13) (TRT_LIB_PATH)";
+        constexpr char    TRT_LABEL_TRTDIR[]    = "TRT 10.13 (CUDA 13) (TENSORRT_DIR/lib)";
+        constexpr char    TRT_LABEL_REGISTRY[]  = "TRT 10.13 (CUDA 13) (registry)";
+        constexpr char    TRT_LABEL_DEFAULT[]   = "TRT 10.13 (CUDA 13) (default scan)";
+        constexpr char    TRT_NOT_FOUND_1[]     =
             "  Run collect_runtime_dlls_cuda13.py to bundle TRT 10.13.3 DLLs, or";
-        constexpr char    TRT_NOT_FOUND_2[] =
+        constexpr char    TRT_NOT_FOUND_2[]     =
             "  extract TensorRT-10.13.3.9.Windows.win10.cuda-13.0.zip and set:";
-        constexpr char    TRT_NOT_FOUND_3[] =
+        constexpr char    TRT_NOT_FOUND_3[]     =
             "    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.13.3.9\\lib";
 #else
-        constexpr wchar_t TRT_MAIN_DLL[] = L"nvinfer.dll";   // TRT 10.0.x plain name
-        constexpr char    TRT_VER_STR[]  = "TRT 10.0 (CUDA 11)";
-        constexpr char    TRT_NOT_FOUND_1[] =
+        constexpr wchar_t TRT_MAIN_DLL[]        = L"nvinfer.dll";  // TRT 10.0.x plain name
+        constexpr char    TRT_LABEL_ENVPATH[]   = "TRT 10.0 (CUDA 11) (TRT_LIB_PATH)";
+        constexpr char    TRT_LABEL_TRTDIR[]    = "TRT 10.0 (CUDA 11) (TENSORRT_DIR/lib)";
+        constexpr char    TRT_LABEL_REGISTRY[]  = "TRT 10.0 (CUDA 11) (registry)";
+        constexpr char    TRT_LABEL_DEFAULT[]   = "TRT 10.0 (CUDA 11) (default scan)";
+        constexpr char    TRT_NOT_FOUND_1[]     =
             "  Run collect_runtime_dlls.py to bundle TRT 10.0.0.6 DLLs, or";
-        constexpr char    TRT_NOT_FOUND_2[] =
+        constexpr char    TRT_NOT_FOUND_2[]     =
             "  extract TensorRT-10.0.0.6.Windows10.win10.cuda-11.8.zip and set:";
-        constexpr char    TRT_NOT_FOUND_3[] =
+        constexpr char    TRT_NOT_FOUND_3[]     =
             "    TRT_LIB_PATH=C:\\path\\to\\TensorRT-10.0.0.6\\lib";
 #endif
 
@@ -359,7 +365,7 @@ static void RegisterGpuRuntimeDirs() {
             std::wstring dir = val;
             std::wstring probe = dir + L"\\" + TRT_MAIN_DLL;
             if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                addTrtRoot(dir, TRT_VER_STR " (TRT_LIB_PATH)");
+                addTrtRoot(dir, TRT_LABEL_ENVPATH);
                 foundTrt = true;
             } else {
                 LOG_WARN("  TRT_LIB_PATH set but ", TRT_MAIN_DLL, " not found in: ", dir);
@@ -370,7 +376,7 @@ static void RegisterGpuRuntimeDirs() {
             std::wstring libDir = std::wstring(val) + L"\\lib";
             std::wstring probe  = libDir + L"\\" + TRT_MAIN_DLL;
             if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                addTrtRoot(libDir, TRT_VER_STR " (TENSORRT_DIR/lib)");
+                addTrtRoot(libDir, TRT_LABEL_TRTDIR);
                 foundTrt = true;
             }
         }
@@ -379,7 +385,7 @@ static void RegisterGpuRuntimeDirs() {
                 L"SOFTWARE\\NVIDIA Corporation\\TensorRT", L"InstallPath");
             if (!inst.empty())
                 foundTrt = RecursiveFindAndAdd(inst, TRT_MAIN_DLL,
-                                               TRT_VER_STR " (registry)");
+                                               TRT_LABEL_REGISTRY);
         }
         if (!foundTrt) {
             std::wstring base = L"C:\\Program Files\\NVIDIA";
@@ -402,7 +408,7 @@ static void RegisterGpuRuntimeDirs() {
             };
             std::wstring trtDir = findTrt(base, 5);
             if (!trtDir.empty()) {
-                addTrtRoot(trtDir, TRT_VER_STR " (default scan)");
+                addTrtRoot(trtDir, TRT_LABEL_DEFAULT);
                 foundTrt = true;
             }
         }
