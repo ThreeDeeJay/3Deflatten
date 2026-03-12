@@ -235,7 +235,7 @@ static void LogCudaDependencies(bool includeTrt) {
     LOG_INFO("  NOTE: Driver 572+ required for CUDA 13.0.");
 #else
     LOG_INFO("  ORT 1.16.3 GPU build requirements:");
-    LOG_INFO("    CUDA 11.x  (cudart64_11.dll)");
+    LOG_INFO("    CUDA 11.x  (cudart64_110.dll)");
     LOG_INFO("    cuDNN 8.x  (cudnn64_8.dll + split infer/train DLLs)");
     if (includeTrt)
         LOG_INFO("    TensorRT 10.13.0.35 (CUDA 11.8 build)");
@@ -265,8 +265,8 @@ static void LogCudaDependencies(bool includeTrt) {
     if (!hasCudnn) LOG_WARN("  -> cudnn64_9.dll not found. Run collect_runtime_dlls_cuda13.py.");
 #else
     // ── CUDA 11.x ─────────────────────────────────────────────────────────
-    bool hasCuda = ProbeDep(L"cudart64_11.dll", L"CUDA 11.x runtime");
-    if (!hasCuda) LOG_WARN("  -> cudart64_11.dll not found. Run collect_runtime_dlls.py.");
+    bool hasCuda = ProbeDep(L"cudart64_110.dll", L"CUDA 11.x runtime");
+    if (!hasCuda) LOG_WARN("  -> cudart64_110.dll not found. Run collect_runtime_dlls.py.");
     ProbeDep(L"cublas64_11.dll",   L"cuBLAS 11 -- in CUDA Toolkit bin");
     ProbeDep(L"cublasLt64_11.dll", L"cuBLAS-Lt 11 -- in CUDA Toolkit bin");
     ProbeDep(L"cufft64_10.dll",    L"cuFFT 10 -- in CUDA Toolkit bin");
@@ -310,12 +310,100 @@ static bool CudaDriverPresent() {
         return false;
     }
 #else
-    if (DllLoadable(L"cudart64_11.dll") != 0) {
-        LOG_WARN("cudart64_11.dll not found. Run collect_runtime_dlls.py.");
+    if (DllLoadable(L"cudart64_110.dll") != 0) {
+        LOG_WARN("cudart64_110.dll not found. Run collect_runtime_dlls.py.");
         return false;
     }
 #endif
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// PE import scanner: maps a DLL as a data file and walks its import directory
+// to report exactly which DLLs it needs and whether each one is loadable.
+// This is the same information Dependencies.exe / depends.exe shows, but
+// embedded directly in the log so no external tool is needed.
+// ---------------------------------------------------------------------------
+static void ScanAndLogMissingImports(const std::wstring& dllPath) {
+    HANDLE hFile = CreateFileW(dllPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        LOG_WARN("  [dep-scan] Cannot open: ", dllPath, " error=", GetLastError());
+        return;
+    }
+    HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    CloseHandle(hFile);
+    if (!hMap) {
+        LOG_WARN("  [dep-scan] CreateFileMapping failed error=", GetLastError());
+        return;
+    }
+    const BYTE* base = (const BYTE*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(hMap);
+    if (!base) {
+        LOG_WARN("  [dep-scan] MapViewOfFile failed error=", GetLastError());
+        return;
+    }
+
+    LOG_INFO("  [dep-scan] Direct imports of ", dllPath, ":");
+    __try {
+        const auto* dos = (const IMAGE_DOS_HEADER*)base;
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+            LOG_WARN("  [dep-scan] Not a valid PE file.");
+            UnmapViewOfFile(base); return;
+        }
+        const auto* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) {
+            LOG_WARN("  [dep-scan] NT signature mismatch.");
+            UnmapViewOfFile(base); return;
+        }
+
+        // RVA → file offset converter using section headers
+        WORD numSec = nt->FileHeader.NumberOfSections;
+        const auto* sections = IMAGE_FIRST_SECTION(nt);
+        auto rvaToOff = [&](DWORD rva) -> DWORD {
+            for (WORD i = 0; i < numSec; ++i) {
+                DWORD va  = sections[i].VirtualAddress;
+                DWORD sz  = sections[i].SizeOfRawData;
+                if (rva >= va && rva < va + sz)
+                    return rva - va + sections[i].PointerToRawData;
+            }
+            return 0;
+        };
+
+        DWORD importRVA =
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+        if (!importRVA) {
+            LOG_INFO("  [dep-scan] No import directory found.");
+            UnmapViewOfFile(base); return;
+        }
+        DWORD importOff = rvaToOff(importRVA);
+        if (!importOff) {
+            LOG_INFO("  [dep-scan] Import directory RVA not mapped to a section.");
+            UnmapViewOfFile(base); return;
+        }
+
+        const auto* desc = (const IMAGE_IMPORT_DESCRIPTOR*)(base + importOff);
+        int missing = 0, ok = 0;
+        for (; desc->Name; ++desc) {
+            DWORD nameOff = rvaToOff(desc->Name);
+            if (!nameOff) continue;
+            const char* depName = (const char*)(base + nameOff);
+            // Check loadability
+            std::wstring wDep(depName, depName + strlen(depName));
+            DWORD e = DllLoadable(wDep.c_str());
+            if (e == 0) {
+                LOG_INFO("  [dep-scan]   [OK]     ", depName);
+                ++ok;
+            } else {
+                LOG_WARN("  [dep-scan]   [MISSING] ", depName, "  (error=", e, ")");
+                ++missing;
+            }
+        }
+        LOG_INFO("  [dep-scan] Summary: ", ok, " OK, ", missing, " MISSING");
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG_WARN("  [dep-scan] Exception while reading PE headers.");
+    }
+    UnmapViewOfFile(base);
 }
 
 // Probe a provider DLL with full-load check, log result with detail on error 126.
@@ -325,56 +413,49 @@ static bool ProviderDllLoadable(const char* name, const std::wstring& path) {
     std::string narrow(path.begin(), path.end());
     if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) {
         LOG_WARN(name, " not found at '", narrow, "'");
-        // Suggest the registered install dir if it differs from current DLL dir
         std::wstring regDir = GetRegisteredDllDir();
         std::wstring dllDir = GetDllDir();
         if (!regDir.empty() && _wcsicmp(regDir.c_str(), dllDir.c_str()) != 0) {
             LOG_WARN("  DLL dir = ", dllDir);
             LOG_WARN("  Registry install dir = ", regDir);
-            LOG_WARN("  Hint: copy onnxruntime*.dll and directml.dll to the registry dir,");
-            LOG_WARN("  OR move the .ax file back to its original install directory.");
+            LOG_WARN("  Hint: copy onnxruntime*.dll to the registry dir,");
+            LOG_WARN("  OR move the .ax back to its original install directory.");
         }
     } else if (e == 126) {
-        LOG_WARN(name, " exists but failed to load (error 126 = missing dependencies).");
-        bool isTrt = (std::wstring(path).find(L"tensorrt") != std::wstring::npos);
-        LOG_WARN("  Running dependency scan to identify what is missing:");
-        LogCudaDependencies(isTrt);
+        LOG_WARN(name, " exists but failed to load (error 126 = missing dependency).");
+        // Scan the PE import table to identify the exact missing DLL.
+        // This is the same info Dependencies.exe shows -- no external tool needed.
+        ScanAndLogMissingImports(path);
+        bool isTrt = (std::wstring(path).find(L"tensorrt") != std::wstring::npos ||
+                      std::wstring(path).find(L"nvinfer")   != std::wstring::npos);
         if (isTrt) {
             LOG_WARN("  TIP: Copy ALL DLLs from TensorRT lib\\ folder next to the .ax,");
-            LOG_WARN("       not just nvinfer_10.dll -- TRT has sub-dependencies too.");
-            LOG_WARN("       Or ensure TRT_LIB_PATH was set before launching the host app.");
+            LOG_WARN("       not just nvinfer_10.dll -- TRT has many sub-dependencies.");
         }
     } else if (e == 1114) {
-        // ERROR_DLL_INIT_FAILED: DLL loaded but its DllMain threw an exception
-        // or returned FALSE.  For CUDA/TRT providers this has two common causes:
-        //
-        //   A) CUDA version mismatch -- ORT 1.24.x GPU requires CUDA 13.x.
-        //      Even if cudart64_13.dll is present, CUDA 13.x needs driver 572+.
-        //      Installing CUDA 12.x later DOWNGRADES the driver to 561.x which
-        //      breaks CUDA 13 even though the toolkit files remain on disk.
-        //
-        //   B) TensorRT version mismatch -- TRT 10.7.x is built against CUDA 12.6
-        //      and will NOT work with ORT 1.24.x (CUDA 13). Use TRT 10.13+ for CUDA 13.
-        //
+        // ERROR_DLL_INIT_FAILED: all dependencies loaded but DllMain returned FALSE.
+        // All dep probes [OK] means this is NOT a missing-file issue.
+        // Run the import scanner anyway to confirm nothing slipped through.
         bool isTrt = (std::wstring(path).find(L"tensorrt") != std::wstring::npos);
-        LOG_WARN(name, " load failed error=1114 (DLL init failed).");
+        LOG_WARN(name, " load failed error=1114 (DLL init failed -- all deps present).");
+        LOG_WARN("  Running PE import scan to confirm no hidden missing dep:");
+        ScanAndLogMissingImports(path);
         if (isTrt) {
-            LOG_WARN("  TRT EP failed to initialize.  If the CUDA EP also failed,");
-            LOG_WARN("  fix CUDA EP first -- TRT EP depends on it.");
+            LOG_WARN("  TRT EP DllMain failed.  If CUDA EP also failed, fix CUDA EP first.");
         } else {
-            // CUDA EP: all DLLs probed [OK] yet DllMain returned FALSE.
-            // This is NOT a missing-DLL issue (that would be error 126).
-            // Possible causes:
-            //   A) Wrong CUDA DLL version: ORT 1.16.3 requires CUDA 11.x (cudart64_11.dll).
-            //      If Win64_GPU contains DLLs from a previous CUDA 13 run, delete the
-            //      folder contents and re-run collect_runtime_dlls.py.
-            //   B) Driver too old: CUDA 11.x requires driver 452+.
-            //      Verify with: nvidia-smi  (look for 'Driver Version: 4xx+')
-            //   C) GPU not accessible in this process (TCC mode, VM passthrough, etc.)
-            LOG_WARN("  CUDA EP DllMain failed (all dep probes passed).");
-            LOG_WARN("  Check: are DLLs in Win64_GPU from CUDA 11.x? Delete and re-run");
-            LOG_WARN("  collect_runtime_dlls.py if they were previously from CUDA 13.");
-            LOG_WARN("  Verify: nvidia-smi shows Driver Version 452+");
+#if ORT_CUDA_MAJOR == 13
+            LOG_WARN("  CUDA EP: DllMain failed. Possible causes:");
+            LOG_WARN("    (A) CUDA minor version mismatch -- ORT 1.24.3 requires CUDA 13.0.");
+            LOG_WARN("        Run collect_runtime_dlls_cuda13.py to rebundle correct DLLs.");
+            LOG_WARN("    (B) Driver too old -- CUDA 13.0 requires driver 572+.");
+            LOG_WARN("        Verify: nvidia-smi shows Driver Version 572+");
+#else
+            LOG_WARN("  CUDA EP: DllMain failed. Possible causes:");
+            LOG_WARN("    (A) DLLs in Win64_GPU11 may be wrong version -- delete and");
+            LOG_WARN("        re-run collect_runtime_dlls.py to rebuild from CUDA 11.7.");
+            LOG_WARN("    (B) Driver too old -- CUDA 11.x requires driver 452+.");
+            LOG_WARN("        Verify: nvidia-smi shows Driver Version 452+");
+#endif
         }
     } else {
         LOG_WARN(name, " load failed error=", e, " path='", narrow, "'");

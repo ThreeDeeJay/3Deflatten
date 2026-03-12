@@ -35,6 +35,7 @@ install paths, or 7zr.exe is auto-downloaded from 7-zip.org if not installed).
 Downloads are cached in %LOCALAPPDATA%/3Deflatten/dlcache-cuda13 to avoid
 re-downloading on repeated runs (~5 GB total on first run).
 """
+from __future__ import annotations
 
 import argparse
 import os

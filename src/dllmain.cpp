@@ -182,7 +182,7 @@ static void RegisterGpuRuntimeDirs() {
     auto versionMatch = [](const wchar_t* s) { return wcsncmp(s, L"v13.", 4) == 0; };
 #else
     LOG_INFO("  (searching for CUDA 11.x, cuDNN 8.x, TensorRT 10.x)");
-    constexpr wchar_t CUDA_RT_DLL[] = L"cudart64_11.dll";
+    constexpr wchar_t CUDA_RT_DLL[] = L"cudart64_110.dll"; // CUDA 11.x API "110" suffix
     constexpr wchar_t CUDNN_DLL[]   = L"cudnn64_8.dll";
     constexpr char    CUDA_LABEL[]  = "CUDA 11";
     constexpr char    CUDNN_LABEL[] = "cuDNN 8";
@@ -455,7 +455,7 @@ struct DllInit {
                 wchar_t v[MAX_PATH] = {};
                 if (GetEnvironmentVariableW(vars[i], v, MAX_PATH) && v[0]) {
                     std::wstring bin = std::wstring(v) + L"\\bin";
-                    std::wstring chk = bin + L"\\cudart64_11.dll";
+                    std::wstring chk = bin + L"\\cudart64_110.dll";
                     if (GetFileAttributesW(chk.c_str()) != INVALID_FILE_ATTRIBUTES) {
                         AddDllDirectory(bin.c_str());
                         break;

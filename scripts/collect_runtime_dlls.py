@@ -16,7 +16,8 @@ Sources (official NVIDIA URLs):
                    tensorrt/10.13.0/zip/TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip
 
 DLLs collected:
-  CUDA 11:  cudart64_11, cublas64_11, cublasLt64_11, cufft64_10
+  CUDA 11:  cudart64_110, cublas64_11, cublasLt64_11, cufft64_10,
+            cusolver64_11, curand64_10
   cuDNN 8:  cudnn64_8, cudnn_ops_infer64_8, cudnn_ops_train64_8,
             cudnn_cnn_infer64_8, cudnn_cnn_train64_8,
             cudnn_adv_infer64_8, cudnn_adv_train64_8
@@ -37,6 +38,7 @@ TRT:       the .zip is extracted with Python's zipfile.
 7-zip.org if not installed.
 Downloads are cached in %%LOCALAPPDATA%%/3Deflatten/dlcache (~4 GB on first run).
 """
+from __future__ import annotations
 
 import argparse
 import os
@@ -74,16 +76,18 @@ CUDNN_URL = ("https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/"
 TRT_URL   = ("https://developer.nvidia.com/downloads/compute/machine-learning/"
              "tensorrt/10.13.0/zip/TensorRT-10.13.0.35.Windows.win10.cuda-11.8.zip")
 
-# DLLs to copy from the CUDA 11.7 installer
-# NOTE: nvJitLink was introduced in CUDA 12 -- not present in CUDA 11.
-# cusolver64_11 and curand64_10 are loaded by ORT CUDA EP at startup (not lazy).
+# DLLs to copy from the CUDA 11.7 installer.
+# NOTE: cudart uses "110" suffix (= CUDA 11.0 API level, same across all 11.x).
+#       Other CUDA 11 DLLs use "_11" (just the major version).
+#       nvJitLink was introduced in CUDA 12 -- not present in CUDA 11.
+# cusolver64_11 and curand64_10 are loaded by ORT CUDA EP at init time (not lazy).
 CUDA_DLLS = [
-    "cudart64_11.dll",
+    "cudart64_110.dll",    # runtime  -- "110" = API 11.0, used for all CUDA 11.x
     "cublas64_11.dll",
     "cublasLt64_11.dll",
-    "cufft64_10.dll",       # cuFFT API version stays at 10 inside CUDA 11 toolkit
-    "cusolver64_11.dll",    # cuSolver -- loaded by ORT CUDA EP at init time
-    "curand64_10.dll",      # cuRand   -- loaded by ORT CUDA EP at init time
+    "cufft64_10.dll",      # cuFFT API version stays at 10 inside CUDA 11 toolkit
+    "cusolver64_11.dll",   # cuSolver -- loaded by ORT CUDA EP at startup
+    "curand64_10.dll",     # cuRand   -- loaded by ORT CUDA EP at startup
 ]
 
 # DLLs to copy from the cuDNN 8.x archive

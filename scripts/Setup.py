@@ -17,6 +17,7 @@ Usage:
     python Setup.py --models     -- model download only
     python Setup.py --model <id> -- download specific model (0-6)
 """
+from __future__ import annotations
 import sys, os, io, winreg, pathlib, argparse, urllib.request, hashlib
 
 # Force UTF-8 output (Windows console may default to cp1252)
