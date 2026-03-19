@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <string>
 #include <vector>
+#include <deque>
 #include <memory>
 #if __has_include(<onnxruntime_cxx_api.h>)
 #  include <onnxruntime_cxx_api.h>
@@ -22,6 +23,10 @@ struct DepthResult {
 
 class DepthEstimator {
 public:
+    // Sentinel model path: resolves to da3-small.onnx with streaming mode.
+    // Colons are illegal in Windows file paths so this can never be a real file.
+    static constexpr wchar_t STREAMING_SENTINEL[] = L":da3-streaming:";
+
     DepthEstimator();
     ~DepthEstimator();
 
@@ -38,11 +43,12 @@ public:
                      float       smoothAlpha,
                      DepthResult& result);
 
-    bool         IsLoaded()    const { return m_loaded; }
-    bool         IsStreaming() const { return m_streaming; }
+    bool         IsLoaded()     const { return m_loaded; }
+    bool         IsStreaming()  const { return m_streaming; }
+    bool         IsDA3Stream()  const { return m_da3StreamMode; }
     std::wstring GetModelPath() const { return m_modelPath; }
 
-    // Reset streaming context (e.g. on seek/stop). Safe on non-streaming models.
+    // Reset streaming context (seek/stop).  Safe on non-streaming models.
     void ResetStreamingContext();
 
 private:
@@ -57,7 +63,7 @@ private:
                         float* dst,       int dw, int dh);
     void TemporalSmooth(std::vector<float>& current, float alpha);
 
-    // DA3-Streaming: recurrent context tensor path.
+    // ── Recurrent-context streaming (future recurrent ONNX models) ───────────
     HRESULT EstimateStreaming(const BYTE* srcData,
                               int srcW, int srcH, int srcStride,
                               bool isBGR, bool flipDepth, float smoothAlpha,
@@ -65,6 +71,37 @@ private:
     bool DetectStreamingModel();
     void InitStreamingContext(int modelW, int modelH);
 
+    // ── DA3-Streaming sliding-window algorithm ───────────────────────────────
+    // Implements the core temporal consistency technique from
+    //   ByteDance-Seed/Depth-Anything-3/da3_streaming/
+    // Uses any single-frame model (da3-small.onnx by default).
+    //
+    // Algorithm:
+    //  1. Run inference on each frame normally to get raw un-normalised depth.
+    //  2. Keep a ring buffer of the last STREAM_WINDOW raw depth outputs.
+    //  3. For each new frame, affine-align the new depth to the anchor (the
+    //     running median of the ring buffer) to eliminate per-frame scale/shift
+    //     jitter.  This is the temporal consistency mechanism from DA3-Streaming.
+    //  4. Blend the aligned depth with the ring-buffer average (EWA) for
+    //     additional flicker suppression.
+    //
+    // The anchor is recomputed every ANCHOR_RESET_FRAMES frames using the
+    // buffer median to handle gradual scene changes without drift.
+    void DA3StreamAccumulate(std::vector<float>& depth);
+    static void AffineAlignTo(const std::vector<float>& anchor,
+                               std::vector<float>& depth);
+
+    static constexpr int  STREAM_WINDOW       = 8;   // sliding window size
+    static constexpr int  ANCHOR_RESET_FRAMES = 16;  // re-anchor every N frames
+    static constexpr float STREAM_EWA_ALPHA   = 0.35f; // blend weight for new frame
+
+    bool                       m_da3StreamMode = false;  // DA3-Streaming algorithm active
+    std::deque<std::vector<float>> m_streamBuf;           // ring buffer of raw depths
+    std::vector<float>         m_streamAnchor;            // current affine anchor
+    int                        m_streamFrameCount = 0;
+    int                        m_streamW = 0, m_streamH = 0;
+
+    // ── Session ──────────────────────────────────────────────────────────────
     Ort::Env            m_env;
     Ort::SessionOptions m_sessionOpts;
     std::unique_ptr<Ort::Session> m_session;
@@ -83,7 +120,7 @@ private:
     int64_t m_modelInputH  = 518;
     bool    m_dynamicInput = false;
 
-    // Streaming state (recurrent context tensor)
+    // Recurrent-context streaming state (future models)
     bool                m_streaming = false;
     std::vector<float>  m_ctxTensor;
     int64_t             m_ctxC = 0, m_ctxH = 0, m_ctxW = 0;

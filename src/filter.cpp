@@ -357,10 +357,6 @@ void C3DeflattenFilter::DepthWorkerThread() {
         if (SUCCEEDED(hr)) {
             std::lock_guard<std::mutex> lk(m_cacheMtx);
             m_cachedDepth = std::move(result.data);
-            // Save the BGRA frame that produced this depth so Transform()
-            // renders the matched (source, depth) pair, not a newer source
-            // with a stale depth map (reprojection desync).
-            m_cachedBGRA  = bgra;   // bgra is still valid here (moved from pend)
             m_cachedW     = result.width;
             m_cachedH     = result.height;
             m_cacheReady  = true;
@@ -412,7 +408,9 @@ HRESULT C3DeflattenFilter::StartStreaming() {
         else {
             LOG_INFO("Model loaded OK  ep='", m_gpuInfo, "'");
             if (m_depth->IsStreaming())
-                LOG_INFO("  DA3-Streaming mode active: recurrent context enabled.");
+                LOG_INFO("  Recurrent context streaming active.");
+            if (m_depth->IsDA3Stream())
+                LOG_INFO("  DA3-Streaming (sliding-window temporal alignment) active.");
         }
     } else {
         LOG_INFO("Model already loaded  ep='", m_gpuInfo, "'");
@@ -508,30 +506,26 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         m_pendCV.notify_one();
     }
 
-    // ── Grab last completed (depth + matched source frame) ──────────────────
+    // ── Grab last completed depth map ────────────────────────────────────────
     DeflattenConfig cfg;
     { CAutoLock lk(&m_csConfig); cfg = m_cfg; }
 
     DepthResult depthResult;
-    std::vector<BYTE> renderBGRA;   // source frame matched to the depth map
     bool haveDepth = false;
     {
         std::lock_guard<std::mutex> lk(m_cacheMtx);
         if (m_cacheReady && m_cachedW == m_inW && m_cachedH == m_inH) {
-            depthResult.data   = m_cachedDepth;  // copy depth
+            depthResult.data   = m_cachedDepth;
             depthResult.width  = m_cachedW;
             depthResult.height = m_cachedH;
-            renderBGRA         = m_cachedBGRA;   // copy matched source BGRA
             haveDepth = true;
         }
     }
-    // renderSrc / renderStride: the frame we actually pass to the stereo renderer.
-    // When we have a cached (source, depth) pair we use the MATCHED source so the
-    // reprojection is always in sync with the depth map (eliminates desync artifact).
-    // On the first few frames before any depth is ready we fall back to the current
-    // frame with flat depth (no stereo effect, but no stall).
-    const BYTE* renderSrc    = haveDepth ? renderBGRA.data() : rgbaPtr;
-    int         renderStride = haveDepth ? m_inW * 4          : rgbaStride;
+    // Always render the CURRENT input frame with the latest depth map.
+    // Rendering m_cachedBGRA (the frame that produced the last depth) caused
+    // 5-6 identical output frames per inference cycle at slow model speeds —
+    // PotPlayer would show frozen video.  The negligible temporal desync
+    // (depth 1 frame behind during fast motion) is far less objectionable.
     if (!haveDepth) {
         if (log) LOG_DBG("Frame #",m_frameCount,": no depth yet – using flat");
         depthResult.data.assign(m_inW * m_inH, 0.5f);
@@ -546,7 +540,7 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         m_outBuf.resize(outStride * outH, 0);
 
     auto tr0 = Clock::now();
-    m_stereo->Render(renderSrc, m_inW, m_inH, renderStride,
+    m_stereo->Render(rgbaPtr, m_inW, m_inH, rgbaStride,
                      depthResult.data.data(), cfg,
                      m_outBuf.data(), outStride);
     auto trMs = std::chrono::duration_cast<std::chrono::milliseconds>(

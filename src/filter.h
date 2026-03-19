@@ -99,12 +99,13 @@ private:
     int                     m_pendH     = 0;
 
     // Depth result cache (written by worker, read by Transform)
-    // m_cachedBGRA stores the SOURCE FRAME that produced m_cachedDepth so
-    // Transform can render the matched (frame, depth) pair instead of applying
-    // stale depth to a newer frame — eliminating the "reprojection desync" artifact.
+    // We always render the CURRENT input frame with the LATEST cached depth.
+    // The old "matched-source" approach (m_cachedBGRA) caused PotPlayer to
+    // receive 5-6 identical output frames per inference cycle at slow model
+    // speeds (e.g. 250ms/frame) → looked completely frozen. The tiny temporal
+    // desync (depth is ~1 frame stale during fast motion) is imperceptible.
     std::mutex              m_cacheMtx;
     std::vector<float>      m_cachedDepth;
-    std::vector<BYTE>       m_cachedBGRA;    // source frame matched to cachedDepth
     int                     m_cachedW    = 0;
     int                     m_cachedH    = 0;
     bool                    m_cacheReady = false;

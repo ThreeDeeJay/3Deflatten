@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "prop_page.h"
+#include "depth_estimator.h"
 #include "logger.h"
 #include <commctrl.h>
 #include <shlwapi.h>
@@ -244,10 +245,23 @@ void C3DeflattenProp::PopulateModelCombo(HWND hwnd) {
     SendDlgItemMessage(hwnd, IDC_MODEL_COMBO, CB_RESETCONTENT, 0, 0);
     m_onnxFiles.clear();
 
-    // Search directories: DLL directory, then current model's directory
+    // ── Pinned entry: DA3-Streaming mode ─────────────────────────────────────
+    // Always listed first regardless of which .onnx files are present.
+    // Requires da3-small.onnx to be available (downloaded via Setup.py).
+    {
+        int idx = (int)SendDlgItemMessage(hwnd, IDC_MODEL_COMBO,
+                      CB_ADDSTRING, 0,
+                      (LPARAM)L"[DA3-Streaming]  (temporally stable, uses da3-small.onnx)");
+        m_onnxFiles.push_back(DepthEstimator::STREAMING_SENTINEL);
+        if (_wcsicmp(m_modelPath, DepthEstimator::STREAMING_SENTINEL) == 0)
+            SendDlgItemMessage(hwnd, IDC_MODEL_COMBO, CB_SETCURSEL, idx, 0);
+    }
+
+    // ── Search directories for .onnx files ───────────────────────────────────
     std::vector<std::wstring> searchDirs;
     searchDirs.push_back(GetDllDir());
-    if (m_modelPath[0]) {
+    if (m_modelPath[0] &&
+        _wcsicmp(m_modelPath, DepthEstimator::STREAMING_SENTINEL) != 0) {
         wchar_t parentDir[MAX_PATH]{};
         wcsncpy_s(parentDir, m_modelPath, _TRUNCATE);
         wchar_t* sl = wcsrchr(parentDir, L'\\');
@@ -265,7 +279,7 @@ void C3DeflattenProp::PopulateModelCombo(HWND hwnd) {
         searchDirs.push_back(dllParent);
     }
 
-    int selIdx = 0;
+    int selIdx = (_wcsicmp(m_modelPath, DepthEstimator::STREAMING_SENTINEL) == 0) ? 0 : -1;
     for (auto& dir : searchDirs) {
         if (dir.empty()) continue;
         wchar_t pattern[MAX_PATH]{};
@@ -286,16 +300,20 @@ void C3DeflattenProp::PopulateModelCombo(HWND hwnd) {
             int idx = (int)SendDlgItemMessage(hwnd, IDC_MODEL_COMBO,
                                                CB_ADDSTRING, 0, (LPARAM)fd.cFileName);
             m_onnxFiles.push_back(full);
-            if (_wcsicmp(full, m_modelPath) == 0) selIdx = idx;
+            if (selIdx < 0 && _wcsicmp(full, m_modelPath) == 0) selIdx = idx;
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
 
-    if (m_onnxFiles.empty()) {
-        SendDlgItemMessage(hwnd, IDC_MODEL_COMBO, CB_ADDSTRING, 0,
-                           (LPARAM)L"(no .onnx files found)");
+    // If no .onnx files found beyond the sentinel, note it but don't
+    // replace the sentinel — DA3-Streaming is still a valid selection.
+    if ((int)m_onnxFiles.size() == 1) {  // only sentinel
+        int idx = (int)SendDlgItemMessage(hwnd, IDC_MODEL_COMBO,
+                       CB_ADDSTRING, 0,
+                       (LPARAM)L"(no additional .onnx files found)");
         m_onnxFiles.push_back(L"");
     }
+    if (selIdx < 0) selIdx = 0;   // default to DA3-Streaming sentinel
     SendDlgItemMessage(hwnd, IDC_MODEL_COMBO, CB_SETCURSEL, selIdx, 0);
-    LOG_DBG("PropPage: found ", m_onnxFiles.size(), " .onnx file(s)");
+    LOG_DBG("PropPage: found ", m_onnxFiles.size() - 1, " .onnx file(s) + DA3-Streaming option");
 }

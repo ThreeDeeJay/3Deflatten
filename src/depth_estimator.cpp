@@ -10,21 +10,84 @@
 constexpr float DepthEstimator::MEAN[3];
 constexpr float DepthEstimator::STD[3];
 
+// ── DA3-Streaming sentinel ────────────────────────────────────────────────────
+constexpr wchar_t DepthEstimator::STREAMING_SENTINEL[];
+
 // ── Helper: locate default model ─────────────────────────────────────────────
 // Search order:
 //  1. DLL folder       (e.g. Win64/ or Win32/)
 //  2. DLL parent       (install root containing both Win32/ and Win64/)
 //  3. Host EXE folder
-//  4. %APPDATA%\3Deflatten\models
-// In each folder the well-known name is tried first, then any *.onnx file.
+//  4. %LOCALAPPDATA%\3Deflatten\models  (where Setup.py downloads to)
+//  5. %APPDATA%\3Deflatten\models       (legacy location)
+// Prefers da3-small.onnx when doing fallback searches (matches DA3-Streaming default).
 
-static std::wstring FirstOnnxIn(const std::filesystem::path& dir) {
-    auto named = dir / L"depth_anything_v2_small.onnx";
-    if (std::filesystem::exists(named)) return named.wstring();
+static std::wstring FirstOnnxIn(const std::filesystem::path& dir,
+                                 const wchar_t* preferred = L"da3-small.onnx") {
+    // Check preferred name first
+    if (preferred) {
+        auto named = dir / preferred;
+        if (std::filesystem::exists(named)) return named.wstring();
+    }
+    // Legacy preferred name
+    auto named2 = dir / L"depth_anything_v2_small.onnx";
+    if (std::filesystem::exists(named2)) return named2.wstring();
+    // Any .onnx
     std::error_code ec;
     for (auto& e : std::filesystem::directory_iterator(dir, ec))
         if (e.path().extension() == L".onnx")
             return e.path().wstring();
+    return {};
+}
+
+// Resolve da3-small.onnx from the LOCALAPPDATA download cache
+// (where Setup.py saves model downloads).
+static std::wstring FindDA3SmallModel() {
+    namespace fs = std::filesystem;
+
+    // Try all the same locations as FindDefaultModel but specifically for da3-small.onnx
+    // 1 & 2: DLL folder and parent
+    {
+        wchar_t dllPath[MAX_PATH] = {};
+        HMODULE hSelf = nullptr;
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&FindDA3SmallModel), &hSelf);
+        if (hSelf) GetModuleFileNameW(hSelf, dllPath, MAX_PATH);
+        if (dllPath[0]) {
+            fs::path dllDir = fs::path(dllPath).parent_path();
+            for (auto& dir : {dllDir, dllDir.parent_path()}) {
+                auto p = dir / L"da3-small.onnx";
+                if (fs::exists(p)) return p.wstring();
+            }
+        }
+    }
+    // 3: EXE folder
+    {
+        wchar_t exePath[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        if (exePath[0]) {
+            auto p = fs::path(exePath).parent_path() / L"da3-small.onnx";
+            if (fs::exists(p)) return p.wstring();
+        }
+    }
+    // 4: LOCALAPPDATA\3Deflatten\models\  ← Setup.py download target
+    {
+        wchar_t local[MAX_PATH] = {};
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local))) {
+            auto p = fs::path(local) / L"3Deflatten" / L"models" / L"da3-small.onnx";
+            if (fs::exists(p)) return p.wstring();
+        }
+    }
+    // 5: APPDATA (legacy)
+    {
+        wchar_t appdata[MAX_PATH] = {};
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
+            auto p = fs::path(appdata) / L"3Deflatten" / L"models" / L"da3-small.onnx";
+            if (fs::exists(p)) return p.wstring();
+        }
+    }
     return {};
 }
 
@@ -59,7 +122,16 @@ static std::wstring FindDefaultModel() {
         }
     }
 
-    // 4: %APPDATA%\3Deflatten\models
+    // 4: %LOCALAPPDATA%\3Deflatten\models  (Setup.py download target)
+    {
+        wchar_t local[MAX_PATH] = {};
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local))) {
+            auto r = FirstOnnxIn(fs::path(local) / L"3Deflatten" / L"models");
+            if (!r.empty()) return r;
+        }
+    }
+
+    // 5: %APPDATA%\3Deflatten\models  (legacy)
     {
         wchar_t appdata[MAX_PATH] = {};
         if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
@@ -83,7 +155,25 @@ DepthEstimator::~DepthEstimator() {
 HRESULT DepthEstimator::Load(const std::wstring& modelPath,
                               GPUProvider        provider,
                               std::wstring&      outInfo) {
-    std::wstring path = modelPath.empty() ? FindDefaultModel() : modelPath;
+    // ── DA3-Streaming sentinel ────────────────────────────────────────────────
+    bool wantDA3Stream = (modelPath == STREAMING_SENTINEL);
+    if (wantDA3Stream) {
+        LOG_INFO("DA3-Streaming mode requested. Resolving da3-small.onnx...");
+    }
+
+    std::wstring path;
+    if (wantDA3Stream) {
+        path = FindDA3SmallModel();
+        if (path.empty()) {
+            LOG_ERR("DA3-Streaming: da3-small.onnx not found.");
+            LOG_ERR("  Run Setup.py and select 'Depth Anything V3 Small' to download it.");
+            LOG_ERR("  Expected location: %LOCALAPPDATA%\\3Deflatten\\models\\da3-small.onnx");
+            return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        }
+    } else {
+        path = modelPath.empty() ? FindDefaultModel() : modelPath;
+    }
+
     if (path.empty() || !std::filesystem::exists(path)) {
         LOG_ERR("Depth model not found: ",
                 std::string(path.begin(), path.end()));
@@ -132,6 +222,13 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 
         m_modelPath = path;
         m_loaded    = true;
+
+        // Enable DA3-Streaming sliding-window algorithm if requested via sentinel
+        m_da3StreamMode    = wantDA3Stream;
+        m_streamBuf.clear();
+        m_streamAnchor.clear();
+        m_streamFrameCount = 0;
+
         std::string shapeStr;
         for (auto d : inShape) shapeStr += std::to_string(d) + " ";
         LOG_INFO("Model loaded OK");
@@ -142,6 +239,9 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
         if (!m_dynamicInput)
             LOG_INFO("  fixed   : ", m_modelInputW, "x", m_modelInputH);
         LOG_INFO("  provider: ", std::string(outInfo.begin(), outInfo.end()));
+        if (m_da3StreamMode)
+            LOG_INFO("  DA3-Streaming: ENABLED (window=", STREAM_WINDOW,
+                     " anchor_reset=", ANCHOR_RESET_FRAMES, ")");
         return S_OK;
 
     } catch (const Ort::Exception& e) {
@@ -732,6 +832,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
         LOG_ERR("Estimate called but model not loaded");
         return E_FAIL;
     }
+    // Recurrent-context streaming (future models with context_in/out tensors)
     if (m_streaming)
         return EstimateStreaming(srcData, srcWidth, srcHeight, srcStride,
                                  isBGR, flipDepth, smoothAlpha, result);
@@ -773,15 +874,45 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
             LOG_INFO("First ORT output: raw depth map=", rawW, "x", rawH,
                      " -> resample to ", srcWidth, "x", srcHeight);
 
-        std::vector<float> depth(srcWidth * srcHeight);
-        PostprocessDepth(rawDepth, rawW, rawH,
-                         srcWidth, srcHeight,
-                         flipDepth, depth);
+        // Normalise to model-output resolution first (before upscaling)
+        // so DA3-Streaming accumulation works at model resolution.
+        int accumW = rawW, accumH = rawH;
+        std::vector<float> depth(accumW * accumH);
+        {
+            // Min-max normalise at model res (no flip yet — flip after accumulation)
+            float mn = rawDepth[0], mx = rawDepth[0];
+            for (int i = 1; i < accumW * accumH; ++i) {
+                mn = std::min(mn, rawDepth[i]);
+                mx = std::max(mx, rawDepth[i]);
+            }
+            float range = (mx - mn) > 1e-6f ? (mx - mn) : 1e-6f;
+            for (int i = 0; i < accumW * accumH; ++i)
+                depth[i] = (rawDepth[i] - mn) / range;
+        }
 
-        if (smoothAlpha > 0.f && smoothAlpha < 1.f)
-            TemporalSmooth(depth, smoothAlpha);
+        // DA3-Streaming: accumulate into sliding window and affine-align
+        if (m_da3StreamMode) {
+            m_streamW = accumW; m_streamH = accumH;
+            DA3StreamAccumulate(depth);
+        }
 
-        result.data   = std::move(depth);
+        // Resize to source resolution
+        std::vector<float> out(srcWidth * srcHeight);
+        BilinearResize(depth.data(), accumW, accumH,
+                       out.data(), srcWidth, srcHeight);
+
+        // Apply flip after accumulation
+        if (flipDepth)
+            for (float& v : out) v = 1.f - v;
+
+        // Temporal smoothing (lighter weight when DA3-Streaming is active,
+        // since the window alignment already handles temporal consistency)
+        float effAlpha = (m_da3StreamMode && smoothAlpha > 0.3f)
+                         ? smoothAlpha * 0.5f : smoothAlpha;
+        if (effAlpha > 0.f && effAlpha < 1.f)
+            TemporalSmooth(out, effAlpha);
+
+        result.data   = std::move(out);
         result.width  = srcWidth;
         result.height = srcHeight;
         return S_OK;
@@ -1092,5 +1223,124 @@ HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
     } catch (const Ort::Exception& e) {
         LOG_ERR("ORT EstimateStreaming exception: ", e.what());
         return E_FAIL;
+    }
+}
+
+// ── DA3-Streaming: sliding-window temporal alignment ─────────────────────────
+//
+// AffineAlignTo: least-squares affine fit of `depth` values onto `anchor`.
+//
+// For each frame we want to find (scale, shift) such that:
+//   aligned[i] = scale * depth[i] + shift   ≈ anchor[i]
+//
+// Solved analytically (closed form):
+//   Sigma_xy = cov(anchor, depth)
+//   Sigma_xx = var(depth)
+//   scale    = Sigma_xy / Sigma_xx     (or 1.0 if degenerate)
+//   shift    = mean(anchor) - scale * mean(depth)
+//
+// This is identical to the core alignment step in DA3-Streaming (da3_streaming/
+// consistency.py) which uses np.polyfit(frame, anchor, 1).
+//
+void DepthEstimator::AffineAlignTo(const std::vector<float>& anchor,
+                                    std::vector<float>&        depth) {
+    int n = (int)depth.size();
+    if (n == 0 || (int)anchor.size() != n) return;
+
+    double sum_x = 0, sum_y = 0, sum_xx = 0, sum_xy = 0;
+    for (int i = 0; i < n; ++i) {
+        double x = depth[i], y = anchor[i];
+        sum_x  += x;
+        sum_y  += y;
+        sum_xx += x * x;
+        sum_xy += x * y;
+    }
+    double mean_x = sum_x / n;
+    double mean_y = sum_y / n;
+    double cov_xy = sum_xy / n - mean_x * mean_y;
+    double var_x  = sum_xx / n - mean_x * mean_x;
+
+    // Degenerate case: flat or near-flat input (uniform scene, black frame)
+    if (var_x < 1e-8) return;
+
+    double scale = cov_xy / var_x;
+    double shift = mean_y - scale * mean_x;
+
+    // Clamp scale to [0.25, 4.0] to prevent catastrophic divergence on cuts
+    scale = std::max(0.25, std::min(4.0, scale));
+
+    for (int i = 0; i < n; ++i) {
+        float v = (float)(scale * depth[i] + shift);
+        depth[i] = std::max(0.f, std::min(1.f, v));
+    }
+}
+
+// DA3StreamAccumulate: add a new normalised depth frame to the sliding window,
+// affine-align it to the anchor, then update the anchor periodically.
+//
+// The window keeps the last STREAM_WINDOW depth maps.  On each frame:
+//   1. Affine-align the new frame to the current anchor (eliminates scale/shift jitter).
+//   2. Push the aligned frame into the ring buffer.
+//   3. Every ANCHOR_RESET_FRAMES, recompute the anchor as the pixel-wise mean
+//      of the current window (stable central tendency across the clip).
+//   4. EWA-blend the aligned frame with the previous accumulated output.
+//
+// `depth` is modified in-place: on return it contains the aligned+blended output.
+void DepthEstimator::DA3StreamAccumulate(std::vector<float>& depth) {
+    int n = (int)depth.size();
+    if (n == 0) return;
+
+    ++m_streamFrameCount;
+
+    // First frame: initialise anchor and buffer from this depth
+    if (m_streamAnchor.empty()) {
+        m_streamAnchor = depth;
+        m_streamBuf.push_back(depth);
+        return;
+    }
+
+    // Re-anchor periodically or if the window grew to full capacity
+    if ((int)m_streamBuf.size() >= STREAM_WINDOW ||
+        m_streamFrameCount % ANCHOR_RESET_FRAMES == 0) {
+        // Pixel-wise mean of the ring buffer = stable anchor
+        std::vector<float> newAnchor(n, 0.f);
+        for (auto& buf : m_streamBuf)
+            for (int i = 0; i < n && i < (int)buf.size(); ++i)
+                newAnchor[i] += buf[i];
+        float inv = 1.f / (float)m_streamBuf.size();
+        for (float& v : newAnchor) v *= inv;
+        m_streamAnchor = std::move(newAnchor);
+
+        // Trim the buffer if overfull
+        while ((int)m_streamBuf.size() >= STREAM_WINDOW)
+            m_streamBuf.pop_front();
+    }
+
+    // Affine-align the new frame to the anchor
+    AffineAlignTo(m_streamAnchor, depth);
+
+    // EWA blend: new_out = (1-alpha)*prev_anchor + alpha*aligned_new
+    // This smooths residual jitter across frames without freezing on the anchor.
+    float alpha = STREAM_EWA_ALPHA;
+    for (int i = 0; i < n && i < (int)m_streamAnchor.size(); ++i)
+        depth[i] = (1.f - alpha) * m_streamAnchor[i] + alpha * depth[i];
+
+    // Push into buffer
+    m_streamBuf.push_back(depth);
+}
+
+void DepthEstimator::ResetStreamingContext() {
+    // Reset recurrent-context state (future models)
+    if (m_streaming && m_ctxReady) {
+        std::fill(m_ctxTensor.begin(), m_ctxTensor.end(), 0.0f);
+        LOG_INFO("Recurrent streaming context reset (seek/stop)");
+    }
+    // Reset DA3-Streaming sliding-window state
+    if (m_da3StreamMode) {
+        m_streamBuf.clear();
+        m_streamAnchor.clear();
+        m_streamFrameCount = 0;
+        m_prevDepth.clear();
+        LOG_INFO("DA3-Streaming window reset (seek/stop)");
     }
 }

@@ -668,12 +668,40 @@ def default_output_dir() -> pathlib.Path:
     """Return the best directory for model files: next to the .ax file.
     Setup.py lives at <root>/Setup.py, alongside Win32/ Win64/ Win64_GPU/.
     Models go directly in <root>/ so all three builds share them."""
-    # Prefer the first release subfolder that exists; fall back to SCRIPT_DIR
     for d in RELEASE_DIRS:
         if d.is_dir() and d != SCRIPT_DIR:
-            # Actually put models in SCRIPT_DIR (root), not a subfolder
             break
     return SCRIPT_DIR
+
+
+def da3_streaming_model_dir() -> pathlib.Path:
+    """Return %LOCALAPPDATA%\\3Deflatten\\models — the location where the
+    filter searches for da3-small.onnx when DA3-Streaming mode is selected."""
+    local = pathlib.Path(os.environ.get("LOCALAPPDATA",
+                         pathlib.Path.home() / "AppData" / "Local"))
+    return local / "3Deflatten" / "models"
+
+
+def ensure_da3_streaming_model(output_dir: pathlib.Path) -> bool:
+    """If da3-small.onnx exists in output_dir, also link/copy it to the
+    DA3-Streaming search location (%LOCALAPPDATA%\\3Deflatten\\models\\)
+    so the filter can find it via the :da3-streaming: sentinel path."""
+    src = output_dir / "da3-small.onnx"
+    if not src.exists():
+        return False
+    dst_dir = da3_streaming_model_dir()
+    dst = dst_dir / "da3-small.onnx"
+    if dst.exists():
+        return True
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copy2(src, dst)
+        print(f"  [DA3-Streaming] Copied da3-small.onnx to {dst_dir}")
+        return True
+    except Exception as e:
+        print(f"  [DA3-Streaming] Could not copy to {dst_dir}: {e}")
+        return False
 
 
 def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
@@ -686,6 +714,8 @@ def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
 
     if dst.exists():
         print(f"Already exists: {dst}")
+        if fname == "da3-small.onnx":
+            ensure_da3_streaming_model(output_dir)
         return True
 
     print(f"\nDownloading: {label}")
@@ -708,6 +738,9 @@ def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
                 print(f"  WARNING: SHA256 mismatch! Expected {sha}, got {h}")
             else:
                 print("  SHA256 OK")
+        # If this is da3-small.onnx, also copy to LOCALAPPDATA for DA3-Streaming
+        if fname == "da3-small.onnx":
+            ensure_da3_streaming_model(output_dir)
         return True
     except Exception as e:
         print(f"\n  FAILED: {e}")
@@ -718,10 +751,17 @@ def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
 
 def model_menu(output_dir: pathlib.Path):
     print("\n--- ONNX Model Download ---")
-    print(f"  Output directory: {output_dir}\n")
+    print(f"  Output directory: {output_dir}")
+    # Show DA3-Streaming model location
+    da3_loc = da3_streaming_model_dir() / "da3-small.onnx"
+    da3_mark = " [ready for DA3-Streaming]" if da3_loc.exists() else ""
+    print(f"  DA3-Streaming model dir: {da3_streaming_model_dir()}{da3_mark}\n")
     for mid, label, fname, url, sha, size_mb in MODELS:
         exists = (output_dir / fname).exists()
         mark = " [downloaded]" if exists else ""
+        # Special note for da3-small since it powers DA3-Streaming
+        if fname == "da3-small.onnx":
+            mark += "  *required for DA3-Streaming mode*"
         print(f"  {mid}  {label}{mark}")
     print(f"  a  Download all models (~{sum(m[5] for m in MODELS)} MB total)")
     print("  q  Back / quit")
