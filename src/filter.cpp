@@ -327,15 +327,20 @@ void C3DeflattenFilter::StopDepthThread() {
 }
 
 void C3DeflattenFilter::DepthWorkerThread() {
+    // bgra is declared OUTSIDE the loop so it retains its 8 MB allocation
+    // across iterations.  Swapping with m_pendBGRA (instead of moving) means
+    // m_pendBGRA also always keeps its capacity → Transform() never reallocs.
+    std::vector<BYTE> bgra;
     for (;;) {
-        // Wait for a frame to process or a stop signal
-        std::vector<BYTE> bgra;
         int w = 0, h = 0;
         {
             std::unique_lock<std::mutex> lk(m_pendMtx);
             m_pendCV.wait(lk, [this]{ return m_pendReady || m_pendStop; });
             if (m_pendStop) break;
-            bgra = std::move(m_pendBGRA);
+            // O(1) pointer swap — no allocation, no copy.
+            // After swap: bgra has the new frame data, m_pendBGRA has bgra's
+            // old allocation (capacity preserved for the next Transform() memcpy).
+            bgra.swap(m_pendBGRA);
             w    = m_pendW;
             h    = m_pendH;
             m_pendReady = false;
@@ -356,6 +361,8 @@ void C3DeflattenFilter::DepthWorkerThread() {
 
         if (SUCCEEDED(hr)) {
             std::lock_guard<std::mutex> lk(m_cacheMtx);
+            // Move the result into the cache (O(1)); the swap in Transform()
+            // will pull this data out without copying.
             m_cachedDepth = std::move(result.data);
             m_cachedW     = result.width;
             m_cachedH     = result.height;
@@ -368,9 +375,12 @@ void C3DeflattenFilter::DepthWorkerThread() {
 }
 
 // ── NV12 -> BGRA ─────────────────────────────────────────────────────────────
+// Writes into a pre-allocated destination buffer (no resize inside hot path).
 static void NV12toBGRA(const BYTE* src, int w, int h, int stride,
                         std::vector<BYTE>& dst) {
-    dst.resize(w * h * 4);
+    // Caller pre-allocates dst to w*h*4; we only resize on first call / resolution change
+    if ((int)dst.size() != w * h * 4)
+        dst.resize(w * h * 4);
     const BYTE* yPlane  = src;
     const BYTE* uvPlane = src + stride * h;
     auto clamp8 = [](int v)->BYTE{ return (BYTE)(v<0?0:v>255?255:v); };
@@ -437,6 +447,13 @@ HRESULT C3DeflattenFilter::StartStreaming() {
     OutputDimensions(m_inW, m_inH, outW, outH);
     m_outBuf.resize(outW * outH * 4, 0);
 
+    // Pre-allocate all per-frame buffers so Transform() never calls malloc.
+    // Each is sized once and reused for every frame this session.
+    size_t bgraBytes = (size_t)m_inW * m_inH * 4;
+    m_convBuf.assign(bgraBytes, 0);          // NV12/YUY2 → BGRA result
+    m_pendBGRA.assign(bgraBytes, 0);         // depth worker pending slot
+    m_depthRender.assign((size_t)m_inW * m_inH, 0.5f); // depth render buffer
+
     LOG_INFO("Pipeline: ", m_inW,"x",m_inH," -> ",outW,"x",outH,
              " mode=", m_cfg.outputMode==OutputMode::SideBySide?"SBS":"TAB",
              " conv=",m_cfg.convergence," sep=",m_cfg.separation,
@@ -459,7 +476,7 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
     using Clock = std::chrono::steady_clock;
     auto t0 = Clock::now();
     ++m_frameCount;
-    const bool log = (m_frameCount <= 2) || (m_frameCount % 100 == 0);
+    const bool logInfo = (m_frameCount <= 2) || (m_frameCount % 100 == 0);
 
     BYTE *pSrc=nullptr, *pDst=nullptr;
     if (FAILED(pIn->GetPointer(&pSrc))||!pSrc ||
@@ -467,20 +484,19 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         LOG_ERR("Frame #",m_frameCount,": GetPointer failed"); return E_FAIL;
     }
 
-    // ── Convert to BGRA (synchronous, fast) ──────────────────────────────────
-    std::vector<BYTE> convBuf;
+    // ── Convert to BGRA into pre-allocated m_convBuf (no malloc) ─────────────
     const BYTE* rgbaPtr    = pSrc;
     int         rgbaStride = m_inStride;
 
     if (m_isNV12) {
-        NV12toBGRA(pSrc, m_inW, m_inH, m_inStride, convBuf);
-        rgbaPtr = convBuf.data(); rgbaStride = m_inW*4;
-        if (log) LOG_DBG("Frame #",m_frameCount,": NV12->BGRA");
+        NV12toBGRA(pSrc, m_inW, m_inH, m_inStride, m_convBuf);
+        rgbaPtr = m_convBuf.data(); rgbaStride = m_inW*4;
+        if (logInfo) LOG_DBG("Frame #",m_frameCount,": NV12->BGRA");
     } else if (m_isYUY2) {
-        convBuf.resize(m_inW * m_inH * 4);
+        m_convBuf.resize(m_inW * m_inH * 4);
         auto cl=[](int v)->BYTE{return(BYTE)(v<0?0:v>255?255:v);};
         for (int y=0;y<m_inH;++y) {
-            const BYTE* row=pSrc+y*m_inStride; BYTE* out=convBuf.data()+y*m_inW*4;
+            const BYTE* row=pSrc+y*m_inStride; BYTE* out=m_convBuf.data()+y*m_inW*4;
             for (int x=0;x<m_inW;x+=2) {
                 int Y0=row[x*2],Cb=row[x*2+1],Y1=row[x*2+2],Cr=row[x*2+3];
                 auto yuv=[&](int Y)->std::tuple<BYTE,BYTE,BYTE>{
@@ -493,46 +509,51 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
                 out+=8;
             }
         }
-        rgbaPtr=convBuf.data(); rgbaStride=m_inW*4;
+        rgbaPtr=m_convBuf.data(); rgbaStride=m_inW*4;
     }
 
     // ── Post BGRA to depth worker (non-blocking, latest-frame-wins) ──────────
+    // memcpy the BGRA data into m_pendBGRA BEFORE acquiring the lock to minimise
+    // lock hold time.  m_pendBGRA is pre-allocated so this never calls malloc.
     if (m_depth->IsLoaded()) {
-        std::lock_guard<std::mutex> lk(m_pendMtx);
-        m_pendBGRA.assign(rgbaPtr, rgbaPtr + m_inH * rgbaStride);
-        m_pendW     = m_inW;
-        m_pendH     = m_inH;
-        m_pendReady = true;
+        const size_t bgraBytes = (size_t)m_inH * rgbaStride;
+        if (m_pendBGRA.size() != bgraBytes)
+            m_pendBGRA.resize(bgraBytes);   // only happens on resolution change
+        memcpy(m_pendBGRA.data(), rgbaPtr, bgraBytes);
+        {
+            std::lock_guard<std::mutex> lk(m_pendMtx);
+            // Signal the worker that a new frame is ready.  The worker will swap
+            // its local buffer with m_pendBGRA under the lock (O(1) swap).
+            m_pendW     = m_inW;
+            m_pendH     = m_inH;
+            m_pendReady = true;
+        }
         m_pendCV.notify_one();
     }
 
-    // ── Grab last completed depth map ────────────────────────────────────────
+    // ── Grab latest depth via zero-copy swap ─────────────────────────────────
+    // Instead of copying 8 MB of floats on every frame, swap m_depthRender with
+    // m_cachedDepth.  Both buffers retain their allocations across frames.
     DeflattenConfig cfg;
     { CAutoLock lk(&m_csConfig); cfg = m_cfg; }
 
-    DepthResult depthResult;
     bool haveDepth = false;
     {
         std::lock_guard<std::mutex> lk(m_cacheMtx);
         if (m_cacheReady && m_cachedW == m_inW && m_cachedH == m_inH) {
-            depthResult.data   = m_cachedDepth;
-            depthResult.width  = m_cachedW;
-            depthResult.height = m_cachedH;
+            m_depthRender.swap(m_cachedDepth);  // O(1) — no malloc, no memcpy
             haveDepth = true;
         }
     }
-    // Always render the CURRENT input frame with the latest depth map.
-    // Rendering m_cachedBGRA (the frame that produced the last depth) caused
-    // 5-6 identical output frames per inference cycle at slow model speeds —
-    // PotPlayer would show frozen video.  The negligible temporal desync
-    // (depth 1 frame behind during fast motion) is far less objectionable.
     if (!haveDepth) {
-        if (log) LOG_DBG("Frame #",m_frameCount,": no depth yet – using flat");
-        depthResult.data.assign(m_inW * m_inH, 0.5f);
-        depthResult.width = m_inW; depthResult.height = m_inH;
+        if (logInfo) LOG_DBG("Frame #",m_frameCount,": no depth yet – using flat");
+        if ((int)m_depthRender.size() != m_inW * m_inH)
+            m_depthRender.assign(m_inW * m_inH, 0.5f);
+        else
+            std::fill(m_depthRender.begin(), m_depthRender.end(), 0.5f);
     }
 
-    // ── Stereo render (GPU, ~17 ms) ───────────────────────────────────────────
+    // ── Stereo render (GPU, ~6-20 ms typical) ────────────────────────────────
     int outW, outH;
     OutputDimensions(m_inW, m_inH, outW, outH);
     int outStride = outW * 4;
@@ -541,7 +562,7 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
 
     auto tr0 = Clock::now();
     m_stereo->Render(rgbaPtr, m_inW, m_inH, rgbaStride,
-                     depthResult.data.data(), cfg,
+                     m_depthRender.data(), cfg,
                      m_outBuf.data(), outStride);
     auto trMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         Clock::now() - tr0).count();
@@ -561,14 +582,18 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
     pOut->SetSyncPoint(TRUE);
     pOut->SetDiscontinuity(pIn->IsDiscontinuity() == S_OK);
 
-    if (log) {
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            Clock::now() - t0).count();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now() - t0).count();
+    // Log EVERY frame at debug level so slowdowns are visible in the log.
+    // Info-level log still only on first 2 + every 100th frame.
+    LOG_DBG("Frame #",m_frameCount,
+             ": render=",trMs,"ms total=",ms,"ms",
+             " depth=",haveDepth?"cached":"flat");
+    if (logInfo)
         LOG_INFO("Frame #",m_frameCount,
                  ": render=",trMs,"ms total=",ms,"ms",
                  " depth=",haveDepth?"cached":"flat",
                  " gpu=",m_stereo->IsGPUAvailable()?"yes":"no");
-    }
     return S_OK;
 }
 

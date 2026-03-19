@@ -91,29 +91,38 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
                               GPUProvider        provider,
                               std::wstring&      outInfo) {
     // ── DA3-Streaming sentinel ────────────────────────────────────────────────
-    // The sentinel is a pseudo-path that means "use DA3-Streaming algorithm".
-    // It resolves the model the same way as normal auto-detection: FindDefaultModel()
-    // already prefers da3-small.onnx when it exists next to the .ax file.
+    // The sentinel is a pseudo-path meaning "use DA3-Streaming algorithm".
+    // It resolves the model the same way as normal auto-detection.
+    // We also auto-enable DA3-Streaming when:
+    //   - modelPath is empty (auto-detect mode), AND
+    //   - FindDefaultModel() returns da3-small.onnx
+    // This gives the best default experience: users who download da3-small.onnx
+    // automatically get temporal alignment without needing to open the UI.
+    // Explicitly selecting a different model always disables it.
     bool wantDA3Stream = (modelPath == STREAMING_SENTINEL);
-    if (wantDA3Stream)
-        LOG_INFO("DA3-Streaming mode requested — resolving model via normal search...");
 
     std::wstring path;
-    if (wantDA3Stream) {
+    if (wantDA3Stream || modelPath.empty()) {
         path = FindDefaultModel();
-        if (path.empty()) {
+        if (path.empty() && wantDA3Stream) {
             LOG_ERR("DA3-Streaming: no ONNX model found.");
-            LOG_ERR("  Place da3-small.onnx next to the .ax file (e.g. in Win64/)");
-            LOG_ERR("  and run Setup.py to download it if needed.");
+            LOG_ERR("  Place da3-small.onnx next to the .ax file and");
+            LOG_ERR("  run Setup.py to download it if needed.");
             return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
         }
-        // Warn if we didn't find da3-small specifically (still works but not optimal)
-        if (path.find(L"da3-small") == std::wstring::npos)
+        // Auto-enable DA3-Streaming if da3-small.onnx was found via auto-detect
+        if (!wantDA3Stream && !path.empty() &&
+            path.find(L"da3-small") != std::wstring::npos) {
+            wantDA3Stream = true;
+            LOG_INFO("DA3-Streaming auto-enabled (da3-small.onnx found via auto-detect)");
+        } else if (wantDA3Stream && !path.empty() &&
+                   path.find(L"da3-small") == std::wstring::npos) {
             LOG_WARN("DA3-Streaming: using '",
                      std::string(path.begin(), path.end()),
                      "' instead of da3-small.onnx (recommended for DA3-Streaming).");
+        }
     } else {
-        path = modelPath.empty() ? FindDefaultModel() : modelPath;
+        path = modelPath;
     }
 
     if (path.empty() || !std::filesystem::exists(path)) {
