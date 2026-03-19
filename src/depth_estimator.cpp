@@ -115,6 +115,21 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
             }
         }
 
+        // Auto-detect DA3-Streaming: 2 inputs (img + context_in)
+        //                             2 outputs (depth + context_out)
+        m_streaming   = false;
+        m_ctxReady    = false;
+        m_ctxInName.clear();
+        m_ctxOutName.clear();
+        if (DetectStreamingModel()) {
+            m_streaming = true;
+            LOG_INFO("  streaming: yes (DA3 recurrent context detected)");
+            LOG_INFO("  ctx_in    : ", m_ctxInName);
+            LOG_INFO("  ctx_out   : ", m_ctxOutName);
+        } else {
+            LOG_INFO("  streaming: no (standard single-pass model)");
+        }
+
         m_modelPath = path;
         m_loaded    = true;
         std::string shapeStr;
@@ -717,6 +732,9 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
         LOG_ERR("Estimate called but model not loaded");
         return E_FAIL;
     }
+    if (m_streaming)
+        return EstimateStreaming(srcData, srcWidth, srcHeight, srcStride,
+                                 isBGR, flipDepth, smoothAlpha, result);
 
     try {
         std::vector<float> inputTensor;
@@ -899,4 +917,180 @@ void DepthEstimator::TemporalSmooth(std::vector<float>& cur, float alpha) {
     for (int i = 0; i < n; ++i)
         cur[i] = (1.f - alpha) * cur[i] + alpha * m_prevDepth[i];
     m_prevDepth = cur;
+}
+
+// ── DA3-Streaming support ─────────────────────────────────────────────────────
+//
+// DA3-Streaming (ByteDance Seed, Depth-Anything-3) is a recurrent model that
+// maintains a context tensor across frames to improve temporal consistency and
+// reduce flickering on video.  The model schema is:
+//
+//   Inputs:  img         [1, 3, H, W]          (the current frame)
+//            context_in  [1, C, H/4, W/4]      (temporal state from prev frame)
+//   Outputs: depth       [1, 1, H, W]          (depth map)
+//            context_out [1, C, H/4, W/4]      (temporal state for next frame)
+//
+// On the first call context_in is a zero tensor.  After each successful
+// inference context_out is stored in m_ctxTensor and fed back as context_in
+// on the next call.  ResetStreamingContext() zeroes the tensor (e.g. on seek).
+//
+// Reference: https://github.com/ByteDance-Seed/Depth-Anything-3/blob/main/da3_streaming/README.md
+
+bool DepthEstimator::DetectStreamingModel() {
+    if (!m_session) return false;
+    size_t nIn  = m_session->GetInputCount();
+    size_t nOut = m_session->GetOutputCount();
+    if (nIn < 2 || nOut < 2) return false;
+
+    Ort::AllocatorWithDefaultOptions alloc;
+
+    // Collect all input/output names
+    std::vector<std::string> inNames, outNames;
+    for (size_t i = 0; i < nIn;  ++i)
+        inNames.push_back(m_session->GetInputNameAllocated(i, alloc).get());
+    for (size_t i = 0; i < nOut; ++i)
+        outNames.push_back(m_session->GetOutputNameAllocated(i, alloc).get());
+
+    // Look for context_in / context_out by name substring
+    // (the reference implementation uses exactly these names)
+    for (auto& n : inNames)  if (n.find("context") != std::string::npos) m_ctxInName  = n;
+    for (auto& n : outNames) if (n.find("context") != std::string::npos) m_ctxOutName = n;
+
+    if (m_ctxInName.empty() || m_ctxOutName.empty()) return false;
+
+    // Find the image input (not context)
+    for (auto& n : inNames)  if (n != m_ctxInName)  m_inputName  = n;
+    // Find the depth output (not context)
+    for (auto& n : outNames) if (n != m_ctxOutName) m_outputName = n;
+
+    // Read context shape from the input type info for context_in
+    for (size_t i = 0; i < nIn; ++i) {
+        std::string name = m_session->GetInputNameAllocated(i, alloc).get();
+        if (name != m_ctxInName) continue;
+        auto shape = m_session->GetInputTypeInfo(i)
+                         .GetTensorTypeAndShapeInfo()
+                         .GetShape();
+        // Expected shape: [1, C, H/4, W/4]  (dims may be -1 for dynamic)
+        if (shape.size() == 4) {
+            m_ctxC = shape[1];   // may be -1 if dynamic; clamped below
+            m_ctxH = shape[2];
+            m_ctxW = shape[3];
+        }
+        break;
+    }
+    return true;
+}
+
+void DepthEstimator::InitStreamingContext(int modelW, int modelH) {
+    // If the model reported concrete context dims, use them.
+    // If any dim was dynamic (-1), derive from model input size (H/4, W/4).
+    int64_t ctxC = (m_ctxC > 0) ? m_ctxC : 256;   // DA3 default channels
+    int64_t ctxH = (m_ctxH > 0) ? m_ctxH : (int64_t)(modelH / 4);
+    int64_t ctxW = (m_ctxW > 0) ? m_ctxW : (int64_t)(modelW / 4);
+
+    m_ctxC = ctxC; m_ctxH = ctxH; m_ctxW = ctxW;
+    size_t sz = (size_t)(ctxC * ctxH * ctxW);
+    m_ctxTensor.assign(sz, 0.0f);   // zero = "no prior context"
+    m_ctxReady = true;
+    LOG_INFO("  [streaming] context shape: [1,", ctxC, ",", ctxH, ",", ctxW,
+             "]  elems=", sz);
+}
+
+void DepthEstimator::ResetStreamingContext() {
+    if (m_streaming && m_ctxReady) {
+        std::fill(m_ctxTensor.begin(), m_ctxTensor.end(), 0.0f);
+        m_prevDepth.clear();   // also clear temporal smooth history
+        LOG_INFO("Streaming context reset (seek/stop)");
+    }
+}
+
+HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
+                                           int srcW, int srcH, int srcStride,
+                                           bool isBGR, bool flipDepth,
+                                           float smoothAlpha,
+                                           DepthResult& result) {
+    try {
+        std::vector<float> imgTensor;
+        int mw, mh;
+        PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR, imgTensor, mw, mh);
+
+        if (!m_ctxReady)
+            InitStreamingContext(mw, mh);
+
+        if (m_estimateCount == 0)
+            LOG_INFO("First Streaming Estimate:"
+                     " src=", srcW, "x", srcH,
+                     " model=", mw, "x", mh,
+                     " ctx=[1,", m_ctxC, ",", m_ctxH, ",", m_ctxW, "]");
+        ++m_estimateCount;
+
+        auto memInfo = Ort::MemoryInfo::CreateCpu(
+            OrtArenaAllocator, OrtMemTypeDefault);
+
+        // Image tensor
+        std::array<int64_t, 4> imgShape{1, 3, (int64_t)mh, (int64_t)mw};
+        auto imgVal = Ort::Value::CreateTensor<float>(
+            memInfo, imgTensor.data(), imgTensor.size(),
+            imgShape.data(), imgShape.size());
+
+        // Context tensor (zero on first frame, carried forward thereafter)
+        std::array<int64_t, 4> ctxShape{1, m_ctxC, m_ctxH, m_ctxW};
+        auto ctxVal = Ort::Value::CreateTensor<float>(
+            memInfo, m_ctxTensor.data(), m_ctxTensor.size(),
+            ctxShape.data(), ctxShape.size());
+
+        // Run with both inputs, expect both outputs
+        std::vector<const char*> inNames  = {m_inputName.c_str(),  m_ctxInName.c_str()};
+        std::vector<const char*> outNames = {m_outputName.c_str(), m_ctxOutName.c_str()};
+        std::vector<Ort::Value>  inVals;
+        inVals.push_back(std::move(imgVal));
+        inVals.push_back(std::move(ctxVal));
+
+        auto outputs = m_session->Run(
+            Ort::RunOptions{nullptr},
+            inNames.data(),  inVals.data(),  inVals.size(),
+            outNames.data(), outNames.size());
+
+        // Depth output (index 0)
+        const float* rawDepth = outputs[0].GetTensorData<float>();
+        auto rawShape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+        int rawH = (int)rawShape[rawShape.size() - 2];
+        int rawW = (int)rawShape[rawShape.size() - 1];
+        if (m_estimateCount == 1)
+            LOG_INFO("First streaming output: depth=", rawW, "x", rawH,
+                     " -> resample to ", srcW, "x", srcH);
+
+        // Context output (index 1) — copy back to m_ctxTensor for next frame
+        const float* ctxOut = outputs[1].GetTensorData<float>();
+        auto ctxOutShape = outputs[1].GetTensorTypeAndShapeInfo().GetShape();
+        size_t ctxElems = 1;
+        for (auto d : ctxOutShape) ctxElems *= (size_t)(d > 0 ? d : 1);
+
+        // If context shape changed (shouldn't happen, but guard anyway)
+        if (ctxElems != m_ctxTensor.size()) {
+            LOG_WARN("Streaming: context output size mismatch (expected=",
+                     m_ctxTensor.size(), " got=", ctxElems, ") – reinit");
+            m_ctxTensor.assign(ctxElems, 0.0f);
+        }
+        std::copy(ctxOut, ctxOut + ctxElems, m_ctxTensor.begin());
+
+        // Postprocess depth → [0,1], resample to source resolution
+        std::vector<float> depth(srcW * srcH);
+        PostprocessDepth(rawDepth, rawW, rawH, srcW, srcH, flipDepth, depth);
+
+        // Temporal smoothing is redundant when streaming context is active
+        // (the model itself provides temporal consistency), but we still
+        // honour it at low alpha values for any residual flicker.
+        if (smoothAlpha > 0.f && smoothAlpha < 0.5f)
+            TemporalSmooth(depth, smoothAlpha);
+
+        result.data   = std::move(depth);
+        result.width  = srcW;
+        result.height = srcH;
+        return S_OK;
+
+    } catch (const Ort::Exception& e) {
+        LOG_ERR("ORT EstimateStreaming exception: ", e.what());
+        return E_FAIL;
+    }
 }

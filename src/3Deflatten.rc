@@ -2,65 +2,52 @@
 #include <windows.h>
 #include "resource.h"
 
-// DS_CONTROL makes embedded property-page dialogs look correct inside the host
-// frame.  WS_CHILD is required; omit WS_CAPTION, WS_POPUP, DS_MODALFRAME.
-// DS_SETFONT lets us pick the font; without it the dialog unit calculations
-// use the system font and controls end up mis-sized.
-
 STRINGTABLE
 BEGIN
     IDS_PROP_TITLE  "3Deflatten"
 END
 
-IDD_PROP_PAGE DIALOGEX 0, 0, 298, 240
+IDD_PROP_PAGE DIALOGEX 0, 0, 298, 258
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
-    // ── Stereo Parameters ─────────────────────────────────────────────────────
     GROUPBOX  "Stereo Parameters", -1,              4,   2, 290,  94
-
-    LTEXT     "Convergence (screen-plane depth, 0–1):", -1,
-                                                    10,  14, 200,  10
+    LTEXT     "Convergence (screen-plane depth, 0-1):", -1, 10, 14, 200, 10
     CONTROL   "", IDC_CONV_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  24, 242,  14
     LTEXT     "0.500", IDC_CONV_LABEL,             256,  24,  32,  14, SS_RIGHT
-
-    LTEXT     "Separation (stereo strength, 0–0.20):", -1,
-                                                    10,  44, 200,  10
+    LTEXT     "Separation (stereo strength, 0-0.20):", -1, 10, 44, 200, 10
     CONTROL   "", IDC_SEP_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  54, 242,  14
     LTEXT     "0.030", IDC_SEP_LABEL,              256,  54,  32,  14, SS_RIGHT
-
-    LTEXT     "Temporal Smoothing (flicker reduction, 0=off):", -1,
-                                                    10,  74, 200,  10
+    LTEXT     "Temporal Smoothing (flicker reduction, 0=off):", -1, 10, 74, 200, 10
     CONTROL   "", IDC_SMOOTH_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  84, 242,  14
     LTEXT     "0.40", IDC_SMOOTH_LABEL,            256,  84,  32,  14, SS_RIGHT
 
-    // ── Output & Inference ────────────────────────────────────────────────────
-    GROUPBOX  "Output",    -1,                      4, 102, 140,  36
+    GROUPBOX  "Output",    -1,                      4, 102, 140,  54
     LTEXT     "Mode:",     -1,                     10, 115,  28,  10
     COMBOBOX  IDC_MODE_COMBO,                      40, 113, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     AUTOCHECKBOX "Flip Depth",  IDC_FLIP_CHECK,    10, 129, 100,  12
+    LTEXT     "Infill:",   -1,                     10, 145,  28,  10
+    COMBOBOX  IDC_INFILL_COMBO,                    40, 143, 100,  60,
+              CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
     GROUPBOX  "Inference", -1,                    150, 102, 144,  36
     LTEXT     "Provider:", -1,                    156, 115,  36,  10
     COMBOBOX  IDC_GPU_COMBO,                      194, 113,  94,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    // ── ONNX Model ────────────────────────────────────────────────────────────
-    GROUPBOX  "ONNX Model", -1,                     4, 144, 290,  50
-    LTEXT     "File:",     -1,                     10, 158,  20,  10
-    COMBOBOX  IDC_MODEL_COMBO,                     32, 156, 200,  80,
+    GROUPBOX  "ONNX Model", -1,                     4, 162, 290,  50
+    LTEXT     "File:",     -1,                     10, 176,  20,  10
+    COMBOBOX  IDC_MODEL_COMBO,                     32, 174, 200,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON "Reload",  IDC_RELOAD_BTN,         236, 154,  52,  14
-
+    PUSHBUTTON "Reload",  IDC_RELOAD_BTN,         236, 172,  52,  14
     LTEXT     "Switching model or provider takes effect after Reload.", -1,
-                                                   10, 174, 278,  10
+                                                   10, 192, 278,  10
 
-    // ── Status ────────────────────────────────────────────────────────────────
-    GROUPBOX  "Active Inference Status", -1,        4, 200, 290,  34
-    LTEXT     "", IDC_GPU_INFO,                    10, 213, 278,  16,
+    GROUPBOX  "Active Inference Status", -1,        4, 218, 290,  34
+    LTEXT     "", IDC_GPU_INFO,                    10, 231, 278,  16,
               SS_NOPREFIX | SS_ENDELLIPSIS
 END

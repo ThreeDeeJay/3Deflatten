@@ -63,7 +63,12 @@ private:
     ComPtr<ID3D11ShaderResourceView>  m_depthSRV;
     ComPtr<ID3D11Texture2D>           m_rtTex;
     ComPtr<ID3D11RenderTargetView>    m_rtv;
-    ComPtr<ID3D11Texture2D>           m_stagingTex;
+    // Double-buffered staging textures eliminate GPU-stall on Map(READ).
+    // Frame N: CopyResource → staging[N%2]; Map → staging[(N-1)%2] (prev frame, done).
+    // Because depth inference takes ~75 ms between renders, the GPU copy is
+    // always complete before we read the other buffer — zero stall.
+    ComPtr<ID3D11Texture2D>           m_stagingTex[2];
+    int                               m_stagingFrame = 0;  // ping-pong index
 
     int        m_lastSrcW = 0, m_lastSrcH = 0;
     OutputMode m_lastMode = OutputMode::SideBySide;
@@ -77,9 +82,9 @@ private:
         float separation;
         float flipDepth;    // unused (depth pre-flipped on CPU)
         int   outputMode;   // 0=SBS 1=TAB
-        float texelW;       // 1.0f / srcWidth  (used by edge-fill shader)
+        float texelW;       // 1.0f / srcWidth
         float texelH;       // 1.0f / srcHeight
-        float pad0;
-        float pad1;
+        int   infillMode;   // 0=Inner 1=Outer 2=Blend
+        float pad;
     };
 };

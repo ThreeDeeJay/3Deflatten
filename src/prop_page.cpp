@@ -85,6 +85,11 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Side-by-Side (SBS)");
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Top-and-Bottom (TAB)");
 
+        // Infill mode – 3 options matching InfillMode enum
+        SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inner  (bg behind edge)");
+        SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Outer  (extend far edge)");
+        SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Blend  (context-aware mix)");
+
         // GPU Provider – 5 options
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Auto (best available)");
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"TensorRT  (NVIDIA, fastest – slow 1st run)");
@@ -115,6 +120,9 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         int note = HIWORD(wParam);
 
         if (ctl==IDC_MODE_COMBO && note==CBN_SELCHANGE) {
+            ReadControls(hwnd); PushConfig(); SetDirty(); break;
+        }
+        if (ctl==IDC_INFILL_COMBO && note==CBN_SELCHANGE) {
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_FLIP_CHECK && note==BN_CLICKED) {
@@ -173,8 +181,9 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
     SendDlgItemMessage(hwnd, IDC_CONV_SLIDER,   TBM_SETPOS, TRUE, ConvToSlider(m_cfg.convergence));
     SendDlgItemMessage(hwnd, IDC_SEP_SLIDER,    TBM_SETPOS, TRUE, SepToSlider(m_cfg.separation));
     SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER, TBM_SETPOS, TRUE, SmoothToSlider(m_cfg.depthSmooth));
-    SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_SETCURSEL, (int)m_cfg.outputMode, 0);
-    SendDlgItemMessage(hwnd, IDC_GPU_COMBO,  CB_SETCURSEL, (int)m_cfg.gpuProvider, 0);
+    SendDlgItemMessage(hwnd, IDC_MODE_COMBO,   CB_SETCURSEL, (int)m_cfg.outputMode,  0);
+    SendDlgItemMessage(hwnd, IDC_GPU_COMBO,    CB_SETCURSEL, (int)m_cfg.gpuProvider, 0);
+    SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_SETCURSEL, (int)m_cfg.infillMode,  0);
     SendDlgItemMessage(hwnd, IDC_FLIP_CHECK, BM_SETCHECK,
                        m_cfg.flipDepth ? BST_CHECKED : BST_UNCHECKED, 0);
     UpdateValueLabels(hwnd);
@@ -184,8 +193,9 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
     m_cfg.convergence = SliderToConv((int)SendDlgItemMessage(hwnd, IDC_CONV_SLIDER,   TBM_GETPOS, 0, 0));
     m_cfg.separation  = SliderToSep ((int)SendDlgItemMessage(hwnd, IDC_SEP_SLIDER,    TBM_GETPOS, 0, 0));
     m_cfg.depthSmooth = SliderToSmooth((int)SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER, TBM_GETPOS, 0, 0));
-    m_cfg.outputMode  = (OutputMode) SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_GETCURSEL, 0, 0);
-    m_cfg.gpuProvider = (GPUProvider)SendDlgItemMessage(hwnd, IDC_GPU_COMBO,  CB_GETCURSEL, 0, 0);
+    m_cfg.outputMode  = (OutputMode) SendDlgItemMessage(hwnd, IDC_MODE_COMBO,   CB_GETCURSEL, 0, 0);
+    m_cfg.gpuProvider = (GPUProvider)SendDlgItemMessage(hwnd, IDC_GPU_COMBO,    CB_GETCURSEL, 0, 0);
+    m_cfg.infillMode  = (InfillMode) SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_GETCURSEL, 0, 0);
     m_cfg.flipDepth   = (SendDlgItemMessage(hwnd, IDC_FLIP_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
 }

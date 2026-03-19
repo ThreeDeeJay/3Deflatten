@@ -79,6 +79,14 @@ MODELS = [
         "midas_v21_small_256.onnx",
         "https://github.com/isl-org/MiDaS/releases/download/v2_1/midas_v21_small_256.onnx",
         None, 50),
+    (7, "Depth Anything V3 Small    (~79 MB, fixed 504x280, fast)",
+        "da3-small.onnx",
+        "https://huggingface.co/AXERA-TECH/Depth-Anything-3/resolve/main/models-ax650/da3-small.onnx",
+        None, 79),
+    (8, "MiDaS DPT Hybrid           (~470 MB, balanced quality)",
+        "dpt_hybrid_384.onnx",
+        "https://github.com/parkchamchi/MiDaS/releases/download/22.12.07/dpt_hybrid_384.onnx",
+        None, 470),
 ]
 
 

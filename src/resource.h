@@ -18,6 +18,7 @@
 #define IDC_MODEL_COMBO    1010   // lists all .onnx files in the DLL directory
 #define IDC_RELOAD_BTN     1011
 #define IDC_GPU_INFO       1012
+#define IDC_INFILL_COMBO   1013   // occlusion gap infill mode selector
 
 // ── Trackbar style constants (commctrl.h equivalents for rc.exe) ──────────────
 // rc.exe does not automatically include commctrl.h, so we define what we need.

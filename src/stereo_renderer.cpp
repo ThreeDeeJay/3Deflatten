@@ -21,7 +21,8 @@ cbuffer CBStereo : register(b0) {
     int    g_outputMode;
     float  g_texelW;
     float  g_texelH;
-    float2 g_pad;
+    int    g_infillMode;   // 0=Inner  1=Outer  2=Blend
+    float  g_pad;
 };
 Texture2D<float4> g_srcTex   : register(t0);
 Texture2D<float>  g_depthTex : register(t1);
@@ -51,35 +52,108 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
     float eyeSign = isLeft ? 1.0 : -1.0;
 
     // Depth dilation: max over horizontal neighbourhood reduces gap size at edges
-    float dC = g_depthTex.SampleLevel(g_sampler, eyeUV, 0).r;
-    float dL = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(-g_texelW * 3.0, 0), 0).r;
-    float dR = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(+g_texelW * 3.0, 0), 0).r;
+    float dC    = g_depthTex.SampleLevel(g_sampler, eyeUV, 0).r;
+    float dL    = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(-g_texelW * 3.0, 0), 0).r;
+    float dR    = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(+g_texelW * 3.0, 0), 0).r;
     float depth = max(dC, max(dL, dR));
 
     float  disparity = g_separation * (depth - g_convergence);
     float2 srcUV     = saturate(eyeUV + float2(eyeSign * disparity, 0.0));
 
-    // Background infill: if srcUV lands on a foreground surface (occlusion gap),
-    // walk in the opposite direction to find background at similar depth.
+    // Occlusion gap detection: srcUV landed on a foreground surface
     float sampledDepth = g_depthTex.SampleLevel(g_sampler, srcUV, 0).r;
     float depthJump    = sampledDepth - dC;
+
     [branch]
     if (depthJump > 0.10) {
-        float2 searchDir = float2(-eyeSign * g_texelW * 3.0, 0);
-        float4 fillColor = g_srcTex.SampleLevel(g_sampler, srcUV, 0);
-        [loop]
-        for (int s = 1; s <= 16; ++s) {
-            float2 cUV    = saturate(eyeUV + searchDir * (float)s);
-            float  cDepth = g_depthTex.SampleLevel(g_sampler, cUV, 0).r;
-            if (abs(cDepth - dC) < 0.08) {
-                float cDisp = g_separation * (cDepth - g_convergence);
-                fillColor = g_srcTex.SampleLevel(g_sampler,
-                    saturate(cUV + float2(eyeSign * cDisp, 0.0)), 0);
-                break;
-            }
-        }
         float blend = saturate((depthJump - 0.10) * 10.0);
-        return lerp(g_srcTex.SampleLevel(g_sampler, srcUV, 0), fillColor, blend);
+        float4 rawSample = g_srcTex.SampleLevel(g_sampler, srcUV, 0);
+
+        if (g_infillMode == 0) {
+            // ── Inner: walk backward into the bg behind the occluding edge ──
+            // Search in the direction OPPOSITE the parallax shift so we find
+            // the background that was just hidden behind the foreground.
+            float2 searchDir = float2(-eyeSign * g_texelW * 3.0, 0);
+            float4 fillColor = rawSample;
+            [loop]
+            for (int s = 1; s <= 16; ++s) {
+                float2 cUV    = saturate(eyeUV + searchDir * (float)s);
+                float  cDepth = g_depthTex.SampleLevel(g_sampler, cUV, 0).r;
+                if (abs(cDepth - dC) < 0.08) {
+                    float cDisp = g_separation * (cDepth - g_convergence);
+                    fillColor = g_srcTex.SampleLevel(g_sampler,
+                        saturate(cUV + float2(eyeSign * cDisp, 0.0)), 0);
+                    break;
+                }
+            }
+            return lerp(rawSample, fillColor, blend);
+
+        } else if (g_infillMode == 1) {
+            // ── Outer: walk outward, smear the far-edge pixel into the gap ──
+            // Walk in the SAME direction as the parallax shift, BEYOND the
+            // occluded region, to find the outermost visible background pixel.
+            // If that region has matching depth it becomes the fill; otherwise
+            // we fall back to clamping at the frame edge (edge smear).
+            float2 outerDir = float2(eyeSign * g_texelW * 3.0, 0);
+            float4 fillColor = rawSample;
+            [loop]
+            for (int s = 1; s <= 16; ++s) {
+                float2 cUV = eyeUV + outerDir * (float)s;
+                // Past frame edge: clamp to edge and use that pixel as fill
+                if (cUV.x < 0.0 || cUV.x > 1.0) {
+                    cUV = saturate(cUV);
+                    float cDisp = g_separation *
+                        (g_depthTex.SampleLevel(g_sampler, cUV, 0).r - g_convergence);
+                    fillColor = g_srcTex.SampleLevel(g_sampler,
+                        saturate(cUV + float2(eyeSign * cDisp, 0.0)), 0);
+                    break;
+                }
+                float cDepth = g_depthTex.SampleLevel(g_sampler, cUV, 0).r;
+                if (abs(cDepth - dC) < 0.08) {
+                    float cDisp = g_separation * (cDepth - g_convergence);
+                    fillColor = g_srcTex.SampleLevel(g_sampler,
+                        saturate(cUV + float2(eyeSign * cDisp, 0.0)), 0);
+                    // Don't break: keep walking to find the OUTERMOST match
+                }
+            }
+            return lerp(rawSample, fillColor, blend);
+
+        } else {
+            // ── Blend: confidence-weighted mix of inner bg-search + outer smear ──
+            // Inner: same as mode 0, confidence = 1 - (search_steps/16)
+            float2 innerDir = float2(-eyeSign * g_texelW * 3.0, 0);
+            float4 innerFill = rawSample;
+            float  innerConf = 0.0;
+            [loop]
+            for (int si = 1; si <= 16; ++si) {
+                float2 cUV    = saturate(eyeUV + innerDir * (float)si);
+                float  cDepth = g_depthTex.SampleLevel(g_sampler, cUV, 0).r;
+                if (abs(cDepth - dC) < 0.08) {
+                    float cDisp = g_separation * (cDepth - g_convergence);
+                    innerFill = g_srcTex.SampleLevel(g_sampler,
+                        saturate(cUV + float2(eyeSign * cDisp, 0.0)), 0);
+                    innerConf = 1.0 - (float)si / 16.0;
+                    break;
+                }
+            }
+            // Outer: same as mode 1, but always find outermost match
+            float2 outerDir = float2(eyeSign * g_texelW * 3.0, 0);
+            float4 outerFill = rawSample;
+            [loop]
+            for (int so = 1; so <= 16; ++so) {
+                float2 cUV = saturate(eyeUV + outerDir * (float)so);
+                float  cDepth = g_depthTex.SampleLevel(g_sampler, cUV, 0).r;
+                if (abs(cDepth - dC) < 0.08) {
+                    float cDisp = g_separation * (cDepth - g_convergence);
+                    outerFill = g_srcTex.SampleLevel(g_sampler,
+                        saturate(cUV + float2(eyeSign * cDisp, 0.0)), 0);
+                }
+            }
+            // When inner search succeeds (high conf), prefer inner.
+            // When inner fails (conf==0), fall back fully to outer smear.
+            float4 fill = lerp(outerFill, innerFill, innerConf);
+            return lerp(rawSample, fill, blend);
+        }
     }
     return g_srcTex.SampleLevel(g_sampler, srcUV, 0);
 }
@@ -254,7 +328,9 @@ HRESULT StereoRenderer::EnsureTextures(int srcW, int srcH, OutputMode mode) {
     m_srcTex.Reset();   m_srcSRV.Reset();
     m_depthTex.Reset(); m_depthSRV.Reset();
     m_rtTex.Reset();    m_rtv.Reset();
-    m_stagingTex.Reset();
+    m_stagingTex[0].Reset();
+    m_stagingTex[1].Reset();
+    m_stagingFrame = 0;  // reset ping-pong on texture resize
 
     int dstW = (mode == OutputMode::SideBySide)  ? srcW*2 : srcW;
     int dstH = (mode == OutputMode::TopAndBottom) ? srcH*2 : srcH;
@@ -292,7 +368,9 @@ HRESULT StereoRenderer::EnsureTextures(int srcW, int srcH, OutputMode mode) {
     sd.Width=dstW; sd.Height=dstH; sd.MipLevels=1; sd.ArraySize=1;
     sd.Format=DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count=1;
     sd.Usage=D3D11_USAGE_STAGING; sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-    hr = m_dev->CreateTexture2D(&sd, nullptr, &m_stagingTex);
+    hr = m_dev->CreateTexture2D(&sd, nullptr, &m_stagingTex[0]);
+    if (FAILED(hr)) return hr;
+    hr = m_dev->CreateTexture2D(&sd, nullptr, &m_stagingTex[1]);
     if (FAILED(hr)) return hr;
 
     m_lastSrcW=srcW; m_lastSrcH=srcH; m_lastMode=mode;
@@ -350,8 +428,8 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
         cb->outputMode  = (int)cfg.outputMode;
         cb->texelW      = srcW > 0 ? 1.0f / (float)srcW : 0.0f;
         cb->texelH      = srcH > 0 ? 1.0f / (float)srcH : 0.0f;
-        cb->pad0        = 0.0f;
-        cb->pad1        = 0.0f;
+        cb->infillMode  = (int)cfg.infillMode;
+        cb->pad         = 0.0f;
         m_ctx->Unmap(m_cb.Get(), 0);
     }
 
@@ -372,15 +450,29 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     m_ctx->PSSetSamplers(0,1,m_sampler.GetAddressOf());
     m_ctx->Draw(4,0);
 
-    m_ctx->CopyResource(m_stagingTex.Get(),m_rtTex.Get());
+    // ── Double-buffered staging readback (eliminates GPU-stall) ──────────────
+    // Frame N: CopyResource → staging[ping]   (async GPU copy, returns immediately)
+    //          Map          → staging[pong]   (copy from frame N-1, already done)
+    // Because depth inference takes ~75 ms between renders, the previous frame's
+    // copy is always complete — Map returns immediately with zero stall.
+    // Only the very first frame falls back to reading the current staging buffer.
+    int ping = m_stagingFrame % 2;
+    int pong = 1 - ping;
+    m_ctx->CopyResource(m_stagingTex[ping].Get(), m_rtTex.Get());
+
+    ID3D11Texture2D* readTex = (m_stagingFrame > 0)
+        ? m_stagingTex[pong].Get()   // previous frame — already GPU-complete
+        : m_stagingTex[ping].Get();  // first frame only: stall once at startup
+
     D3D11_MAPPED_SUBRESOURCE ms;
-    if (SUCCEEDED(m_ctx->Map(m_stagingTex.Get(),0,D3D11_MAP_READ,0,&ms))) {
+    if (SUCCEEDED(m_ctx->Map(readTex, 0, D3D11_MAP_READ, 0, &ms))) {
         for (int y=0; y<dstH; ++y)
             memcpy(dstFrame + y*dstStride,
                    (const BYTE*)ms.pData + y*ms.RowPitch,
                    dstW*4);
-        m_ctx->Unmap(m_stagingTex.Get(),0);
+        m_ctx->Unmap(readTex, 0);
     }
+    ++m_stagingFrame;
 }
 
 void StereoRenderer::RenderCPU(const BYTE* src, int srcW, int srcH,

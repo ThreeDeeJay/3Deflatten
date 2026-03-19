@@ -114,6 +114,7 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.outputMode  = (OutputMode)getI(L"outputMode",  (int)OutputMode::SideBySide);
     m_cfg.gpuProvider = (GPUProvider)getI(L"gpuProvider", (int)GPUProvider::Auto);
     m_cfg.flipDepth   = getI(L"flipDepth", 0) ? TRUE : FALSE;
+    m_cfg.infillMode  = (InfillMode)getI(L"infillMode", (int)InfillMode::Inner);
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
@@ -143,6 +144,7 @@ void C3DeflattenFilter::SaveIni() const {
     setI(L"outputMode",   (int)m_cfg.outputMode);
     setI(L"gpuProvider",  (int)m_cfg.gpuProvider);
     setI(L"flipDepth",    m_cfg.flipDepth ? 1 : 0);
+    setI(L"infillMode",   (int)m_cfg.infillMode);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
 
     LOG_INFO("SaveIni: '", m_iniPath, "'");
@@ -163,6 +165,7 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.gpuProvider = GPUProvider::Auto;
     m_cfg.depthSmooth = 0.4f;
     m_cfg.flipDepth   = FALSE;
+    m_cfg.infillMode  = InfillMode::Inner;
 
     wchar_t envModel[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"DEFLATTEN_MODEL_PATH", envModel, MAX_PATH))
@@ -406,8 +409,11 @@ HRESULT C3DeflattenFilter::StartStreaming() {
         hr = m_depth->Load(m_modelPath, m_cfg.gpuProvider, m_gpuInfo);
         if (FAILED(hr))
             LOG_ERR("Model load FAILED ", HRStr(hr), " - flat depth fallback");
-        else
+        else {
             LOG_INFO("Model loaded OK  ep='", m_gpuInfo, "'");
+            if (m_depth->IsStreaming())
+                LOG_INFO("  DA3-Streaming mode active: recurrent context enabled.");
+        }
     } else {
         LOG_INFO("Model already loaded  ep='", m_gpuInfo, "'");
     }
@@ -445,6 +451,7 @@ HRESULT C3DeflattenFilter::StartStreaming() {
 
 HRESULT C3DeflattenFilter::StopStreaming() {
     StopDepthThread();
+    if (m_depth) m_depth->ResetStreamingContext();
     LOG_INFO("StopStreaming  frames=", m_frameCount);
     return S_OK;
 }
