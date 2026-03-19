@@ -674,36 +674,6 @@ def default_output_dir() -> pathlib.Path:
     return SCRIPT_DIR
 
 
-def da3_streaming_model_dir() -> pathlib.Path:
-    """Return %LOCALAPPDATA%\\3Deflatten\\models — the location where the
-    filter searches for da3-small.onnx when DA3-Streaming mode is selected."""
-    local = pathlib.Path(os.environ.get("LOCALAPPDATA",
-                         pathlib.Path.home() / "AppData" / "Local"))
-    return local / "3Deflatten" / "models"
-
-
-def ensure_da3_streaming_model(output_dir: pathlib.Path) -> bool:
-    """If da3-small.onnx exists in output_dir, also link/copy it to the
-    DA3-Streaming search location (%LOCALAPPDATA%\\3Deflatten\\models\\)
-    so the filter can find it via the :da3-streaming: sentinel path."""
-    src = output_dir / "da3-small.onnx"
-    if not src.exists():
-        return False
-    dst_dir = da3_streaming_model_dir()
-    dst = dst_dir / "da3-small.onnx"
-    if dst.exists():
-        return True
-    try:
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        import shutil
-        shutil.copy2(src, dst)
-        print(f"  [DA3-Streaming] Copied da3-small.onnx to {dst_dir}")
-        return True
-    except Exception as e:
-        print(f"  [DA3-Streaming] Could not copy to {dst_dir}: {e}")
-        return False
-
-
 def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
     if model_id < 0 or model_id >= len(MODELS):
         print(f"Unknown model id {model_id}")
@@ -714,8 +684,6 @@ def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
 
     if dst.exists():
         print(f"Already exists: {dst}")
-        if fname == "da3-small.onnx":
-            ensure_da3_streaming_model(output_dir)
         return True
 
     print(f"\nDownloading: {label}")
@@ -738,9 +706,6 @@ def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
                 print(f"  WARNING: SHA256 mismatch! Expected {sha}, got {h}")
             else:
                 print("  SHA256 OK")
-        # If this is da3-small.onnx, also copy to LOCALAPPDATA for DA3-Streaming
-        if fname == "da3-small.onnx":
-            ensure_da3_streaming_model(output_dir)
         return True
     except Exception as e:
         print(f"\n  FAILED: {e}")
@@ -752,16 +717,13 @@ def download_model(model_id: int, output_dir: pathlib.Path) -> bool:
 def model_menu(output_dir: pathlib.Path):
     print("\n--- ONNX Model Download ---")
     print(f"  Output directory: {output_dir}")
-    # Show DA3-Streaming model location
-    da3_loc = da3_streaming_model_dir() / "da3-small.onnx"
-    da3_mark = " [ready for DA3-Streaming]" if da3_loc.exists() else ""
-    print(f"  DA3-Streaming model dir: {da3_streaming_model_dir()}{da3_mark}\n")
+    da3_ready = (output_dir / "da3-small.onnx").exists()
+    print(f"  DA3-Streaming: {'ready (da3-small.onnx found)' if da3_ready else 'needs da3-small.onnx -- select model 7 below'}\n")
     for mid, label, fname, url, sha, size_mb in MODELS:
         exists = (output_dir / fname).exists()
         mark = " [downloaded]" if exists else ""
-        # Special note for da3-small since it powers DA3-Streaming
         if fname == "da3-small.onnx":
-            mark += "  *required for DA3-Streaming mode*"
+            mark += "  *used by DA3-Streaming mode*"
         print(f"  {mid}  {label}{mark}")
     print(f"  a  Download all models (~{sum(m[5] for m in MODELS)} MB total)")
     print("  q  Back / quit")
@@ -856,9 +818,10 @@ DirectML: built into Windows 10 1809+ (no extra install needed).
 --- Model Notes ---
 
 DA3-Streaming note:
-  DA3-Streaming is a sliding-window ALGORITHM (not a separate model file) that
-  runs the standard DA3 model over overlapping N-frame clips.  No recurrent-
-  context ONNX is publicly available.  Use da3-small.onnx or DA3METRIC-LARGE.onnx.
+  DA3-Streaming is a sliding-window temporal alignment algorithm, not a separate
+  model file.  It uses da3-small.onnx as the backing model.  Download it via the
+  model download menu (option 7) — place it in the same folder as the .ax file.
+  No separate copy or special directory is needed.
 
 RIFE (frame interpolation) note:
   RIFE estimates optical flow for FRAME INTERPOLATION, not depth.  It cannot

@@ -16,78 +16,22 @@ constexpr wchar_t DepthEstimator::STREAMING_SENTINEL[];
 // ── Helper: locate default model ─────────────────────────────────────────────
 // Search order:
 //  1. DLL folder       (e.g. Win64/ or Win32/)
-//  2. DLL parent       (install root containing both Win32/ and Win64/)
+//  2. DLL parent       (install root — where models sit next to Win32/Win64/)
 //  3. Host EXE folder
-//  4. %LOCALAPPDATA%\3Deflatten\models  (where Setup.py downloads to)
-//  5. %APPDATA%\3Deflatten\models       (legacy location)
-// Prefers da3-small.onnx when doing fallback searches (matches DA3-Streaming default).
+//  4. %APPDATA%\3Deflatten\models
+// In each folder da3-small.onnx is tried first, then depth_anything_v2_small.onnx,
+// then any *.onnx.  DA3-Streaming therefore picks da3-small.onnx automatically
+// when it exists in the same folder as the .ax — no copy to LOCALAPPDATA needed.
 
-static std::wstring FirstOnnxIn(const std::filesystem::path& dir,
-                                 const wchar_t* preferred = L"da3-small.onnx") {
-    // Check preferred name first
-    if (preferred) {
-        auto named = dir / preferred;
-        if (std::filesystem::exists(named)) return named.wstring();
+static std::wstring FirstOnnxIn(const std::filesystem::path& dir) {
+    for (auto* name : {L"da3-small.onnx", L"depth_anything_v2_small.onnx"}) {
+        auto p = dir / name;
+        if (std::filesystem::exists(p)) return p.wstring();
     }
-    // Legacy preferred name
-    auto named2 = dir / L"depth_anything_v2_small.onnx";
-    if (std::filesystem::exists(named2)) return named2.wstring();
-    // Any .onnx
     std::error_code ec;
     for (auto& e : std::filesystem::directory_iterator(dir, ec))
         if (e.path().extension() == L".onnx")
             return e.path().wstring();
-    return {};
-}
-
-// Resolve da3-small.onnx from the LOCALAPPDATA download cache
-// (where Setup.py saves model downloads).
-static std::wstring FindDA3SmallModel() {
-    namespace fs = std::filesystem;
-
-    // Try all the same locations as FindDefaultModel but specifically for da3-small.onnx
-    // 1 & 2: DLL folder and parent
-    {
-        wchar_t dllPath[MAX_PATH] = {};
-        HMODULE hSelf = nullptr;
-        GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(&FindDA3SmallModel), &hSelf);
-        if (hSelf) GetModuleFileNameW(hSelf, dllPath, MAX_PATH);
-        if (dllPath[0]) {
-            fs::path dllDir = fs::path(dllPath).parent_path();
-            for (auto& dir : {dllDir, dllDir.parent_path()}) {
-                auto p = dir / L"da3-small.onnx";
-                if (fs::exists(p)) return p.wstring();
-            }
-        }
-    }
-    // 3: EXE folder
-    {
-        wchar_t exePath[MAX_PATH] = {};
-        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-        if (exePath[0]) {
-            auto p = fs::path(exePath).parent_path() / L"da3-small.onnx";
-            if (fs::exists(p)) return p.wstring();
-        }
-    }
-    // 4: LOCALAPPDATA\3Deflatten\models\  ← Setup.py download target
-    {
-        wchar_t local[MAX_PATH] = {};
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local))) {
-            auto p = fs::path(local) / L"3Deflatten" / L"models" / L"da3-small.onnx";
-            if (fs::exists(p)) return p.wstring();
-        }
-    }
-    // 5: APPDATA (legacy)
-    {
-        wchar_t appdata[MAX_PATH] = {};
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
-            auto p = fs::path(appdata) / L"3Deflatten" / L"models" / L"da3-small.onnx";
-            if (fs::exists(p)) return p.wstring();
-        }
-    }
     return {};
 }
 
@@ -122,16 +66,7 @@ static std::wstring FindDefaultModel() {
         }
     }
 
-    // 4: %LOCALAPPDATA%\3Deflatten\models  (Setup.py download target)
-    {
-        wchar_t local[MAX_PATH] = {};
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local))) {
-            auto r = FirstOnnxIn(fs::path(local) / L"3Deflatten" / L"models");
-            if (!r.empty()) return r;
-        }
-    }
-
-    // 5: %APPDATA%\3Deflatten\models  (legacy)
+    // 4: %APPDATA%\3Deflatten\models
     {
         wchar_t appdata[MAX_PATH] = {};
         if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata))) {
@@ -156,20 +91,27 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
                               GPUProvider        provider,
                               std::wstring&      outInfo) {
     // ── DA3-Streaming sentinel ────────────────────────────────────────────────
+    // The sentinel is a pseudo-path that means "use DA3-Streaming algorithm".
+    // It resolves the model the same way as normal auto-detection: FindDefaultModel()
+    // already prefers da3-small.onnx when it exists next to the .ax file.
     bool wantDA3Stream = (modelPath == STREAMING_SENTINEL);
-    if (wantDA3Stream) {
-        LOG_INFO("DA3-Streaming mode requested. Resolving da3-small.onnx...");
-    }
+    if (wantDA3Stream)
+        LOG_INFO("DA3-Streaming mode requested — resolving model via normal search...");
 
     std::wstring path;
     if (wantDA3Stream) {
-        path = FindDA3SmallModel();
+        path = FindDefaultModel();
         if (path.empty()) {
-            LOG_ERR("DA3-Streaming: da3-small.onnx not found.");
-            LOG_ERR("  Run Setup.py and select 'Depth Anything V3 Small' to download it.");
-            LOG_ERR("  Expected location: %LOCALAPPDATA%\\3Deflatten\\models\\da3-small.onnx");
+            LOG_ERR("DA3-Streaming: no ONNX model found.");
+            LOG_ERR("  Place da3-small.onnx next to the .ax file (e.g. in Win64/)");
+            LOG_ERR("  and run Setup.py to download it if needed.");
             return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
         }
+        // Warn if we didn't find da3-small specifically (still works but not optimal)
+        if (path.find(L"da3-small") == std::wstring::npos)
+            LOG_WARN("DA3-Streaming: using '",
+                     std::string(path.begin(), path.end()),
+                     "' instead of da3-small.onnx (recommended for DA3-Streaming).");
     } else {
         path = modelPath.empty() ? FindDefaultModel() : modelPath;
     }
