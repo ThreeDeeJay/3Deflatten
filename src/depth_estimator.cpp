@@ -1127,13 +1127,6 @@ void DepthEstimator::InitStreamingContext(int modelW, int modelH) {
              "]  elems=", sz);
 }
 
-void DepthEstimator::ResetStreamingContext() {
-    if (m_streaming && m_ctxReady) {
-        std::fill(m_ctxTensor.begin(), m_ctxTensor.end(), 0.0f);
-        m_prevDepth.clear();   // also clear temporal smooth history
-        LOG_INFO("Streaming context reset (seek/stop)");
-    }
-}
 
 HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
                                            int srcW, int srcH, int srcStride,
