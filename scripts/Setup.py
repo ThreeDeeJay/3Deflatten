@@ -83,10 +83,20 @@ MODELS = [
         "da3-small.onnx",
         "https://huggingface.co/AXERA-TECH/Depth-Anything-3/resolve/main/models-ax650/da3-small.onnx",
         None, 79),
+    # NOTE: DA3-Streaming is NOT a separate downloadable ONNX model.
+    # It is a sliding-window chunk inference algorithm that runs the standard
+    # DA3 model on overlapping clips of N frames to handle ultra-long videos.
+    # No single-file ONNX with recurrent context tensors is publicly available.
+    # The streaming detection code in depth_estimator.cpp is a general framework
+    # for future recurrent-context models; it remains dormant for all current models.
     (8, "MiDaS DPT Hybrid           (~470 MB, balanced quality)",
         "dpt_hybrid_384.onnx",
         "https://github.com/parkchamchi/MiDaS/releases/download/22.12.07/dpt_hybrid_384.onnx",
         None, 470),
+    (9, "Depth Anything V3 Metric Large  (~731 MB, metric, best quality)",
+        "DA3METRIC-LARGE.onnx",
+        "https://huggingface.co/TillBeemelmanns/Depth-Anything-V3-ONNX/resolve/main/DA3METRIC-LARGE.onnx",
+        None, 731),
 ]
 
 
@@ -802,6 +812,20 @@ TensorRT 10.0.0.6 CUDA 11.8 build (optional; fastest EP):
 
 DirectML: built into Windows 10 1809+ (no extra install needed).
   The x64 DirectML build of 3Deflatten bundles directml.dll.
+
+--- Model Notes ---
+
+DA3-Streaming note:
+  DA3-Streaming is a sliding-window ALGORITHM (not a separate model file) that
+  runs the standard DA3 model over overlapping N-frame clips.  No recurrent-
+  context ONNX is publicly available.  Use da3-small.onnx or DA3METRIC-LARGE.onnx.
+
+RIFE (frame interpolation) note:
+  RIFE estimates optical flow for FRAME INTERPOLATION, not depth.  It cannot
+  reliably estimate depth because: (a) static objects have zero flow regardless
+  of depth, (b) it cannot separate camera motion from scene motion.  Using RIFE
+  alongside 3Deflatten as a frame-rate booster (interpolating already-rendered
+  3D output) is a valid but separate future feature.
 """)
 
         elif choice in ("q", "quit", "exit"):

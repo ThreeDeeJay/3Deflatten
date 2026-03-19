@@ -9,15 +9,26 @@ enum class OutputMode : int {
 };
 
 // Occlusion-gap infill algorithm applied in the stereo warp shader.
-// When a shifted pixel lands on a foreground area (occlusion gap), the gap
-// must be filled.  Three strategies:
-//   Inner: search BEHIND the foreground edge (background just inside the gap)
-//   Outer: search BEYOND the foreground edge (extends the far-edge pixel outward)
-//   Blend: confidence-weighted mix of inner + outer for smoother seams
+//
+// When a pixel is shifted into an area occluded by foreground, the gap is
+// filled from a nearby background pixel.  The gap search always runs in
+// SOURCE-SPACE starting from srcUV (where the warp landed on foreground).
+//
+//  Inner   : walk +eyeSign from srcUV through the foreground to the HIDDEN
+//             background on the far side of the occluder.
+//  Outer   : walk -eyeSign from srcUV to the VISIBLE background on the same
+//             side as the gap; take the LAST (outermost) match.
+//  Blend   : confidence-weighted mix of Inner + Outer.
+//  EdgeClamp: same as Outer but takes the FIRST (nearest) match — reproduces
+//             the SuperDepth3D edge-clamp behaviour.
+//  Inpaint : bilateral-weighted blend from both sides, depth-guided —
+//             real-time approximation of 3D Photo Inpainting (Shih et al.)
 enum class InfillMode : int {
-    Inner = 0,   // walk inward toward background behind the occluding edge
-    Outer = 1,   // walk outward, smear the far-edge pixel into the gap
-    Blend = 2,   // blend inner bg-search + outer smear by search confidence
+    Inner     = 0,
+    Outer     = 1,
+    Blend     = 2,
+    EdgeClamp = 3,   // SuperDepth3D-style: nearest outer-edge pixel
+    Inpaint   = 4,   // 3D Photo Inpainting approx: bilateral depth-guided blend
 };
 
 enum class GPUProvider : int {

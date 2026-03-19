@@ -3,6 +3,7 @@
 #include "logger.h"
 #include <commctrl.h>
 #include <shlwapi.h>
+#include <algorithm>
 #include <cstdio>
 
 // ── Slider mappings ───────────────────────────────────────────────────────────
@@ -89,6 +90,8 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inner  (bg behind edge)");
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Outer  (extend far edge)");
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Blend  (context-aware mix)");
+        SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"EdgeClamp  (SuperDepth3D style)");
+        SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inpaint  (3D Photo bilateral)");
 
         // GPU Provider – 5 options
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Auto (best available)");
@@ -195,7 +198,8 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
     m_cfg.depthSmooth = SliderToSmooth((int)SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER, TBM_GETPOS, 0, 0));
     m_cfg.outputMode  = (OutputMode) SendDlgItemMessage(hwnd, IDC_MODE_COMBO,   CB_GETCURSEL, 0, 0);
     m_cfg.gpuProvider = (GPUProvider)SendDlgItemMessage(hwnd, IDC_GPU_COMBO,    CB_GETCURSEL, 0, 0);
-    m_cfg.infillMode  = (InfillMode) SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_GETCURSEL, 0, 0);
+    m_cfg.infillMode  = (InfillMode)std::min(4,
+                         std::max(0, (int)SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_GETCURSEL, 0, 0)));
     m_cfg.flipDepth   = (SendDlgItemMessage(hwnd, IDC_FLIP_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
 }
