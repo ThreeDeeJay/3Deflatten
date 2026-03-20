@@ -164,11 +164,11 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
         m_ctxOutName.clear();
         if (DetectStreamingModel()) {
             m_streaming = true;
-            LOG_INFO("  streaming: yes (DA3 recurrent context detected)");
+            LOG_INFO("  recurrent-context streaming: yes (context_in/out tensors found)");
             LOG_INFO("  ctx_in    : ", m_ctxInName);
             LOG_INFO("  ctx_out   : ", m_ctxOutName);
         } else {
-            LOG_INFO("  streaming: no (standard single-pass model)");
+            LOG_INFO("  recurrent-context streaming: no (single-pass model)");
         }
 
         m_modelPath = path;
@@ -1219,34 +1219,31 @@ void DepthEstimator::AffineAlignTo(const std::vector<float>& anchor,
     }
 }
 
-// DA3StreamAccumulate: add a new normalised depth frame to the sliding window,
-// affine-align it to the anchor, then update the anchor periodically.
-//
-// The window keeps the last STREAM_WINDOW depth maps.  On each frame:
-//   1. Affine-align the new frame to the current anchor (eliminates scale/shift jitter).
-//   2. Push the aligned frame into the ring buffer.
-//   3. Every ANCHOR_RESET_FRAMES, recompute the anchor as the pixel-wise mean
-//      of the current window (stable central tendency across the clip).
-//   4. EWA-blend the aligned frame with the previous accumulated output.
-//
-// `depth` is modified in-place: on return it contains the aligned+blended output.
 void DepthEstimator::DA3StreamAccumulate(std::vector<float>& depth) {
     int n = (int)depth.size();
     if (n == 0) return;
-
     ++m_streamFrameCount;
 
-    // First frame: initialise anchor and buffer from this depth
+    // First frame: initialise anchor, no alignment needed
     if (m_streamAnchor.empty()) {
         m_streamAnchor = depth;
         m_streamBuf.push_back(depth);
         return;
     }
 
-    // Re-anchor periodically or if the window grew to full capacity
-    if ((int)m_streamBuf.size() >= STREAM_WINDOW ||
-        m_streamFrameCount % ANCHOR_RESET_FRAMES == 0) {
-        // Pixel-wise mean of the ring buffer = stable anchor
+    // Affine-align to anchor (removes per-frame scale/shift jitter)
+    AffineAlignTo(m_streamAnchor, depth);
+
+    // Push aligned frame into ring buffer, trim to window
+    m_streamBuf.push_back(depth);
+    while ((int)m_streamBuf.size() > STREAM_WINDOW)
+        m_streamBuf.pop_front();
+
+    // Periodically recompute anchor as pixel-wise mean of the window.
+    // NOTE: we do NOT blend depth toward the anchor here — that caused convergence
+    // to a flat 0.5 map over time.  Temporal smoothing is handled separately by
+    // TemporalSmooth() in Estimate() after this function returns.
+    if (m_streamFrameCount % ANCHOR_RESET_FRAMES == 0) {
         std::vector<float> newAnchor(n, 0.f);
         for (auto& buf : m_streamBuf)
             for (int i = 0; i < n && i < (int)buf.size(); ++i)
@@ -1254,23 +1251,8 @@ void DepthEstimator::DA3StreamAccumulate(std::vector<float>& depth) {
         float inv = 1.f / (float)m_streamBuf.size();
         for (float& v : newAnchor) v *= inv;
         m_streamAnchor = std::move(newAnchor);
-
-        // Trim the buffer if overfull
-        while ((int)m_streamBuf.size() >= STREAM_WINDOW)
-            m_streamBuf.pop_front();
     }
-
-    // Affine-align the new frame to the anchor
-    AffineAlignTo(m_streamAnchor, depth);
-
-    // EWA blend: new_out = (1-alpha)*prev_anchor + alpha*aligned_new
-    // This smooths residual jitter across frames without freezing on the anchor.
-    float alpha = STREAM_EWA_ALPHA;
-    for (int i = 0; i < n && i < (int)m_streamAnchor.size(); ++i)
-        depth[i] = (1.f - alpha) * m_streamAnchor[i] + alpha * depth[i];
-
-    // Push into buffer
-    m_streamBuf.push_back(depth);
+    // depth is returned as-is (affine-aligned); TemporalSmooth handles flicker
 }
 
 void DepthEstimator::ResetStreamingContext() {

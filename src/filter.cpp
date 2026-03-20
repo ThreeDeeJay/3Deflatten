@@ -443,16 +443,11 @@ HRESULT C3DeflattenFilter::StartStreaming() {
                  " isNV12=", m_isNV12?"yes":"no");
     }
 
-    int outW, outH;
-    OutputDimensions(m_inW, m_inH, outW, outH);
-    m_outBuf.resize(outW * outH * 4, 0);
-
-    // Pre-allocate all per-frame buffers so Transform() never calls malloc.
-    // Each is sized once and reused for every frame this session.
+    // Pre-allocate per-frame buffers so Transform() never calls malloc.
     size_t bgraBytes = (size_t)m_inW * m_inH * 4;
-    m_convBuf.assign(bgraBytes, 0);          // NV12/YUY2 → BGRA result
-    m_pendBGRA.assign(bgraBytes, 0);         // depth worker pending slot
-    m_depthRender.assign((size_t)m_inW * m_inH, 0.5f); // depth render buffer
+    m_convBuf.assign(bgraBytes, 0);
+    m_pendBGRA.assign(bgraBytes, 0);
+    m_depthRender.assign((size_t)m_inW * m_inH, 0.5f);
 
     LOG_INFO("Pipeline: ", m_inW,"x",m_inH," -> ",outW,"x",outH,
              " mode=", m_cfg.outputMode==OutputMode::SideBySide?"SBS":"TAB",
@@ -542,6 +537,7 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         std::lock_guard<std::mutex> lk(m_cacheMtx);
         if (m_cacheReady && m_cachedW == m_inW && m_cachedH == m_inH) {
             m_depthRender.swap(m_cachedDepth);  // O(1) — no malloc, no memcpy
+            m_cacheReady = false;  // consumed; worker sets true again on next result
             haveDepth = true;
         }
     }
@@ -553,27 +549,26 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
             std::fill(m_depthRender.begin(), m_depthRender.end(), 0.5f);
     }
 
-    // ── Stereo render (GPU, ~6-20 ms typical) ────────────────────────────────
+    // ── Stereo render directly into the DirectShow output sample ─────────────
     int outW, outH;
     OutputDimensions(m_inW, m_inH, outW, outH);
     int outStride = outW * 4;
-    if ((int)m_outBuf.size() < outStride * outH)
-        m_outBuf.resize(outStride * outH, 0);
-
-    auto tr0 = Clock::now();
-    m_stereo->Render(rgbaPtr, m_inW, m_inH, rgbaStride,
-                     m_depthRender.data(), cfg,
-                     m_outBuf.data(), outStride);
-    auto trMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        Clock::now() - tr0).count();
-
     LONG needed = outStride * outH;
+
     if (pOut->GetSize() < needed) {
         LOG_ERR("Frame #",m_frameCount,": out buf too small have=",
                 pOut->GetSize()," need=",needed);
         return E_FAIL;
     }
-    memcpy(pDst, m_outBuf.data(), needed);
+
+    // Write directly into pDst — no intermediate m_outBuf copy (saves 16 MB memcpy/frame)
+    auto tr0 = Clock::now();
+    m_stereo->Render(rgbaPtr, m_inW, m_inH, rgbaStride,
+                     m_depthRender.data(), cfg,
+                     pDst, outStride);
+    auto trMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now() - tr0).count();
+
     pOut->SetActualDataLength(needed);
 
     REFERENCE_TIME tStart, tStop;

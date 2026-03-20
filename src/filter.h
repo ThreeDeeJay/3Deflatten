@@ -76,16 +76,12 @@ private:
     bool m_isNV12 = false;
     bool m_isYUY2 = false;
 
-    std::vector<BYTE> m_outBuf;
-    int               m_frameCount = 0;
+    int                m_frameCount = 0;
 
-    // ── Pre-allocated per-frame buffers (never freed during streaming) ────────
-    // Declaring these as members and pre-sizing them in StartStreaming() eliminates
-    // the three 8 MB heap allocations that previously occurred every frame:
-    //   1. m_convBuf  – NV12/YUY2 → BGRA conversion result
-    //   2. m_pendBGRA – ping-pong pending slot (worker swaps, not moves, to preserve capacity)
-    //   3. m_depthRender – depth map used by the current render call (swapped from cache)
-    std::vector<BYTE>  m_convBuf;       // NV12/YUY2 → BGRA staging (srcW*srcH*4 bytes)
+    // Pre-allocated per-frame buffers — never freed during streaming, eliminating
+    // per-frame heap allocs. Render writes directly into the DirectShow output
+    // sample (pDst) so there is no intermediate output buffer copy.
+    std::vector<BYTE>  m_convBuf;       // NV12/YUY2 → BGRA (srcW*srcH*4 bytes)
     std::vector<float> m_depthRender;   // depth for current render (zero-copy swap from cache)
 
     // ── Async depth worker (single-slot latest-wins) ──────────────────────────

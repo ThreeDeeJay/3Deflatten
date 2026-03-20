@@ -176,6 +176,11 @@ StereoRenderer::StereoRenderer()  = default;
 StereoRenderer::~StereoRenderer() = default;
 
 HRESULT StereoRenderer::Init(bool forceNoGPU) {
+    // Always reset texture dimensions so EnsureTextures() recreates everything
+    // on the new device.  Without this, a second Init() (e.g. after seek/pause)
+    // would reuse textures from the OLD device with the NEW context → undefined behaviour.
+    m_lastSrcW = 0; m_lastSrcH = 0;
+    m_stagingFrame = 0;
     if (forceNoGPU) { m_gpuOK = false; return S_OK; }
     HRESULT hr = InitGPU();
     if (FAILED(hr)) {
@@ -336,7 +341,8 @@ HRESULT StereoRenderer::EnsureTextures(int srcW, int srcH, OutputMode mode) {
     m_rtTex.Reset();    m_rtv.Reset();
     m_stagingTex[0].Reset();
     m_stagingTex[1].Reset();
-    m_stagingFrame = 0;  // reset ping-pong on texture resize
+    m_stagingTex[2].Reset();
+    m_stagingFrame = 0;
 
     int dstW = (mode == OutputMode::SideBySide)  ? srcW*2 : srcW;
     int dstH = (mode == OutputMode::TopAndBottom) ? srcH*2 : srcH;
@@ -351,33 +357,55 @@ HRESULT StereoRenderer::EnsureTextures(int srcW, int srcH, OutputMode mode) {
     };
 
     HRESULT hr;
-    hr = makeTex(srcW,srcH, DXGI_FORMAT_B8G8R8A8_UNORM,
-                 D3D11_BIND_SHADER_RESOURCE, m_srcTex);
+    // DYNAMIC textures allow Map(WRITE_DISCARD) for zero-copy CPU→GPU upload,
+    // avoiding the internal staging allocation that UpdateSubresource uses.
+    auto makeDynTex = [&](int w, int h, DXGI_FORMAT fmt, UINT bind,
+                           ComPtr<ID3D11Texture2D>& tex) -> HRESULT {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width=w; td.Height=h; td.MipLevels=1; td.ArraySize=1;
+        td.Format=fmt; td.SampleDesc.Count=1;
+        td.Usage=D3D11_USAGE_DYNAMIC;
+        td.BindFlags=bind;
+        td.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+        return m_dev->CreateTexture2D(&td, nullptr, &tex);
+    };
+    auto makeDefaultTex = [&](int w, int h, DXGI_FORMAT fmt, UINT bind,
+                               ComPtr<ID3D11Texture2D>& tex) -> HRESULT {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width=w; td.Height=h; td.MipLevels=1; td.ArraySize=1;
+        td.Format=fmt; td.SampleDesc.Count=1;
+        td.Usage=D3D11_USAGE_DEFAULT; td.BindFlags=bind;
+        return m_dev->CreateTexture2D(&td, nullptr, &tex);
+    };
+
+    hr = makeDynTex(srcW,srcH, DXGI_FORMAT_B8G8R8A8_UNORM,
+                    D3D11_BIND_SHADER_RESOURCE, m_srcTex);
     if (FAILED(hr)) return hr;
     hr = m_dev->CreateShaderResourceView(m_srcTex.Get(), nullptr, &m_srcSRV);
     if (FAILED(hr)) return hr;
 
-    hr = makeTex(srcW,srcH, DXGI_FORMAT_R32_FLOAT,
-                 D3D11_BIND_SHADER_RESOURCE, m_depthTex);
+    hr = makeDynTex(srcW,srcH, DXGI_FORMAT_R32_FLOAT,
+                    D3D11_BIND_SHADER_RESOURCE, m_depthTex);
     if (FAILED(hr)) return hr;
-    hr = m_dev->CreateShaderResourceView(
-        m_depthTex.Get(), nullptr, &m_depthSRV);
+    hr = m_dev->CreateShaderResourceView(m_depthTex.Get(), nullptr, &m_depthSRV);
     if (FAILED(hr)) return hr;
 
-    hr = makeTex(dstW,dstH, DXGI_FORMAT_B8G8R8A8_UNORM,
-                 D3D11_BIND_RENDER_TARGET, m_rtTex);
+    hr = makeDefaultTex(dstW,dstH, DXGI_FORMAT_B8G8R8A8_UNORM,
+                        D3D11_BIND_RENDER_TARGET, m_rtTex);
     if (FAILED(hr)) return hr;
     hr = m_dev->CreateRenderTargetView(m_rtTex.Get(), nullptr, &m_rtv);
     if (FAILED(hr)) return hr;
 
+    // Three staging textures for readback — always read staging[(N-2)%3],
+    // which is two full frames old and guaranteed GPU-complete.
     D3D11_TEXTURE2D_DESC sd{};
     sd.Width=dstW; sd.Height=dstH; sd.MipLevels=1; sd.ArraySize=1;
     sd.Format=DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count=1;
     sd.Usage=D3D11_USAGE_STAGING; sd.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
-    hr = m_dev->CreateTexture2D(&sd, nullptr, &m_stagingTex[0]);
-    if (FAILED(hr)) return hr;
-    hr = m_dev->CreateTexture2D(&sd, nullptr, &m_stagingTex[1]);
-    if (FAILED(hr)) return hr;
+    for (int i = 0; i < 3; ++i) {
+        hr = m_dev->CreateTexture2D(&sd, nullptr, &m_stagingTex[i]);
+        if (FAILED(hr)) return hr;
+    }
 
     m_lastSrcW=srcW; m_lastSrcH=srcH; m_lastMode=mode;
     LOG_DBG("StereoRenderer: textures ", srcW,"x",srcH,
@@ -420,10 +448,25 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     int dstW = (cfg.outputMode==OutputMode::SideBySide)  ? srcW*2 : srcW;
     int dstH = (cfg.outputMode==OutputMode::TopAndBottom) ? srcH*2 : srcH;
 
-    D3D11_BOX box{0,0,0,(UINT)srcW,(UINT)srcH,1};
-    m_ctx->UpdateSubresource(m_srcTex.Get(),0,&box, srcFrame,srcStride,0);
-    m_ctx->UpdateSubresource(m_depthTex.Get(),0,&box,
-                              depthMap, srcW*sizeof(float),0);
+    // Upload source frame via Map(WRITE_DISCARD) — avoids internal D3D11 staging alloc
+    {
+        D3D11_MAPPED_SUBRESOURCE ms{};
+        if (SUCCEEDED(m_ctx->Map(m_srcTex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
+            for (int y = 0; y < srcH; ++y)
+                memcpy((BYTE*)ms.pData + y * ms.RowPitch,
+                       srcFrame + y * srcStride, srcW * 4);
+            m_ctx->Unmap(m_srcTex.Get(), 0);
+        }
+    }
+    {
+        D3D11_MAPPED_SUBRESOURCE ms{};
+        if (SUCCEEDED(m_ctx->Map(m_depthTex.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) {
+            for (int y = 0; y < srcH; ++y)
+                memcpy((BYTE*)ms.pData + y * ms.RowPitch,
+                       depthMap + y * srcW, srcW * sizeof(float));
+            m_ctx->Unmap(m_depthTex.Get(), 0);
+        }
+    }
 
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (SUCCEEDED(m_ctx->Map(m_cb.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) {
@@ -456,27 +499,22 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     m_ctx->PSSetSamplers(0,1,m_sampler.GetAddressOf());
     m_ctx->Draw(4,0);
 
-    // ── Double-buffered staging readback (eliminates GPU-stall) ──────────────
-    // Frame N: CopyResource → staging[ping]   (async GPU copy, returns immediately)
-    //          Map          → staging[pong]   (copy from frame N-1, already done)
-    // Because depth inference takes ~75 ms between renders, the previous frame's
-    // copy is always complete — Map returns immediately with zero stall.
-    // Only the very first frame falls back to reading the current staging buffer.
-    int ping = m_stagingFrame % 2;
-    int pong = 1 - ping;
-    m_ctx->CopyResource(m_stagingTex[ping].Get(), m_rtTex.Get());
-
-    ID3D11Texture2D* readTex = (m_stagingFrame > 0)
-        ? m_stagingTex[pong].Get()   // previous frame — already GPU-complete
-        : m_stagingTex[ping].Get();  // first frame only: stall once at startup
+    // ── Triple-buffered staging readback — guaranteed zero Map(READ) stall ───
+    // Frame N: CopyResource → staging[N%3]      (async, returns immediately)
+    //          Map          → staging[(N-2)%3]   (2 frames old — always GPU-complete)
+    // The 2-frame readback lag is 2/24 s ≈ 83 ms — imperceptible.
+    // First two frames: fall back to mapping the just-submitted buffer (stall once).
+    int cur  = m_stagingFrame % 3;
+    int read = (m_stagingFrame >= 2) ? (m_stagingFrame - 2) % 3 : cur;
+    m_ctx->CopyResource(m_stagingTex[cur].Get(), m_rtTex.Get());
 
     D3D11_MAPPED_SUBRESOURCE ms;
-    if (SUCCEEDED(m_ctx->Map(readTex, 0, D3D11_MAP_READ, 0, &ms))) {
+    if (SUCCEEDED(m_ctx->Map(m_stagingTex[read].Get(), 0, D3D11_MAP_READ, 0, &ms))) {
         for (int y=0; y<dstH; ++y)
             memcpy(dstFrame + y*dstStride,
                    (const BYTE*)ms.pData + y*ms.RowPitch,
                    dstW*4);
-        m_ctx->Unmap(readTex, 0);
+        m_ctx->Unmap(m_stagingTex[read].Get(), 0);
     }
     ++m_stagingFrame;
 }

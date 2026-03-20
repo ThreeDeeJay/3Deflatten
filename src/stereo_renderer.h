@@ -63,12 +63,11 @@ private:
     ComPtr<ID3D11ShaderResourceView>  m_depthSRV;
     ComPtr<ID3D11Texture2D>           m_rtTex;
     ComPtr<ID3D11RenderTargetView>    m_rtv;
-    // Double-buffered staging textures eliminate GPU-stall on Map(READ).
-    // Frame N: CopyResource → staging[N%2]; Map → staging[(N-1)%2] (prev frame, done).
-    // Because depth inference takes ~75 ms between renders, the GPU copy is
-    // always complete before we read the other buffer — zero stall.
-    ComPtr<ID3D11Texture2D>           m_stagingTex[2];
-    int                               m_stagingFrame = 0;  // ping-pong index
+    // Triple-buffered staging: frame N submits CopyResource → staging[N%3],
+    // reads staging[(N-2)%3] which is guaranteed GPU-complete (2 full frames old).
+    // This eliminates all Map(READ) stalls without adding perceptible visual lag.
+    ComPtr<ID3D11Texture2D>           m_stagingTex[3];
+    int                               m_stagingFrame = 0;
 
     int        m_lastSrcW = 0, m_lastSrcH = 0;
     OutputMode m_lastMode = OutputMode::SideBySide;
