@@ -308,7 +308,7 @@ void C3DeflattenProp::PopulateModelCombo(HWND hwnd) {
     // If no .onnx files found beyond the sentinel, note it but don't
     // replace the sentinel — DA3-Streaming is still a valid selection.
     if ((int)m_onnxFiles.size() == 1) {  // only sentinel
-        int idx = (int)SendDlgItemMessage(hwnd, IDC_MODEL_COMBO,
+        SendDlgItemMessage(hwnd, IDC_MODEL_COMBO,
                        CB_ADDSTRING, 0,
                        (LPARAM)L"(no additional .onnx files found)");
         m_onnxFiles.push_back(L"");

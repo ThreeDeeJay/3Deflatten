@@ -449,6 +449,9 @@ HRESULT C3DeflattenFilter::StartStreaming() {
     m_pendBGRA.assign(bgraBytes, 0);
     m_depthRender.assign((size_t)m_inW * m_inH, 0.5f);
 
+    int outW, outH;
+    OutputDimensions(m_inW, m_inH, outW, outH);
+
     LOG_INFO("Pipeline: ", m_inW,"x",m_inH," -> ",outW,"x",outH,
              " mode=", m_cfg.outputMode==OutputMode::SideBySide?"SBS":"TAB",
              " conv=",m_cfg.convergence," sep=",m_cfg.separation,
