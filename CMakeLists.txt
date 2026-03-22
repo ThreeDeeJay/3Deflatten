@@ -84,7 +84,7 @@ message(STATUS "ORT backend: ${ORT_BACKEND}")
 
 # ORT version per backend
 if(ORT_BACKEND STREQUAL "GPU13")
-    set(ORT_VERSION "1.24.3")
+    set(ORT_VERSION "1.24.4")
 elseif(ORT_BACKEND STREQUAL "GPU")
     set(ORT_VERSION "1.18.1")
 else()
