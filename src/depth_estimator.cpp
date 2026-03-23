@@ -642,7 +642,7 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 trt.trt_engine_cache_enable   = 1;
                 trt.trt_engine_cache_path     = m_trtCacheDir.c_str();
                 trt.trt_dump_subgraphs        = 0;
-                m_sessionOpts.AppendExecutionProvider_kNvTensorRTRTXExecutionProvider(trt);
+                m_sessionOpts.AppendExecutionProvider_NvTensorRTRTXExecutionProvider(trt);
 
                 outInfo = L"NVIDIA TensorRT (FP16, engine cache: "
                         + std::wstring(m_trtCacheDir.begin(), m_trtCacheDir.end())
