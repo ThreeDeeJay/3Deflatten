@@ -16,11 +16,11 @@ BEGIN
     LTEXT     "Convergence (screen-plane depth, 0-1):", -1, 10, 14, 200, 10
     CONTROL   "", IDC_CONV_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  24, 242,  14
-    LTEXT     "0.500", IDC_CONV_LABEL,             256,  24,  32,  14, SS_RIGHT
+    LTEXT     "0.250", IDC_CONV_LABEL,             256,  24,  32,  14, SS_RIGHT
     LTEXT     "Separation (stereo strength, 0-0.20):", -1, 10, 44, 200, 10
     CONTROL   "", IDC_SEP_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  54, 242,  14
-    LTEXT     "0.030", IDC_SEP_LABEL,              256,  54,  32,  14, SS_RIGHT
+    LTEXT     "0.050", IDC_SEP_LABEL,              256,  54,  32,  14, SS_RIGHT
     LTEXT     "Temporal Smoothing (flicker reduction, 0=off):", -1, 10, 74, 200, 10
     CONTROL   "", IDC_SMOOTH_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  84, 242,  14

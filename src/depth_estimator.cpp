@@ -258,14 +258,16 @@ static std::wstring GetRegisteredDllDir() {
 // LOAD_LIBRARY_AS_DATAFILE succeeds even when deps are missing, so we need a
 // real load.  IMPORTANT: LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR requires an ABSOLUTE
 // path -- using it with a bare DLL name causes ERROR_INVALID_PARAMETER (87).
-// We use it only when path contains a directory separator.
+// For bare names we include USER_DIRS so directories registered via
+// AddDllDirectory() (including our own Win64/ folder) are searched too.
 static DWORD DllLoadable(const wchar_t* path) {
     bool isAbsPath = (wcschr(path, L'\\') || wcschr(path, L'/'));
     DWORD flags = isAbsPath
         ? (LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
            LOAD_LIBRARY_SEARCH_USER_DIRS    |
            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)
-        : 0;  // bare name: use default Windows search order
+        : (LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |
+           LOAD_LIBRARY_SEARCH_USER_DIRS);   // includes AddDllDirectory paths
     HMODULE h = LoadLibraryExW(path, nullptr, flags);
     if (h) { FreeLibrary(h); return 0; }
     return GetLastError();
@@ -614,6 +616,42 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
     m_sessionOpts.EnableMemPattern();
     m_sessionOpts.EnableCpuMemArena();
 
+    // ── Diagnostic: log which onnxruntime.dll is actually loaded ─────────────
+    // "DML execution provider is not supported in this build" means the wrong
+    // onnxruntime.dll was loaded (CPU-only or CUDA build, not DirectML NuGet).
+    // Log the actual module path so the user can see which one won the race.
+    {
+        HMODULE hOrt = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               L"onnxruntime", &hOrt) && hOrt) {
+            wchar_t ortPath[MAX_PATH]{};
+            GetModuleFileNameW(hOrt, ortPath, MAX_PATH);
+            LOG_INFO("ORT: loaded onnxruntime.dll from: ", std::wstring(ortPath));
+        } else {
+            LOG_WARN("ORT: GetModuleHandleEx(onnxruntime) failed — DLL not yet in process?");
+        }
+
+        // List all EPs that this ORT build actually supports.
+        // If "DmlExecutionProvider" is missing here, the wrong ORT DLL is loaded.
+        auto providers = Ort::GetAvailableProviders();
+        std::string epList;
+        for (auto& p : providers) { if (!epList.empty()) epList += ", "; epList += p; }
+        LOG_INFO("ORT: available execution providers: [", epList, "]");
+        bool hasDml = false;
+        for (auto& p : providers) if (p == "DmlExecutionProvider") { hasDml = true; break; }
+        if (!hasDml) {
+            LOG_WARN("ORT: 'DmlExecutionProvider' NOT in available providers list.");
+            LOG_WARN("  This means the loaded onnxruntime.dll was built WITHOUT DirectML.");
+            LOG_WARN("  The DirectML build (.ax in Win64/) requires the NuGet onnxruntime.dll");
+            LOG_WARN("  from Microsoft.ML.OnnxRuntime.DirectML — NOT the GPU zip build.");
+            LOG_WARN("  Check that Win64\\onnxruntime.dll came from the NuGet package.");
+            LOG_WARN("  If Win64_GPU\\ or Win64_GPU11\\ also exist, PotPlayer may have");
+            LOG_WARN("  loaded the wrong onnxruntime.dll from a different registered filter.");
+            LOG_WARN("  Fix: register ONLY the Win64 .ax, or ensure Win64\\ is first in");
+            LOG_WARN("  the DLL search path (checked before Win64_GPU\\ and System32).");
+        }
+    }
+
     // Returns true if the EP was successfully appended.
     // On failure (DLL absent, CUDA not installed, ORT exception) returns false.
     auto tryEP = [&](GPUProvider ep) -> bool {
@@ -710,57 +748,45 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
             return false;
 #else
             // ── Dependency check: directml.dll ────────────────────────────────
+            // Now uses LOAD_LIBRARY_SEARCH_USER_DIRS so our Win64\ dir is searched.
+            // Error 1114 (DLL_INIT_FAILED) from our probe doesn't mean the DLL is wrong —
+            // directml.dll's DllMain needs the DX12 device context that ORT creates later.
+            // We treat 1114 as a warning and proceed; ORT's own load will succeed.
             DWORD _dmlErr = DllLoadable(L"directml.dll");
-            if (_dmlErr != 0) {
+            if (_dmlErr != 0 && _dmlErr != 1114) {
                 LOG_WARN("directml.dll not loadable (error=", _dmlErr, ")");
-                LOG_WARN("  DirectML requires Windows 10 1903+ or the bundled directml.dll");
-                LOG_WARN("  next to the .ax file.  Possible causes:");
-                LOG_WARN("    error=2 (not found): directml.dll missing from filter dir and System32");
+                LOG_WARN("  Possible causes:");
+                LOG_WARN("    error=2  (not found): place directml.dll from Microsoft.AI.DirectML");
+                LOG_WARN("             NuGet next to the .ax file, or update Windows 10 1903+");
                 LOG_WARN("    error=193 (bad image): wrong architecture (x86 vs x64)");
                 LOG_WARN("    error=14001 (side-by-side): VC++ runtime mismatch");
-
-                // Log what IS in the DLL search path to help diagnose
-                wchar_t dmlPath[MAX_PATH] = {};
-                if (SearchPathW(nullptr, L"directml.dll", nullptr,
-                                MAX_PATH, dmlPath, nullptr) > 0)
-                    LOG_WARN("  Found at: ", std::wstring(dmlPath),
-                             "  but LoadLibrary returned error=", _dmlErr);
-                else
-                    LOG_WARN("  SearchPath: not found in any DLL search directory");
                 return false;
             }
+            if (_dmlErr == 1114)
+                LOG_WARN("directml.dll probe returned 1114 (DLL_INIT_FAILED) — proceeding anyway;");
 
-            // Log the directml.dll version for diagnostics
+            // Log directml.dll version and path using module handle (more reliable than SearchPath)
             {
-                wchar_t dmlVer[MAX_PATH] = {};
-                if (SearchPathW(nullptr, L"directml.dll", nullptr,
-                                MAX_PATH, dmlVer, nullptr) > 0) {
-                    DWORD dummy = 0;
-                    DWORD vsz = GetFileVersionInfoSizeW(dmlVer, &dummy);
-                    if (vsz > 0) {
-                        std::vector<BYTE> vbuf(vsz);
-                        if (GetFileVersionInfoW(dmlVer, 0, vsz, vbuf.data())) {
-                            VS_FIXEDFILEINFO* fi = nullptr;
-                            UINT filen = 0;
-                            if (VerQueryValueW(vbuf.data(), L"\\",
-                                              reinterpret_cast<LPVOID*>(&fi), &filen) && fi) {
-                                LOG_INFO("  directml.dll version: ",
-                                         HIWORD(fi->dwFileVersionMS), ".",
-                                         LOWORD(fi->dwFileVersionMS), ".",
-                                         HIWORD(fi->dwFileVersionLS), ".",
-                                         LOWORD(fi->dwFileVersionLS));
-                                LOG_INFO("  directml.dll path: ", std::wstring(dmlVer));
-                            }
-                        }
-                    }
+                // Try to find it via the module handle first (most accurate)
+                HMODULE hDml = GetModuleHandleW(L"directml");
+                if (!hDml) hDml = GetModuleHandleW(L"directml.dll");
+                if (hDml) {
+                    wchar_t dmlPath[MAX_PATH]{};
+                    GetModuleFileNameW(hDml, dmlPath, MAX_PATH);
+                    LOG_INFO("  directml.dll (in process) path: ", std::wstring(dmlPath));
+                } else {
+                    // Fall back to SearchPathW (searches all registered DLL dirs)
+                    wchar_t dmlPath[MAX_PATH]{};
+                    if (SearchPathW(nullptr, L"directml.dll", nullptr, MAX_PATH, dmlPath, nullptr) > 0)
+                        LOG_INFO("  directml.dll (SearchPath) path: ", std::wstring(dmlPath));
+                    else
+                        LOG_WARN("  directml.dll not found via SearchPath");
                 }
 
-                // Check that a D3D12 device can actually be created (DX12 required)
-                HMODULE hD3D12 = LoadLibraryExW(L"d3d12.dll", nullptr,
-                    LOAD_LIBRARY_SEARCH_SYSTEM32);
+                // d3d12.dll is required
+                HMODULE hD3D12 = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
                 if (!hD3D12) {
-                    LOG_WARN("  d3d12.dll not found – DirectML requires DX12.");
-                    LOG_WARN("  Update Windows or graphics drivers.");
+                    LOG_WARN("  d3d12.dll not found – DirectML requires DirectX 12.");
                     return false;
                 }
                 FreeLibrary(hD3D12);
@@ -772,27 +798,28 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 LOG_INFO("Execution provider: DirectML");
                 LOG_INFO("  NOTE: DirectML compiles GPU shaders on first inference.");
                 LOG_INFO("  First frame may take 5-30 s; subsequent frames are fast.");
-                LOG_INFO("  Expected throughput for DA V2 Small (depth_anything_v2_small.onnx):");
+                LOG_INFO("  Expected throughput for DA V2 Small:");
                 LOG_INFO("    High-end GPU (RTX 3070+, RX 6700+): ~100-300 ms/frame");
-                LOG_INFO("    Mid-range GPU (GTX 1060-1080, RX 580, RTX 3060): ~300-600 ms/frame");
+                LOG_INFO("    Mid-range GPU (GTX 1060-1080, RX 580): ~300-600 ms/frame");
                 LOG_INFO("    Low-end / integrated GPU: 600ms-2s/frame");
-                LOG_INFO("  If performance is lower than expected, check GPU utilization in");
-                LOG_INFO("  Task Manager -> Performance -> GPU. Low utilization (<50%) with");
-                LOG_INFO("  slow inference is normal for smaller models on high-end GPUs.");
-                LOG_INFO("  The GPU name is logged at startup (search log for 'GPU:').");
                 return true;
             } catch (const Ort::Exception& e) {
                 LOG_WARN("DirectML EP init failed: ", e.what());
-                LOG_WARN("  This usually means one of:");
-                LOG_WARN("    (A) ORT DirectML EP was not built into this onnxruntime.dll");
-                LOG_WARN("        (message: 'DML execution provider is not supported in this build')");
-                LOG_WARN("        Fix: ensure you are using the DirectML NuGet build (Win64/)");
-                LOG_WARN("        not the GPU/CUDA zip build (Win64_GPU/).  Check which .ax you");
-                LOG_WARN("        registered: the DirectML build is 3Deflatten_x64.ax in Win64/.");
-                LOG_WARN("    (B) directml.dll version too old for this ORT build.");
-                LOG_WARN("        Try bundling a newer directml.dll from the NuGet package:");
-                LOG_WARN("        Microsoft.AI.DirectML — copy directml.dll next to the .ax.");
-                LOG_WARN("    (C) The GPU does not support the required DX12 feature level.");
+                LOG_WARN("  Root cause: the onnxruntime.dll that was loaded does NOT have DML");
+                LOG_WARN("  compiled in.  The available providers list logged above shows what IS");
+                LOG_WARN("  present.  If 'DmlExecutionProvider' is missing there, a CPU-only or");
+                LOG_WARN("  CUDA onnxruntime.dll won the DLL search race over the DML NuGet one.");
+                LOG_WARN("  Common scenarios:");
+                LOG_WARN("    (A) Win64_GPU\\ or Win64_GPU11\\ is also registered as a filter and");
+                LOG_WARN("        its onnxruntime.dll was loaded first via the DLL search path.");
+                LOG_WARN("        Fix: un-register the GPU build, or move its folder out of the");
+                LOG_WARN("        DLL search path, or rename its onnxruntime.dll temporarily.");
+                LOG_WARN("    (B) PotPlayer copied 3Deflatten_x64.ax to its own folder and");
+                LOG_WARN("        loaded onnxruntime.dll from there (not Win64\\).");
+                LOG_WARN("        Fix: set DEFLATTEN_MODEL_PATH env var and use 'Register' not");
+                LOG_WARN("        PotPlayer's 'Add External Filter' copy-mode.");
+                LOG_WARN("    (C) Win64\\onnxruntime.dll was replaced or is missing.");
+                LOG_WARN("        Fix: rebuild or re-copy the NuGet onnxruntime.dll into Win64\\.");
                 return false;
             }
 #endif // ORT_ENABLE_DML

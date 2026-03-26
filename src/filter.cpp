@@ -109,13 +109,13 @@ void C3DeflattenFilter::LoadIni() {
         return buf;
     };
 
-    m_cfg.convergence = getF(L"convergence", 0.5f);
-    m_cfg.separation  = getF(L"separation",  0.03f);
+    m_cfg.convergence = getF(L"convergence", 0.250f);
+    m_cfg.separation  = getF(L"separation",  0.050f);
     m_cfg.depthSmooth = getF(L"depthSmooth", 0.4f);
     m_cfg.outputMode  = (OutputMode)getI(L"outputMode",  (int)OutputMode::SideBySide);
     m_cfg.gpuProvider = (GPUProvider)getI(L"gpuProvider", (int)GPUProvider::Auto);
     m_cfg.flipDepth   = getI(L"flipDepth", 0) ? TRUE : FALSE;
-    m_cfg.infillMode  = (InfillMode)getI(L"infillMode", (int)InfillMode::Inner);
+    m_cfg.infillMode  = (InfillMode)getI(L"infillMode", (int)InfillMode::Outer);
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
@@ -160,13 +160,13 @@ CUnknown* WINAPI C3DeflattenFilter::CreateInstance(LPUNKNOWN pUnk, HRESULT* phr)
 C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     : CTransformFilter(L"3Deflatten", pUnk, CLSID_3Deflatten)
 {
-    m_cfg.convergence = 0.5f;
-    m_cfg.separation  = 0.03f;
+    m_cfg.convergence = 0.250f;
+    m_cfg.separation  = 0.050f;
     m_cfg.outputMode  = OutputMode::SideBySide;
     m_cfg.gpuProvider = GPUProvider::Auto;
     m_cfg.depthSmooth = 0.4f;
     m_cfg.flipDepth   = FALSE;
-    m_cfg.infillMode  = InfillMode::Inner;
+    m_cfg.infillMode  = InfillMode::Outer;
     m_hadRealDepth    = false;
     m_skipEvery       = 1;
     m_skipCounter     = 0;
