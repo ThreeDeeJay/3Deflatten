@@ -1,10 +1,5 @@
 name: Build
 
-env:
-  GH_TOKEN: ${{github.token}}
-  Branch: ${{github.ref_name}}
-  Title: ${{github.event.repository.name}}
-  
 on:
   push:
     branches: [ main, master ]
@@ -21,48 +16,44 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ── DirectML backend (DirectML + CPU) ──────────────────────────────
-          # Works on any DX12 GPU (AMD / Intel / NVIDIA).
-          # Produces: Win64/3Deflatten_x64.ax + onnxruntime.dll + directml.dll
-          - name:           "x64 DirectML"
-            arch:           x64
-            cmake_arch:     x64
-            vcpkg_triplet:  x64-windows
-            ort_backend:    DirectML
-            ax_dir:         Win64
-            artifact_name:  3Deflatten_x64_DirectML
+          # ── DirectML backend (DirectML + CPU), 64-bit ──────────────────────
+          - name:          "x64 DirectML"
+            arch:          x64
+            cmake_arch:    x64
+            vcpkg_triplet: x64-windows
+            ort_backend:   DirectML
+            ort_package:   Microsoft.ML.OnnxRuntime.DirectML
+            ax_dir:        Win64
+            artifact_name: 3Deflatten_x64_DirectML
 
-          # ── DirectML backend – 32-bit (for 32-bit player hosts) ────────────
-          # CUDA/TRT are x64-only; x86 always uses DirectML or CPU.
-#          - name:           "x86 DirectML"
-#            arch:           x86
-#            cmake_arch:     Win32
-#            vcpkg_triplet:  x86-windows
-#            ort_backend:    DirectML
-#            ax_dir:         Win32
-#            artifact_name:  3Deflatten_x86_DirectML
+          # ── DirectML backend, 32-bit (CPU-only ORT, no DirectML for x86) ──
+          - name:          "x86 CPU-only"
+            arch:          x86
+            cmake_arch:    Win32
+            vcpkg_triplet: x86-windows
+            ort_backend:   DirectML
+            ort_package:   Microsoft.ML.OnnxRuntime
+            ax_dir:        Win32
+            artifact_name: 3Deflatten_x86_CPU
 
-          # ── GPU backend (TensorRT + CUDA + CPU) ────────────────────────────
-          # NVIDIA only.  Requires CUDA runtime + (optionally) TensorRT SDK
-          # installed on the user's machine at runtime.
-          # The build itself needs NO CUDA/TRT – only ORT headers + stubs.
-          # Produces: Win64_GPU/3Deflatten_x64.ax + onnxruntime.dll
-          #         + onnxruntime_providers_cuda.dll
-          #         + onnxruntime_providers_tensorrt.dll
-          #         + onnxruntime_providers_shared.dll
-          - name:           "x64 GPU (TensorRT+CUDA)"
-            arch:           x64
-            cmake_arch:     x64
-            vcpkg_triplet:  x64-windows
-            ort_backend:    GPU13
-            ax_dir:         Win64_GPU
-            artifact_name:  3Deflatten_x64_GPU
+          # ── GPU backend (TensorRT + CUDA + CPU), 64-bit NVIDIA only ───────
+          # The build itself needs NO CUDA/TRT installed; ORT GPU zip bundles
+          # the provider stub DLLs.  Runtime CUDA/TRT is the user's concern.
+          - name:          "x64 GPU (TensorRT+CUDA)"
+            arch:          x64
+            cmake_arch:    x64
+            vcpkg_triplet: x64-windows
+            ort_backend:   GPU
+            ort_package:   ""           # GPU backend downloads ORT zip, not NuGet
+            ax_dir:        Win64_GPU
+            artifact_name: 3Deflatten_x64_GPU
 
     env:
       VCPKG_ROOT:            C:\vcpkg
       VCPKG_DEFAULT_TRIPLET: ${{ matrix.vcpkg_triplet }}
       VCPKG_INSTALLED_DIR:   ${{ github.workspace }}\vcpkg_installed
       VCPKG_BINARY_SOURCES:  "clear;x-gha,readwrite"
+      ORT_VERSION:           "1.18.1"
 
     steps:
       - name: Checkout
@@ -75,23 +66,84 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL',     process.env.ACTIONS_CACHE_URL     || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-      # FetchContent cache: ORT NuGet/zip + strmbase git clone.
-      # Keyed on CMakeLists hash so it invalidates when ORT version changes.
-      - name: Cache FetchContent downloads
+      # ── NuGet package install (DirectML and CPU-only backends only) ─────────
+      # nuget.exe is pre-installed on all windows-latest runners.
+      # We install to a fixed path and pass it to CMake via -DORT_NUGET_DIR.
+      # This is far more reliable than FetchContent URL downloads of .nupkg
+      # files, which are sensitive to package layout changes and CDN issues.
+      - name: Install ORT NuGet package (${{ matrix.ort_package }})
+        if: matrix.ort_package != ''
+        run: |
+          nuget install ${{ matrix.ort_package }} ^
+            -Version %ORT_VERSION% ^
+            -OutputDirectory "${{ github.workspace }}\ort_nuget" ^
+            -NonInteractive ^
+            -ForceEnglishOutput
+        shell: cmd
+
+      # Resolve the exact directory nuget extracted the package into.
+      # nuget names the folder  <PackageId>.<Version>  e.g.
+      # Microsoft.ML.OnnxRuntime.DirectML.1.24.3
+      - name: Locate ORT NuGet dir
+        if: matrix.ort_package != ''
+        id: ort_nuget_dir
+        run: |
+          for /D %%D in ("${{ github.workspace }}\ort_nuget\${{ matrix.ort_package }}.*") do (
+            echo ORT_NUGET_DIR=%%D >> %GITHUB_OUTPUT%
+            goto :done
+          )
+          :done
+        shell: cmd
+
+      # ── Microsoft.AI.DirectML NuGet (latest DirectML runtime, x64 only) ──────
+      # The ORT DirectML NuGet bundles an older directml.dll.  We separately
+      # install the latest Microsoft.AI.DirectML package so users get the best
+      # GPU performance.  This step is only needed for the x64 DirectML build.
+      - name: Install Microsoft.AI.DirectML NuGet
+        if: matrix.ort_backend == 'DirectML' && matrix.arch == 'x64'
+        run: |
+          nuget install Microsoft.AI.DirectML ^
+            -Version 1.15.4 ^
+            -OutputDirectory "${{ github.workspace }}\dml_nuget" ^
+            -NonInteractive ^
+            -ForceEnglishOutput
+        shell: cmd
+
+      - name: Locate DirectML NuGet dir
+        if: matrix.ort_backend == 'DirectML' && matrix.arch == 'x64'
+        id: dml_nuget_dir
+        run: |
+          for /D %%D in ("${{ github.workspace }}\dml_nuget\Microsoft.AI.DirectML.*") do (
+            echo DML_NUGET_DIR=%%D >> %GITHUB_OUTPUT%
+            goto :done
+          )
+          :done
+        shell: cmd
+
+      # strmbase git clone cache – keyed on CMakeLists so it busts when we
+      # change the sparse-checkout revision or path.
+      - name: Cache strmbase (FetchContent)
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}\build\_deps
-          key:  fetchcontent-${{ matrix.ort_backend }}-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt') }}
+          path: ${{ github.workspace }}\build\_deps\win_classic_samples-src
+          key:  strmbase-${{ hashFiles('CMakeLists.txt') }}
           save-always: true
 
-      # vcpkg cache (currently only directxtk)
+      # ORT GPU zip cache (GPU backend only; NuGet builds use nuget above)
+      - name: Cache ORT GPU zip (FetchContent)
+        if: matrix.ort_backend == 'GPU'
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\build\_deps\ort_gpu-src
+          key:  ort-gpu-cuda13-${{ env.ORT_VERSION }}
+          save-always: true
+
       - name: Cache vcpkg installed packages
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}\vcpkg_installed
           key:  vcpkg-${{ matrix.vcpkg_triplet }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-${{ matrix.vcpkg_triplet }}-
+          restore-keys: vcpkg-${{ matrix.vcpkg_triplet }}-
           save-always: true
 
       - name: Install vcpkg dependencies
@@ -117,13 +169,66 @@ jobs:
           "-DVCPKG_INSTALLED_DIR=${{ github.workspace }}\vcpkg_installed"
           -DCMAKE_BUILD_TYPE=Release
           -DORT_BACKEND=${{ matrix.ort_backend }}
+          ${{ matrix.ort_package != '' && format('-DORT_NUGET_DIR="{0}"', steps.ort_nuget_dir.outputs.ORT_NUGET_DIR) || '' }}
+          ${{ steps.dml_nuget_dir.outputs.DML_NUGET_DIR != '' && format('-DDML_NUGET_DIR="{0}"', steps.dml_nuget_dir.outputs.DML_NUGET_DIR) || '' }}
         shell: cmd
 
       - name: Build
         run: cmake --build build --config Release --parallel
         shell: cmd
 
-      # Upload the entire output directory (includes all runtime DLLs).
+      # ── Collect CUDA runtime DLLs (GPU build only) ──────────────────────────
+      # Downloads the official NVIDIA pip wheels (redistributable) and copies
+      # the required .dll files next to the .ax so users don't need a system
+      # CUDA/cuDNN/TRT install.
+      #
+      # TensorRT: we download the TRT 10.0.0.6 CUDA-11.8 Windows zip from the
+      # NVIDIA developer portal.  The zip is cached by the key below.
+      # TRT DLLs in lib\ are redistributable under the TRT Software License.
+      # NOTE: TRT 10.0.x uses plain DLL names (nvinfer.dll, not nvinfer_10.dll).
+      - name: Cache TRT zip
+        if: matrix.ort_backend == 'GPU'
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\trt_zip
+          key:  trt-10.0.0.6-cuda11
+          save-always: true
+
+      - name: Download and extract TRT 10.0.0.6 (CUDA 11.8)
+        if: matrix.ort_backend == 'GPU'
+        run: |
+          set TRT_ZIP_URL=https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.0.0/zip/TensorRT-10.0.0.6.Windows10.win10.cuda-11.8.zip
+          set TRT_ZIP=%GITHUB_WORKSPACE%\trt_zip\TensorRT-10.0.0.6.Windows10.win10.cuda-11.8.zip
+          set TRT_DIR=%GITHUB_WORKSPACE%\trt_zip\extracted
+          if not exist "%GITHUB_WORKSPACE%\trt_zip" mkdir "%GITHUB_WORKSPACE%\trt_zip"
+          if not exist "%TRT_ZIP%" (
+            echo Downloading TRT 10.0.0.6...
+            powershell -Command "Invoke-WebRequest -Uri '%TRT_ZIP_URL%' -OutFile '%TRT_ZIP%' -UseBasicParsing"
+          ) else (
+            echo TRT zip already cached.
+          )
+          if not exist "%TRT_DIR%" (
+            echo Extracting TRT...
+            powershell -Command "Expand-Archive -Path '%TRT_ZIP%' -DestinationPath '%TRT_DIR%' -Force"
+          )
+          :: Find the lib\ folder (zip extracts to TensorRT-10.0.0.6\lib or similar)
+          for /D %%D in ("%TRT_DIR%\TensorRT-*") do (
+            echo TRT_LIB_PATH=%%D\lib>> %GITHUB_ENV%
+            goto :done
+          )
+          :done
+        shell: cmd
+
+      - name: Collect CUDA 11 + cuDNN 8 + TRT runtime DLLs
+        if: matrix.ort_backend == 'GPU'
+        run: >
+          python scripts/collect_runtime_dlls.py
+          --output "build\${{ matrix.ax_dir }}"
+          --trt-zip "%GITHUB_WORKSPACE%\trt_zip\TensorRT-10.0.0.6.Windows10.win10.cuda-11.8.zip"
+          --no-confirm
+        shell: cmd
+
+      # Upload the entire output directory so all runtime DLLs are included.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -131,81 +236,52 @@ jobs:
           path: build/${{ matrix.ax_dir }}/
           if-no-files-found: error
 
-  Release:
-    name: Release
-    runs-on: windows-latest
+  # ── Package: combine all three artifacts into one release zip ────────────────
+  package:
+    name: Package release
     needs: build
+    runs-on: windows-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+
     steps:
-
-      - name: Clone repo and submodules
-        run: git clone https://${{github.repository_owner}}:${{github.token}}@github.com/${{github.repository}}.git "${{github.workspace}}" --branch ${{env.Branch}} --recurse-submodules
-
-      - name: Get current date, commit hash and count
-        run: |
-          echo "FirstCommitHash=$(git rev-list --max-parents=0 HEAD --first-parent)" >> $env:GITHUB_ENV
-          echo "CommitHash=$(git rev-parse HEAD)" >> $env:GITHUB_ENV
-          echo "CommitHashShort=$(git rev-parse --short=7 HEAD)" >> $env:GITHUB_ENV
-          echo "CommitCount=$(git rev-list --count HEAD)" >> $env:GITHUB_ENV
-          echo "CommitDate=$(git show -s --date=format:'%Y-%m-%d' --format=%cd)" >> $env:GITHUB_ENV
-
-#      - name: Download x86 DirectML
-#        uses: actions/download-artifact@v4
-#        with:
-#          name: 3Deflatten_x86_DirectML
-#          path: Release\Win32
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Download x64 DirectML
         uses: actions/download-artifact@v4
         with:
           name: 3Deflatten_x64_DirectML
-          path: Release\Win64
+          path: release\Win64
+
+      - name: Download x86 CPU-only
+        uses: actions/download-artifact@v4
+        with:
+          name: 3Deflatten_x86_CPU
+          path: release\Win32
 
       - name: Download x64 GPU (TensorRT+CUDA)
         uses: actions/download-artifact@v4
         with:
           name: 3Deflatten_x64_GPU
-          path: Release\Win64_GPU
+          path: release\Win64_GPU
 
-      - name: Deploy
+      - name: Assemble release
         run: |
-          copy "3Deflatten.ini"                          "Release/Win64/"
-          copy "3Deflatten.ini"                          "Release/Win64_GPU/"
-          copy "README.md"                               "Release/ReadMe.txt"
-          copy "LICENSE"                                 "Release/License.txt"
-          copy "scripts/register.bat"                    "Release/"
-          copy "scripts/unregister.bat"                  "Release/"
-          copy "scripts/Setup.py"                        "Release/"
-          copy "scripts/collect_runtime_dlls.py"         "Release/"
-          copy "scripts/collect_runtime_dlls_cuda13.py"  "Release/"
-#copy "3Deflatten.ini"                   "Release/Win32/"
-#copy -r "Artifacts/Win64"               "Release"
-#copy -r "Artifacts/Win64_GPU"           "Release"
-#copy -r "Artifacts/Win32"               "Release"
+          copy README.md                          release\
+          copy LICENSE                            release\
+          copy 3Deflatten.ini                     release\
+          copy scripts\register.bat              release\
+          copy scripts\unregister.bat            release\
+          copy scripts\Setup.py                  release\
+          copy scripts\collect_runtime_dlls.py   release\
+        shell: cmd
 
-  
-      - name: Compress artifacts
-        if: github.event_name == 'push'
-        run: |
-          7z a "Release/${{env.Title}}.zip" "${{github.workspace}}/Release/*" -mx=9
-          cp "Release/${{env.Title}}.zip" "Release/${{env.Title}}_r${{env.CommitCount}}@${{env.CommitHashShort}}.zip"
-  
-      - name: Purge tag - latest-${{env.Branch}}
-        if: github.event_name == 'push'
-        run: |
-          gh release delete latest-${{env.Branch}} --repo ${{github.repository}} --cleanup-tag --yes || true
-  
-      - name: Release - archive-${{env.Branch}}
-        if: github.event_name == 'push'
-        run: |
-          gh release create archive-${{env.Branch}} --repo ${{github.repository}} --target ${{env.FirstCommitHash}} --latest=false --prerelease --title "${{env.Title}} ${{env.Branch}} build archive" --notes "Latest build: https://github.com/${{github.repository}}/releases/latest-${{env.Branch}}
-          Build logs: https://github.com/${{github.repository}}/actions" || true
-          gh release edit archive-${{env.Branch}} --repo ${{github.repository}} --target ${{env.FirstCommitHash}} --latest=false --prerelease --title "${{env.Title}} ${{env.Branch}} build archive" --notes "Latest build: https://github.com/${{github.repository}}/releases/latest-${{env.Branch}}
-          Build logs: https://github.com/${{github.repository}}/actions" || true
-          gh release upload archive-${{env.Branch}} --repo ${{github.repository}} --clobber "Release/${{env.Title}}_r${{env.CommitCount}}@${{env.CommitHashShort}}.zip"
-  
-      - name: Release - latest-${{env.Branch}}
-        if: github.event_name == 'push'
-        run: |
-          gh release create latest-${{env.Branch}} --repo ${{github.repository}} --target ${{env.CommitHash}} --generate-notes --latest=true --title "${{env.Title}} r${{env.CommitCount}}@${{env.CommitHashShort}}" --notes "Build archive: https://github.com/${{github.repository}}/releases/tag/archive-${{env.Branch}}
-          Build log: https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"
-          gh release upload latest-${{env.Branch}} --repo ${{github.repository}} --clobber "Release/${{env.Title}}.zip"
+      - name: Create release zip
+        run: powershell Compress-Archive -Path release\* -DestinationPath 3Deflatten-release.zip
+        shell: cmd
+
+      - name: Upload release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: 3Deflatten-release
+          path: 3Deflatten-release.zip
