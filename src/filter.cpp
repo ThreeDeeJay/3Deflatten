@@ -6,6 +6,7 @@
 #include <uuids.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 // ── Filter registration ───────────────────────────────────────────────────────
 static const AMOVIESETUP_MEDIATYPE sudPinTypes[] = {
@@ -166,6 +167,10 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.depthSmooth = 0.4f;
     m_cfg.flipDepth   = FALSE;
     m_cfg.infillMode  = InfillMode::Inner;
+    m_hadRealDepth    = false;
+    m_skipEvery       = 1;
+    m_skipCounter     = 0;
+    m_avgInferMs      = 0.0;
 
     wchar_t envModel[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"DEFLATTEN_MODEL_PATH", envModel, MAX_PATH))
@@ -260,7 +265,8 @@ void C3DeflattenFilter::OutputDimensions(int inW, int inH,
                                           int& outW, int& outH) const {
     CAutoLock lk(const_cast<CCritSec*>(&m_csConfig));
     if (m_cfg.outputMode == OutputMode::SideBySide) { outW=inW*2; outH=inH; }
-    else { outW=inW; outH=inH*2; }
+    else if (m_cfg.outputMode == OutputMode::TopAndBottom) { outW=inW; outH=inH*2; }
+    else { outW=inW; outH=inH; }  // DepthOnly: same size as input
 }
 
 HRESULT C3DeflattenFilter::GetMediaType(int iPos, CMediaType* pmt) {
@@ -361,12 +367,11 @@ void C3DeflattenFilter::DepthWorkerThread() {
 
         if (SUCCEEDED(hr)) {
             std::lock_guard<std::mutex> lk(m_cacheMtx);
-            // Move the result into the cache (O(1)); the swap in Transform()
-            // will pull this data out without copying.
             m_cachedDepth = std::move(result.data);
             m_cachedW     = result.width;
             m_cachedH     = result.height;
             m_cacheReady  = true;
+            m_lastInferMs = (double)ms;
             LOG_DBG("Depth worker: inference done in ", ms, " ms");
         } else {
             LOG_WARN("Depth worker: inference failed hr=", HRStr(hr));
@@ -403,7 +408,10 @@ static void NV12toBGRA(const BYTE* src, int w, int h, int stride,
 // ── StartStreaming / StopStreaming ────────────────────────────────────────────
 HRESULT C3DeflattenFilter::StartStreaming() {
     LOG_INFO("===== StartStreaming =====");
-    m_frameCount = 0;
+    m_frameCount  = 0;
+    m_skipCounter = 0;
+    m_skipEvery   = 1;
+    m_avgInferMs  = 0.0;
 
     HRESULT hr = m_stereo->Init();
     if (FAILED(hr)) { LOG_ERR("StereoRenderer::Init FAILED ",HRStr(hr)); return hr; }
@@ -447,11 +455,16 @@ HRESULT C3DeflattenFilter::StartStreaming() {
     size_t bgraBytes = (size_t)m_inW * m_inH * 4;
     m_convBuf.assign(bgraBytes, 0);
     m_pendBGRA.assign(bgraBytes, 0);
-    m_depthRender.assign((size_t)m_inW * m_inH, 0.5f);
+
+    // IMPORTANT: do NOT overwrite m_depthRender if it already has real depth
+    // from a previous session.  Overwriting with flat causes visible flash on
+    // every pause/resume.  Only initialise flat on the very first session.
+    size_t depthN = (size_t)m_inW * m_inH;
+    if (!m_hadRealDepth || m_depthRender.size() != depthN)
+        m_depthRender.assign(depthN, 0.5f);
 
     int outW, outH;
     OutputDimensions(m_inW, m_inH, outW, outH);
-
     LOG_INFO("Pipeline: ", m_inW,"x",m_inH," -> ",outW,"x",outH,
              " mode=", m_cfg.outputMode==OutputMode::SideBySide?"SBS":"TAB",
              " conv=",m_cfg.convergence," sep=",m_cfg.separation,
@@ -510,28 +523,30 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         rgbaPtr=m_convBuf.data(); rgbaStride=m_inW*4;
     }
 
-    // ── Post BGRA to depth worker (non-blocking, latest-frame-wins) ──────────
-    // memcpy the BGRA data into m_pendBGRA BEFORE acquiring the lock to minimise
-    // lock hold time.  m_pendBGRA is pre-allocated so this never calls malloc.
+    // ── Post BGRA to depth worker (adaptive frame skip) ──────────────────────
+    // When inference is slower than the video frame rate, skip posting most frames
+    // so the worker always sees the LATEST frame rather than one that will never
+    // be displayed.  m_skipEvery is recomputed each time a new depth result arrives.
     if (m_depth->IsLoaded()) {
-        const size_t bgraBytes = (size_t)m_inH * rgbaStride;
-        if (m_pendBGRA.size() != bgraBytes)
-            m_pendBGRA.resize(bgraBytes);   // only happens on resolution change
-        memcpy(m_pendBGRA.data(), rgbaPtr, bgraBytes);
-        {
-            std::lock_guard<std::mutex> lk(m_pendMtx);
-            // Signal the worker that a new frame is ready.  The worker will swap
-            // its local buffer with m_pendBGRA under the lock (O(1) swap).
-            m_pendW     = m_inW;
-            m_pendH     = m_inH;
-            m_pendReady = true;
+        ++m_skipCounter;
+        bool shouldPost = (m_skipCounter >= m_skipEvery);
+        if (shouldPost) {
+            m_skipCounter = 0;
+            const size_t bgraBytes = (size_t)m_inH * rgbaStride;
+            if (m_pendBGRA.size() != bgraBytes)
+                m_pendBGRA.resize(bgraBytes);
+            memcpy(m_pendBGRA.data(), rgbaPtr, bgraBytes);
+            {
+                std::lock_guard<std::mutex> lk(m_pendMtx);
+                m_pendW     = m_inW;
+                m_pendH     = m_inH;
+                m_pendReady = true;
+            }
+            m_pendCV.notify_one();
         }
-        m_pendCV.notify_one();
     }
 
     // ── Grab latest depth via zero-copy swap ─────────────────────────────────
-    // Instead of copying 8 MB of floats on every frame, swap m_depthRender with
-    // m_cachedDepth.  Both buffers retain their allocations across frames.
     DeflattenConfig cfg;
     { CAutoLock lk(&m_csConfig); cfg = m_cfg; }
 
@@ -539,17 +554,52 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
     {
         std::lock_guard<std::mutex> lk(m_cacheMtx);
         if (m_cacheReady && m_cachedW == m_inW && m_cachedH == m_inH) {
-            m_depthRender.swap(m_cachedDepth);  // O(1) — no malloc, no memcpy
-            m_cacheReady = false;  // consumed; worker sets true again on next result
+            m_depthRender.swap(m_cachedDepth);
+            m_cacheReady = false;
             haveDepth = true;
+            m_hadRealDepth = true;
+
+            // Update skip rate: infer every N frames where N = ceil(inferMs / frameBudgetMs).
+            // Frame budget at 24fps = 41.7ms.  We read AvgTimePerFrame from the input
+            // media type if available (already known from bitrate field); otherwise use
+            // a conservative 41ms.  We only ever skip UP TO 4× to preserve quality.
+            double inferMs = m_lastInferMs;
+            if (inferMs > 0.0) {
+                // Exponential moving average so spikes don't overcorrect
+                m_avgInferMs = (m_avgInferMs < 1.0) ? inferMs
+                             : 0.85 * m_avgInferMs + 0.15 * inferMs;
+                // Frame budget: read from input media type if we have it, else 41ms
+                constexpr double kDefaultFrameMs = 41.67;  // 24fps
+                double budget = kDefaultFrameMs;
+                if (m_pInput && m_pInput->IsConnected()) {
+                    CMediaType mt; m_pInput->ConnectionMediaType(&mt);
+                    if (mt.formattype == FORMAT_VideoInfo &&
+                        mt.FormatLength() >= sizeof(VIDEOINFOHEADER)) {
+                        auto* vih = reinterpret_cast<const VIDEOINFOHEADER*>(mt.Format());
+                        if (vih->AvgTimePerFrame > 0)
+                            budget = (double)vih->AvgTimePerFrame / 10000.0;
+                    }
+                }
+                int newSkip = (budget > 0)
+                    ? std::max(1, std::min(4, (int)std::ceil(m_avgInferMs / budget)))
+                    : 1;
+                if (newSkip != m_skipEvery) {
+                    LOG_INFO("Frame skip rate updated: infer every ",
+                             newSkip, " frames  (avg=",
+                             (int)m_avgInferMs, "ms budget=", (int)budget, "ms)");
+                    m_skipEvery = newSkip;
+                }
+            }
         }
     }
-    if (!haveDepth) {
+    // If no new depth arrived, keep using m_depthRender as-is (retains last real depth).
+    // Only fill flat on the very first frames before any inference has completed.
+    if (!haveDepth && !m_hadRealDepth) {
         if (logInfo) LOG_DBG("Frame #",m_frameCount,": no depth yet – using flat");
-        if ((int)m_depthRender.size() != m_inW * m_inH)
-            m_depthRender.assign(m_inW * m_inH, 0.5f);
-        else
-            std::fill(m_depthRender.begin(), m_depthRender.end(), 0.5f);
+        size_t depthN = (size_t)m_inW * m_inH;
+        if (m_depthRender.size() != depthN)
+            m_depthRender.assign(depthN, 0.5f);
+        // else: keep existing content (already flat from StartStreaming)
     }
 
     // ── Stereo render directly into the DirectShow output sample ─────────────
@@ -564,11 +614,23 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         return E_FAIL;
     }
 
-    // Write directly into pDst — no intermediate m_outBuf copy (saves 16 MB memcpy/frame)
+    // Write directly into pDst — no intermediate copy
     auto tr0 = Clock::now();
-    m_stereo->Render(rgbaPtr, m_inW, m_inH, rgbaStride,
-                     m_depthRender.data(), cfg,
-                     pDst, outStride);
+    if (cfg.outputMode == OutputMode::DepthOnly) {
+        // Render depth map as greyscale directly to pDst (same resolution as input)
+        const float* d = m_depthRender.data();
+        int n = m_inW * m_inH;
+        if ((int)m_depthRender.size() >= n) {
+            for (int i = 0; i < n; ++i) {
+                BYTE v = (BYTE)(std::max(0.f, std::min(1.f, d[i])) * 255.f + 0.5f);
+                pDst[i*4+0] = v; pDst[i*4+1] = v; pDst[i*4+2] = v; pDst[i*4+3] = 255;
+            }
+        }
+    } else {
+        m_stereo->Render(rgbaPtr, m_inW, m_inH, rgbaStride,
+                         m_depthRender.data(), cfg,
+                         pDst, outStride);
+    }
     auto trMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         Clock::now() - tr0).count();
 

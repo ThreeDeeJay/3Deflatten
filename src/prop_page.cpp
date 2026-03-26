@@ -83,9 +83,10 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_SEP_SLIDER,    TBM_SETRANGE, TRUE, MAKELPARAM(0, SEP_TICKS));
         SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, SMOOTH_TICKS));
 
-        // Output Mode
+        // Output Mode — must match OutputMode enum order exactly
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Side-by-Side (SBS)");
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Top-and-Bottom (TAB)");
+        SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Depth Map only  (diagnostic)");
 
         // Infill mode – 3 options matching InfillMode enum
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inner  (bg behind edge)");
@@ -162,6 +163,23 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             if (FAILED(hr))
                 SetDlgItemTextW(hwnd, IDC_GPU_INFO,
                     L"Reload FAILED – check the log file.");
+            break;
+        }
+        if (ctl==IDC_APPLY_BTN && m_pFilter) {
+            // Apply ALL settings (config + model path) and reload the model.
+            // Unlike Reload-only, this also pushes convergence/separation/smoothing/
+            // mode changes that would otherwise only apply via the OK/Apply sheet button.
+            ReadControls(hwnd);
+            m_pFilter->SetConfig(&m_cfg);
+            m_pFilter->SetModelPath(m_modelPath);
+            SetDlgItemTextW(hwnd, IDC_GPU_INFO, L"Applying all settings…");
+            UpdateWindow(hwnd);
+            HRESULT hr = m_pFilter->ReloadModel();
+            RefreshStatus(hwnd);
+            if (FAILED(hr))
+                SetDlgItemTextW(hwnd, IDC_GPU_INFO,
+                    L"Apply FAILED – check the log file.");
+            SetDirty();
             break;
         }
         break;

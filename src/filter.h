@@ -83,6 +83,15 @@ private:
     // sample (pDst) so there is no intermediate output buffer copy.
     std::vector<BYTE>  m_convBuf;       // NV12/YUY2 → BGRA (srcW*srcH*4 bytes)
     std::vector<float> m_depthRender;   // depth for current render (zero-copy swap from cache)
+    bool               m_hadRealDepth = false; // true once we've received a real depth map
+
+    // Adaptive frame skipping: when inference is slower than the video frame rate,
+    // skip posting frames to the worker so we always infer the LATEST frame rather
+    // than a frame that will never be displayed.
+    // m_skipEvery = 1 → infer every frame; 2 → every other; 3 → every third, etc.
+    int                m_skipEvery    = 1;      // updated each time worker returns
+    int                m_skipCounter  = 0;      // counts Transform() calls for skip logic
+    double             m_avgInferMs   = 0.0;    // exponential moving average of inference ms
 
     // ── Async depth worker (single-slot latest-wins) ──────────────────────────
     // Transform() converts the frame to BGRA and posts it here, then returns
@@ -114,4 +123,5 @@ private:
     int                     m_cachedW    = 0;
     int                     m_cachedH    = 0;
     bool                    m_cacheReady = false;
+    double                  m_lastInferMs = 0.0;  // inference time of most recent result
 };

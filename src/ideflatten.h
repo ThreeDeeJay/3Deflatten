@@ -6,6 +6,7 @@
 enum class OutputMode : int {
     SideBySide   = 0,   // full-res SBS  (output width  = 2x input)
     TopAndBottom = 1,   // full-res TAB  (output height = 2x input)
+    DepthOnly    = 2,   // passthrough-size output showing the depth map in greyscale
 };
 
 // Occlusion-gap infill algorithm applied in the stereo warp shader.

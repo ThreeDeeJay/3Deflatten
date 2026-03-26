@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <shlobj.h>
 #include <winreg.h>
+#include <vector>
+#pragma comment(lib, "Version.lib")  // GetFileVersionInfoW / VerQueryValueW
 
 constexpr float DepthEstimator::MEAN[3];
 constexpr float DepthEstimator::STD[3];
@@ -707,12 +709,63 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
             LOG_INFO("DirectML EP: not compiled in (build uses GPU/CUDA backend)");
             return false;
 #else
-            // directml.dll ships with Windows 10 1903+ or is bundled next to the .ax
+            // ── Dependency check: directml.dll ────────────────────────────────
             DWORD _dmlErr = DllLoadable(L"directml.dll");
             if (_dmlErr != 0) {
-                LOG_WARN("directml.dll not loadable (error ", _dmlErr, ") – DirectML EP skipped");
+                LOG_WARN("directml.dll not loadable (error=", _dmlErr, ")");
+                LOG_WARN("  DirectML requires Windows 10 1903+ or the bundled directml.dll");
+                LOG_WARN("  next to the .ax file.  Possible causes:");
+                LOG_WARN("    error=2 (not found): directml.dll missing from filter dir and System32");
+                LOG_WARN("    error=193 (bad image): wrong architecture (x86 vs x64)");
+                LOG_WARN("    error=14001 (side-by-side): VC++ runtime mismatch");
+
+                // Log what IS in the DLL search path to help diagnose
+                wchar_t dmlPath[MAX_PATH] = {};
+                if (SearchPathW(nullptr, L"directml.dll", nullptr,
+                                MAX_PATH, dmlPath, nullptr) > 0)
+                    LOG_WARN("  Found at: ", std::wstring(dmlPath),
+                             "  but LoadLibrary returned error=", _dmlErr);
+                else
+                    LOG_WARN("  SearchPath: not found in any DLL search directory");
                 return false;
             }
+
+            // Log the directml.dll version for diagnostics
+            {
+                wchar_t dmlVer[MAX_PATH] = {};
+                if (SearchPathW(nullptr, L"directml.dll", nullptr,
+                                MAX_PATH, dmlVer, nullptr) > 0) {
+                    DWORD dummy = 0;
+                    DWORD vsz = GetFileVersionInfoSizeW(dmlVer, &dummy);
+                    if (vsz > 0) {
+                        std::vector<BYTE> vbuf(vsz);
+                        if (GetFileVersionInfoW(dmlVer, 0, vsz, vbuf.data())) {
+                            VS_FIXEDFILEINFO* fi = nullptr;
+                            UINT filen = 0;
+                            if (VerQueryValueW(vbuf.data(), L"\\",
+                                              reinterpret_cast<LPVOID*>(&fi), &filen) && fi) {
+                                LOG_INFO("  directml.dll version: ",
+                                         HIWORD(fi->dwFileVersionMS), ".",
+                                         LOWORD(fi->dwFileVersionMS), ".",
+                                         HIWORD(fi->dwFileVersionLS), ".",
+                                         LOWORD(fi->dwFileVersionLS));
+                                LOG_INFO("  directml.dll path: ", std::wstring(dmlVer));
+                            }
+                        }
+                    }
+                }
+
+                // Check that a D3D12 device can actually be created (DX12 required)
+                HMODULE hD3D12 = LoadLibraryExW(L"d3d12.dll", nullptr,
+                    LOAD_LIBRARY_SEARCH_SYSTEM32);
+                if (!hD3D12) {
+                    LOG_WARN("  d3d12.dll not found – DirectML requires DX12.");
+                    LOG_WARN("  Update Windows or graphics drivers.");
+                    return false;
+                }
+                FreeLibrary(hD3D12);
+            }
+
             try {
                 m_sessionOpts.AppendExecutionProvider("DML", {{"device_id", "0"}});
                 outInfo = L"DirectML (DX12 GPU)";
@@ -730,6 +783,16 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 return true;
             } catch (const Ort::Exception& e) {
                 LOG_WARN("DirectML EP init failed: ", e.what());
+                LOG_WARN("  This usually means one of:");
+                LOG_WARN("    (A) ORT DirectML EP was not built into this onnxruntime.dll");
+                LOG_WARN("        (message: 'DML execution provider is not supported in this build')");
+                LOG_WARN("        Fix: ensure you are using the DirectML NuGet build (Win64/)");
+                LOG_WARN("        not the GPU/CUDA zip build (Win64_GPU/).  Check which .ax you");
+                LOG_WARN("        registered: the DirectML build is 3Deflatten_x64.ax in Win64/.");
+                LOG_WARN("    (B) directml.dll version too old for this ORT build.");
+                LOG_WARN("        Try bundling a newer directml.dll from the NuGet package:");
+                LOG_WARN("        Microsoft.AI.DirectML — copy directml.dll next to the .ax.");
+                LOG_WARN("    (C) The GPU does not support the required DX12 feature level.");
                 return false;
             }
 #endif // ORT_ENABLE_DML

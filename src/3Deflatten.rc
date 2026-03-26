@@ -7,10 +7,11 @@ BEGIN
     IDS_PROP_TITLE  "3Deflatten"
 END
 
-IDD_PROP_PAGE DIALOGEX 0, 0, 298, 258
+IDD_PROP_PAGE DIALOGEX 0, 0, 298, 272
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
+    // Stereo Parameters
     GROUPBOX  "Stereo Parameters", -1,              4,   2, 290,  94
     LTEXT     "Convergence (screen-plane depth, 0-1):", -1, 10, 14, 200, 10
     CONTROL   "", IDC_CONV_SLIDER, "msctls_trackbar32",
@@ -25,6 +26,7 @@ BEGIN
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  84, 242,  14
     LTEXT     "0.40", IDC_SMOOTH_LABEL,            256,  84,  32,  14, SS_RIGHT
 
+    // Output (Mode + Flip + Infill)
     GROUPBOX  "Output",    -1,                      4, 102, 140,  54
     LTEXT     "Mode:",     -1,                     10, 115,  28,  10
     COMBOBOX  IDC_MODE_COMBO,                      40, 113, 100,  60,
@@ -34,20 +36,26 @@ BEGIN
     COMBOBOX  IDC_INFILL_COMBO,                    40, 143, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
+    // Inference (Provider)
     GROUPBOX  "Inference", -1,                    150, 102, 144,  36
     LTEXT     "Provider:", -1,                    156, 115,  36,  10
     COMBOBOX  IDC_GPU_COMBO,                      194, 113,  94,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
+    // ONNX Model
     GROUPBOX  "ONNX Model", -1,                     4, 162, 290,  50
     LTEXT     "File:",     -1,                     10, 176,  20,  10
     COMBOBOX  IDC_MODEL_COMBO,                     32, 174, 200,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON "Reload",  IDC_RELOAD_BTN,         236, 172,  52,  14
+    PUSHBUTTON "Reload",   IDC_RELOAD_BTN,        236, 172,  52,  14
     LTEXT     "Switching model or provider takes effect after Reload.", -1,
                                                    10, 192, 278,  10
 
-    GROUPBOX  "Active Inference Status", -1,        4, 218, 290,  34
-    LTEXT     "", IDC_GPU_INFO,                    10, 231, 278,  16,
+    // Apply row – applies ALL settings and reloads the model immediately
+    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 216, 290, 14
+
+    // Status
+    GROUPBOX  "Active Inference Status", -1,        4, 234, 290,  34
+    LTEXT     "", IDC_GPU_INFO,                    10, 247, 278,  16,
               SS_NOPREFIX | SS_ENDELLIPSIS
 END
