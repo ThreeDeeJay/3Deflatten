@@ -95,12 +95,13 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"EdgeClamp  (SuperDepth3D style)");
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inpaint  (3D Photo bilateral)");
 
-        // GPU Provider – 5 options
+        // GPU Provider — must match GPUProvider enum order exactly
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Auto (best available)");
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"TensorRT  (NVIDIA, fastest – slow 1st run)");
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"CUDA  (NVIDIA, fast)");
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"DirectML  (any DX12 GPU)");
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"CPU  (slow, always works)");
+        SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"TensorRT-RTX  (NVIDIA, fastest – unified build only)");
 
         PopulateModelCombo(hwnd);
         PopulateControls(hwnd);

@@ -33,11 +33,12 @@ enum class InfillMode : int {
 };
 
 enum class GPUProvider : int {
-    Auto      = 0,   // best available: TensorRT -> CUDA -> DirectML -> CPU
-    TensorRT  = 1,   // NVIDIA TensorRT  (fastest;  requires CUDA + TRT SDK at runtime)
-    CUDA      = 2,   // NVIDIA CUDA      (fast;     requires CUDA at runtime)
-    DirectML  = 3,   // DX12 / DirectML  (good;     any modern GPU, Windows 10 1903+)
-    CPU       = 4,   // CPU only         (slow;     always works)
+    Auto         = 0,   // best available: TRT-RTX -> TensorRT -> CUDA -> DirectML -> CPU
+    TensorRT     = 1,   // NVIDIA TensorRT  (fast;    requires CUDA + TRT SDK at runtime)
+    CUDA         = 2,   // NVIDIA CUDA      (fast;     requires CUDA at runtime)
+    DirectML     = 3,   // DX12 / DirectML  (good;     any modern GPU, Windows 10 1903+)
+    CPU          = 4,   // CPU only         (slow;     always works)
+    TensorRTRtx  = 5,   // NVIDIA TRT-RTX EP (fastest; requires ORT built with --use_nv_tensorrt_rtx)
 };
 
 struct DeflattenConfig {

@@ -656,6 +656,29 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
     // On failure (DLL absent, CUDA not installed, ORT exception) returns false.
     auto tryEP = [&](GPUProvider ep) -> bool {
 
+        // ── TensorRT RTX ─────────────────────────────────────────────────────
+        // Requires ORT built from source with --use_nv_tensorrt_rtx.
+        // The EP is compiled into onnxruntime.dll directly (no side DLL).
+        // Provider string: kNvTensorRTRTXExecutionProvider = "NvTensorRtRtx"
+        if (ep == GPUProvider::TensorRTRtx) {
+#ifndef ORT_ENABLE_TRTRTX
+            LOG_INFO("TRT-RTX EP: not compiled in (build needs ORT built with --use_nv_tensorrt_rtx)");
+            return false;
+#else
+            try {
+                m_sessionOpts.AppendExecutionProvider("NvTensorRtRtx", {});
+                outInfo = L"TensorRT-RTX (built-in EP)";
+                LOG_INFO("Execution provider: TensorRT-RTX (NvTensorRtRtx)");
+                return true;
+            } catch (const Ort::Exception& e) {
+                LOG_WARN("TRT-RTX EP init failed: ", e.what());
+                LOG_WARN("  Ensure onnxruntime.dll was built with --use_nv_tensorrt_rtx");
+                LOG_WARN("  and that TensorRT-RTX runtime libs are present.");
+                return false;
+            }
+#endif
+        }
+
         // ── TensorRT ─────────────────────────────────────────────────────────
         if (ep == GPUProvider::TensorRT) {
 #ifndef ORT_ENABLE_TENSORRT
@@ -829,7 +852,11 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
     };
 
     // ── Explicit provider selection ───────────────────────────────────────────
-    // Walk down the fallback chain from the requested provider.
+    if (provider == GPUProvider::TensorRTRtx) {
+        if (tryEP(GPUProvider::TensorRTRtx)) return;
+        LOG_INFO("TRT-RTX requested but unavailable – trying TensorRT");
+        provider = GPUProvider::TensorRT;
+    }
     if (provider == GPUProvider::TensorRT) {
         if (tryEP(GPUProvider::TensorRT)) return;
         LOG_INFO("TensorRT requested but unavailable – trying CUDA");
@@ -853,6 +880,7 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
 
     // ── Auto: try best available in order ────────────────────────────────────
     // Auto = 0, so we reach here only when provider == Auto from the start.
+    if (tryEP(GPUProvider::TensorRTRtx)) return;
     if (tryEP(GPUProvider::TensorRT)) return;
     if (tryEP(GPUProvider::CUDA))     return;
     if (tryEP(GPUProvider::DirectML)) return;
