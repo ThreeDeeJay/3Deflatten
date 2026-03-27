@@ -659,16 +659,16 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
         // ── TensorRT RTX ─────────────────────────────────────────────────────
         // Requires ORT built from source with --use_nv_tensorrt_rtx.
         // The EP is compiled into onnxruntime.dll directly (no side DLL).
-        // Provider string: kNvTensorRTRTXExecutionProvider = "NvTensorRtRtx"
-        if (ep == GPUProvider::TensorRTRtx) {
+        // Provider string: kNvTensorRTRTXExecutionProvider = "NvTensorRTRTX"
+        if (ep == GPUProvider::TensorRTRTX) {
 #ifndef ORT_ENABLE_TRTRTX
             LOG_INFO("TRT-RTX EP: not compiled in (build needs ORT built with --use_nv_tensorrt_rtx)");
             return false;
 #else
             try {
-                m_sessionOpts.AppendExecutionProvider("NvTensorRtRtx", {});
+                m_sessionOpts.AppendExecutionProvider("NvTensorRTRTX", {});
                 outInfo = L"TensorRT-RTX (built-in EP)";
-                LOG_INFO("Execution provider: TensorRT-RTX (NvTensorRtRtx)");
+                LOG_INFO("Execution provider: TensorRT-RTX (NvTensorRTRTX)");
                 return true;
             } catch (const Ort::Exception& e) {
                 LOG_WARN("TRT-RTX EP init failed: ", e.what());
@@ -852,8 +852,8 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
     };
 
     // ── Explicit provider selection ───────────────────────────────────────────
-    if (provider == GPUProvider::TensorRTRtx) {
-        if (tryEP(GPUProvider::TensorRTRtx)) return;
+    if (provider == GPUProvider::TensorRTRTX) {
+        if (tryEP(GPUProvider::TensorRTRTX)) return;
         LOG_INFO("TRT-RTX requested but unavailable – trying TensorRT");
         provider = GPUProvider::TensorRT;
     }
@@ -880,7 +880,7 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
 
     // ── Auto: try best available in order ────────────────────────────────────
     // Auto = 0, so we reach here only when provider == Auto from the start.
-    if (tryEP(GPUProvider::TensorRTRtx)) return;
+    if (tryEP(GPUProvider::TensorRTRTX)) return;
     if (tryEP(GPUProvider::TensorRT)) return;
     if (tryEP(GPUProvider::CUDA))     return;
     if (tryEP(GPUProvider::DirectML)) return;
