@@ -659,16 +659,16 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
         // ── TensorRT RTX ─────────────────────────────────────────────────────
         // Requires ORT built from source with --use_nv_tensorrt_rtx.
         // The EP is compiled into onnxruntime.dll directly (no side DLL).
-        // Provider string: kNvTensorRTRTXExecutionProvider = "NvTensorRtRtx"
+        // Provider string: NvTensorRTRTXExecutionProvider = "NvTensorRTRTX"
         if (ep == GPUProvider::TensorRTRtx) {
 #ifndef ORT_ENABLE_TRTRTX
             LOG_INFO("TRT-RTX EP: not compiled in (build needs ORT built with --use_nv_tensorrt_rtx)");
             return false;
 #else
             try {
-                m_sessionOpts.AppendExecutionProvider("NvTensorRtRtx", {});
+                m_sessionOpts.AppendExecutionProvider("NvTensorRTRTX", {});
                 outInfo = L"TensorRT-RTX (built-in EP)";
-                LOG_INFO("Execution provider: TensorRT-RTX (NvTensorRtRtx)");
+                LOG_INFO("Execution provider: TensorRT-RTX (NvTensorRTRTX)");
                 return true;
             } catch (const Ort::Exception& e) {
                 LOG_WARN("TRT-RTX EP init failed: ", e.what());
@@ -678,7 +678,7 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
             }
 #endif
         }
-
+NvTensorRTRTX
         // ── TensorRT ─────────────────────────────────────────────────────────
         if (ep == GPUProvider::TensorRT) {
 #ifndef ORT_ENABLE_TENSORRT
