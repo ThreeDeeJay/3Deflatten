@@ -190,8 +190,7 @@ jobs:
 
       - name: Deploy
         run: |
-          copy "3Deflatten.ini"                          "Release/Win64/"
-          copy "3Deflatten.ini"                          "Release/Win64_GPU/"
+          copy "3Deflatten.ini"                          "Release/Win64_Unified/"
           copy "README.md"                               "Release/ReadMe.txt"
           copy "LICENSE"                                 "Release/License.txt"
           copy "scripts/register.bat"                    "Release/"
@@ -200,6 +199,8 @@ jobs:
           copy "scripts/collect_runtime_dlls.py"         "Release/"
           copy "scripts/collect_runtime_dlls_cuda12.py"  "Release/"
           copy "scripts/collect_runtime_dlls_cuda13.py"  "Release/"
+#copy "3Deflatten.ini"                          "Release/Win64/"
+#copy "3Deflatten.ini"                          "Release/Win64_GPU/"
 #copy "3Deflatten.ini"                   "Release/Win32/"
 #copy -r "Artifacts/Win64"               "Release"
 #copy -r "Artifacts/Win64_GPU"           "Release"
