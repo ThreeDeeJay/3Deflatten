@@ -76,10 +76,24 @@ target_compile_options(strmbase PRIVATE
 #       Use collect_runtime_dlls_cuda13.py to bundle CUDA 13.0 + cuDNN 9 + TRT DLLs.
 #       Note: x64 only.
 #
-# Select with:  cmake -B build -DORT_BACKEND=GPU   (or GPU13, DirectML)
+#   Unified             –  ORT built from source (CUDA 12.9.1 / TRT 10.16.0.72 / DML / TRT-RTX)
+#       EPs available at runtime: TRT-RTX, TensorRT, CUDA, DirectML, CPU
+#       Defines: ORT_ENABLE_DML, ORT_ENABLE_CUDA, ORT_ENABLE_TENSORRT, ORT_ENABLE_TRTRTX,
+#                ORT_CUDA_MAJOR=12
+#       Requires: ORT_UNIFIED_DIR pointing to your custom ORT build output.
+#       Build ORT with:
+#           build.bat --config Release --use_dml --use_cuda --cudnn_home <path>
+#                     --cuda_home <path> --use_tensorrt --tensorrt_home <trt_path>
+#                     --use_nv_tensorrt_rtx --tensorrt_rtx_home <trtrtx_path>
+#                     --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF
+#       Output dir: Win64_Unified
+#       Use collect_runtime_dlls_cuda12.py to bundle runtime DLLs.
+#       Note: x64 only.
 #
-set(ORT_BACKEND "DirectML" CACHE STRING "ORT inference backend: DirectML, GPU, or GPU13")
-set_property(CACHE ORT_BACKEND PROPERTY STRINGS "DirectML" "GPU" "GPU13")
+# Select with:  cmake -B build -DORT_BACKEND=GPU   (or GPU13, DirectML, Unified)
+#
+set(ORT_BACKEND "DirectML" CACHE STRING "ORT inference backend: DirectML, GPU, GPU13, or Unified")
+set_property(CACHE ORT_BACKEND PROPERTY STRINGS "DirectML" "GPU" "GPU13" "Unified")
 message(STATUS "ORT backend: ${ORT_BACKEND}")
 
 # ORT version per backend
@@ -87,6 +101,8 @@ if(ORT_BACKEND STREQUAL "GPU13")
     set(ORT_VERSION "1.24.3")
 elseif(ORT_BACKEND STREQUAL "GPU")
     set(ORT_VERSION "1.18.1")
+elseif(ORT_BACKEND STREQUAL "Unified")
+    set(ORT_VERSION "custom")  # user-built from source
 else()
     set(ORT_VERSION "1.24.3")   # DirectML / CPU NuGet
 endif()
@@ -205,6 +221,87 @@ if(ORT_BACKEND STREQUAL "GPU" OR ORT_BACKEND STREQUAL "GPU13")
         "${ORT_ZIP_ROOT}/lib/onnxruntime_providers_tensorrt.dll"
     )
     set(ORT_COMPILE_DEFS ORT_ENABLE_TENSORRT ORT_ENABLE_CUDA "ORT_CUDA_MAJOR=${ORT_CUDA_MAJOR_VAL}")
+
+elseif(ORT_BACKEND STREQUAL "Unified")
+    # ── Unified backend: user-supplied ORT built from source ──────────────────
+    # Supports TRT-RTX + TensorRT + CUDA + DirectML + CPU in a single .ax.
+    # Set ORT_UNIFIED_DIR to the root of your ORT build output, e.g.:
+    #   cmake -B build -DORT_BACKEND=Unified -DORT_UNIFIED_DIR=C:\ort_build\Release
+    # The directory must contain:
+    #   include/             ORT headers
+    #   lib/onnxruntime.lib  import lib
+    #   lib/onnxruntime.dll  (or bin/onnxruntime.dll for some build configs)
+    if(NOT ARCH_SUFFIX STREQUAL "x64")
+        message(FATAL_ERROR "ORT_BACKEND=Unified is x64 only.")
+    endif()
+    set(ORT_UNIFIED_DIR "" CACHE PATH
+        "Root of ORT source build output (for ORT_BACKEND=Unified)")
+    if(NOT ORT_UNIFIED_DIR OR NOT EXISTS "${ORT_UNIFIED_DIR}")
+        message(FATAL_ERROR
+            "ORT_BACKEND=Unified requires ORT_UNIFIED_DIR to point to your ORT build.\n"
+            "  cmake -B build -DORT_BACKEND=Unified -DORT_UNIFIED_DIR=<ort_build_root>\n"
+            "Build ORT with:\n"
+            "  build.bat --config Release --use_dml --use_cuda --cudnn_home <path>\n"
+            "            --cuda_home <path> --use_tensorrt --tensorrt_home <trt_path>\n"
+            "            --use_nv_tensorrt_rtx --tensorrt_rtx_home <trtrtx_path>\n"
+            "            --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF")
+    endif()
+
+    set(ORT_INC "${ORT_UNIFIED_DIR}/include")
+    # Probe lib/ then bin/ for .lib (source build can put it in either)
+    if(EXISTS "${ORT_UNIFIED_DIR}/lib/onnxruntime.lib")
+        set(ORT_LIB "${ORT_UNIFIED_DIR}/lib/onnxruntime.lib")
+    elseif(EXISTS "${ORT_UNIFIED_DIR}/Release/onnxruntime.lib")
+        set(ORT_LIB "${ORT_UNIFIED_DIR}/Release/onnxruntime.lib")
+    else()
+        file(GLOB_RECURSE _U_LIB "${ORT_UNIFIED_DIR}/*onnxruntime.lib")
+        list(FILTER _U_LIB EXCLUDE REGEX "_providers_")
+        if(_U_LIB)
+            list(GET _U_LIB 0 ORT_LIB)
+        else()
+            set(ORT_LIB "${ORT_UNIFIED_DIR}/lib/onnxruntime.lib")  # will be caught below
+        endif()
+    endif()
+    # Same probe for DLL
+    if(EXISTS "${ORT_UNIFIED_DIR}/lib/onnxruntime.dll")
+        set(ORT_DLL "${ORT_UNIFIED_DIR}/lib/onnxruntime.dll")
+    elseif(EXISTS "${ORT_UNIFIED_DIR}/Release/onnxruntime.dll")
+        set(ORT_DLL "${ORT_UNIFIED_DIR}/Release/onnxruntime.dll")
+    else()
+        file(GLOB_RECURSE _U_DLL "${ORT_UNIFIED_DIR}/*onnxruntime.dll")
+        list(FILTER _U_DLL EXCLUDE REGEX "_providers_")
+        if(_U_DLL)
+            list(GET _U_DLL 0 ORT_DLL)
+        else()
+            set(ORT_DLL "${ORT_UNIFIED_DIR}/lib/onnxruntime.dll")
+        endif()
+    endif()
+
+    # Collect provider DLLs (shared, cuda, tensorrt) if present
+    set(ORT_EXTRA_DLLS "")
+    foreach(_prov shared cuda tensorrt)
+        foreach(_search
+                "${ORT_UNIFIED_DIR}/lib/onnxruntime_providers_${_prov}.dll"
+                "${ORT_UNIFIED_DIR}/Release/onnxruntime_providers_${_prov}.dll")
+            if(EXISTS "${_search}")
+                list(APPEND ORT_EXTRA_DLLS "${_search}")
+                break()
+            endif()
+        endforeach()
+    endforeach()
+
+    # All four EPs + CUDA 12
+    set(ORT_COMPILE_DEFS
+        ORT_ENABLE_DML
+        ORT_ENABLE_CUDA
+        ORT_ENABLE_TENSORRT
+        ORT_ENABLE_TRTRTX
+        "ORT_CUDA_MAJOR=12")
+
+    message(STATUS "ORT Unified build:")
+    message(STATUS "  ORT_INC: ${ORT_INC}")
+    message(STATUS "  ORT_LIB: ${ORT_LIB}")
+    message(STATUS "  ORT_DLL: ${ORT_DLL}")
 
 elseif(ARCH_SUFFIX STREQUAL "x64")
     # ── DirectML backend, x64 (DirectML + CPU) ────────────────────────────────
@@ -366,6 +463,8 @@ if(ORT_BACKEND STREQUAL "GPU13")
     set(AX_SUBDIR "Win64_GPU")       # same folder as before -- the "production" GPU build
 elseif(ORT_BACKEND STREQUAL "GPU")
     set(AX_SUBDIR "Win64_GPU11")     # distinct folder for the CUDA 11 test build
+elseif(ORT_BACKEND STREQUAL "Unified")
+    set(AX_SUBDIR "Win64_Unified")   # all EPs: TRT-RTX + TRT + CUDA + DML + CPU
 else()
     if(ARCH_SUFFIX STREQUAL "x64")
         set(AX_SUBDIR "Win64")

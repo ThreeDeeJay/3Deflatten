@@ -38,7 +38,7 @@ enum class GPUProvider : int {
     CUDA         = 2,   // NVIDIA CUDA      (fast;     requires CUDA at runtime)
     DirectML     = 3,   // DX12 / DirectML  (good;     any modern GPU, Windows 10 1903+)
     CPU          = 4,   // CPU only         (slow;     always works)
-    TensorRTRTX  = 5,   // NVIDIA TRT-RTX EP (fastest; requires ORT built with --use_nv_tensorrt_rtx)
+    TensorRTRtx  = 5,   // NVIDIA TRT-RTX EP (fastest; requires ORT built with --use_nv_tensorrt_rtx)
 };
 
 struct DeflattenConfig {

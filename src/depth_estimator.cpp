@@ -303,6 +303,14 @@ static void LogCudaDependencies(bool includeTrt) {
     LOG_INFO("  NOTE: ORT 1.24.3 gpu_cuda13 was compiled against CUDA 13.0.");
     LOG_INFO("        Using CUDA 13.1+ DLLs at runtime causes error=1114 (version mismatch).");
     LOG_INFO("  NOTE: Driver 572+ required for CUDA 13.0.");
+#elif ORT_CUDA_MAJOR == 12
+    LOG_INFO("  Unified build requirements (CUDA 12.9.1 / TRT 10.16.0.72):");
+    LOG_INFO("    CUDA 12.x  (cudart64_12.dll)");
+    LOG_INFO("    cuDNN 9.x  (cudnn64_9.dll + 7 split DLLs)");
+    if (includeTrt)
+        LOG_INFO("    TensorRT 10.16.0.72 (CUDA 12.9 build)");
+    LOG_INFO("  NOTE: Run collect_runtime_dlls_cuda12.py --trt-zip <trt.zip> to bundle DLLs.");
+    LOG_INFO("  NOTE: Driver 525+ required for CUDA 12.x.");
 #else
     LOG_INFO("  ORT 1.18.1 GPU build requirements:");
     LOG_INFO("    CUDA 11.x  (cudart64_110.dll)");
@@ -326,15 +334,25 @@ static void LogCudaDependencies(bool includeTrt) {
     ProbeDep(L"cublas64_13.dll",    L"cuBLAS 13 -- in CUDA Toolkit bin");
     ProbeDep(L"cublasLt64_13.dll",  L"cuBLAS-Lt 13 -- in CUDA Toolkit bin");
     ProbeDep(L"cufft64_12.dll",     L"cuFFT 12 -- in CUDA Toolkit bin");
-    // nvJitLink: required by ORT 1.22+ CUDA EP (JIT kernel compilation)
     bool hasJitLink = ProbeDep(L"nvJitLink_130_0.dll", L"CUDA 13 JIT-Link (required by ORT CUDA EP)");
     if (!hasJitLink) LOG_WARN("  nvJitLink_130_0.dll missing -- CUDA EP will fail even if other DLLs are present.");
-    // cuSolver + cuRand: loaded by ORT CUDA EP at init time (not lazy)
     ProbeDep(L"cusolver64_11.dll",  L"cuSolver 11 -- loaded by ORT CUDA EP at startup");
     ProbeDep(L"curand64_10.dll",    L"cuRand 10 -- loaded by ORT CUDA EP at startup");
-    // cuDNN 9 (split library layout)
     bool hasCudnn = ProbeDep(L"cudnn64_9.dll", L"cuDNN 9.x main library");
     if (!hasCudnn) LOG_WARN("  -> cudnn64_9.dll not found. Run collect_runtime_dlls_cuda13.py.");
+#elif ORT_CUDA_MAJOR == 12
+    // ── CUDA 12.x ─────────────────────────────────────────────────────────
+    bool hasCuda = ProbeDep(L"cudart64_12.dll", L"CUDA 12.x runtime");
+    if (!hasCuda) LOG_WARN("  -> cudart64_12.dll not found. Run collect_runtime_dlls_cuda12.py.");
+    ProbeDep(L"cublas64_12.dll",    L"cuBLAS 12 -- in CUDA Toolkit bin");
+    ProbeDep(L"cublasLt64_12.dll",  L"cuBLAS-Lt 12 -- in CUDA Toolkit bin");
+    ProbeDep(L"cufft64_12.dll",     L"cuFFT 12 -- in CUDA Toolkit bin");
+    bool hasJitLink = ProbeDep(L"nvJitLink_120_0.dll", L"CUDA 12 JIT-Link (required by ORT CUDA EP)");
+    if (!hasJitLink) LOG_WARN("  nvJitLink_120_0.dll missing -- CUDA EP will fail even if other DLLs are present.");
+    ProbeDep(L"cusolver64_11.dll",  L"cuSolver 11 -- loaded by ORT CUDA EP at startup");
+    ProbeDep(L"curand64_10.dll",    L"cuRand 10 -- loaded by ORT CUDA EP at startup");
+    bool hasCudnn = ProbeDep(L"cudnn64_9.dll", L"cuDNN 9.x main library");
+    if (!hasCudnn) LOG_WARN("  -> cudnn64_9.dll not found. Run collect_runtime_dlls_cuda12.py.");
 #else
     // ── CUDA 11.x ─────────────────────────────────────────────────────────
     bool hasCuda = ProbeDep(L"cudart64_110.dll", L"CUDA 11.x runtime");
@@ -342,24 +360,23 @@ static void LogCudaDependencies(bool includeTrt) {
     ProbeDep(L"cublas64_11.dll",   L"cuBLAS 11 -- in CUDA Toolkit bin");
     ProbeDep(L"cublasLt64_11.dll", L"cuBLAS-Lt 11 -- in CUDA Toolkit bin");
     ProbeDep(L"cufft64_10.dll",    L"cuFFT 10 -- in CUDA Toolkit bin");
-    // cuSolver + cuRand: loaded by ORT CUDA EP at init time
     ProbeDep(L"cusolver64_11.dll", L"cuSolver 11 -- loaded by ORT CUDA EP at startup");
     ProbeDep(L"curand64_10.dll",   L"cuRand 10 -- loaded by ORT CUDA EP at startup");
-    // cuDNN 8 (monolithic + split infer/train DLLs)
     bool hasCudnn = ProbeDep(L"cudnn64_8.dll", L"cuDNN 8.x main library");
     if (!hasCudnn) LOG_WARN("  -> cudnn64_8.dll not found. Run collect_runtime_dlls.py.");
 #endif
 
     if (includeTrt) {
         LOG_INFO("");
-#if ORT_CUDA_MAJOR == 13
-        LOG_INFO("  TensorRT 10.13.x libraries (CUDA 13.0 build):");
-        LOG_INFO("  NOTE: zlibwapi.dll is NOT required by TRT 10.13+.");
-        ProbeDep(L"nvinfer_10.dll",          L"TRT 10.13+ inference engine");
-        ProbeDep(L"nvonnxparser_10.dll",     L"TRT 10.13+ ONNX parser");
-        ProbeDep(L"nvinfer_dispatch_10.dll", L"TRT 10.13+ dispatch runtime");
-        ProbeDep(L"nvinfer_lean_10.dll",     L"TRT 10.13+ lean runtime");
-        ProbeDep(L"nvinfer_plugin_10.dll",   L"TRT 10.13+ plugins");
+#if ORT_CUDA_MAJOR >= 12
+        // TRT 10.3+ uses _10 suffix on all main DLLs
+        LOG_INFO("  TensorRT 10.x libraries (CUDA 12/13 build):");
+        LOG_INFO("  NOTE: zlibwapi.dll is NOT required by TRT 10.3+.");
+        ProbeDep(L"nvinfer_10.dll",          L"TRT 10.x inference engine");
+        ProbeDep(L"nvonnxparser_10.dll",     L"TRT 10.x ONNX parser");
+        ProbeDep(L"nvinfer_dispatch_10.dll", L"TRT 10.x dispatch runtime");
+        ProbeDep(L"nvinfer_lean_10.dll",     L"TRT 10.x lean runtime");
+        ProbeDep(L"nvinfer_plugin_10.dll",   L"TRT 10.x plugins");
 #else
         LOG_INFO("  TensorRT 10.0.x libraries (CUDA 11.8 build):");
         LOG_INFO("  NOTE: TRT 10.0.x uses plain names (nvinfer.dll, NOT nvinfer_10.dll).");
@@ -384,6 +401,11 @@ static bool CudaDriverPresent() {
 #if ORT_CUDA_MAJOR == 13
     if (DllLoadable(L"cudart64_13.dll") != 0) {
         LOG_WARN("cudart64_13.dll not found. Run collect_runtime_dlls_cuda13.py.");
+        return false;
+    }
+#elif ORT_CUDA_MAJOR == 12
+    if (DllLoadable(L"cudart64_12.dll") != 0) {
+        LOG_WARN("cudart64_12.dll not found. Run collect_runtime_dlls_cuda12.py.");
         return false;
     }
 #else
@@ -659,16 +681,18 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
         // ── TensorRT RTX ─────────────────────────────────────────────────────
         // Requires ORT built from source with --use_nv_tensorrt_rtx.
         // The EP is compiled into onnxruntime.dll directly (no side DLL).
-        // Provider string: kNvTensorRTRTXExecutionProvider = "NvTensorRTRTX"
-        if (ep == GPUProvider::TensorRTRTX) {
+        // Provider string is kNvTensorRTRTXExecutionProvider, which ORT defines as
+        // "NvTensorRTRTXExecutionProvider" — must match exactly what GetAvailableProviders()
+        // enumerates.  AppendExecutionProvider uses the same registry key.
+        if (ep == GPUProvider::TensorRTRtx) {
 #ifndef ORT_ENABLE_TRTRTX
             LOG_INFO("TRT-RTX EP: not compiled in (build needs ORT built with --use_nv_tensorrt_rtx)");
             return false;
 #else
             try {
-                m_sessionOpts.AppendExecutionProvider("NvTensorRTRTX", {});
+                m_sessionOpts.AppendExecutionProvider("NvTensorRTRTXExecutionProvider", {});
                 outInfo = L"TensorRT-RTX (built-in EP)";
-                LOG_INFO("Execution provider: TensorRT-RTX (NvTensorRTRTX)");
+                LOG_INFO("Execution provider: TensorRT-RTX (NvTensorRTRTXExecutionProvider)");
                 return true;
             } catch (const Ort::Exception& e) {
                 LOG_WARN("TRT-RTX EP init failed: ", e.what());
@@ -852,8 +876,8 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
     };
 
     // ── Explicit provider selection ───────────────────────────────────────────
-    if (provider == GPUProvider::TensorRTRTX) {
-        if (tryEP(GPUProvider::TensorRTRTX)) return;
+    if (provider == GPUProvider::TensorRTRtx) {
+        if (tryEP(GPUProvider::TensorRTRtx)) return;
         LOG_INFO("TRT-RTX requested but unavailable – trying TensorRT");
         provider = GPUProvider::TensorRT;
     }
@@ -880,7 +904,7 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
 
     // ── Auto: try best available in order ────────────────────────────────────
     // Auto = 0, so we reach here only when provider == Auto from the start.
-    if (tryEP(GPUProvider::TensorRTRTX)) return;
+    if (tryEP(GPUProvider::TensorRTRtx)) return;
     if (tryEP(GPUProvider::TensorRT)) return;
     if (tryEP(GPUProvider::CUDA))     return;
     if (tryEP(GPUProvider::DirectML)) return;
