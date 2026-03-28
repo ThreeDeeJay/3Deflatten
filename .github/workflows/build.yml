@@ -119,6 +119,7 @@ jobs:
       - name: Download onnxruntime
         run: |
           curl --ssl-revoke-best-effort --create-dirs -L "https://github.com/ThreeDeeJay/onnxruntime/releases/download/TensorRT-RTX-75/onnxruntime.zip" -o "onnxruntime.zip"
+          git clone https://github.com/ThreeDeeJay/onnxruntime --branch multi-ep --depth 1
           7z x "onnxruntime.zip"
           mkdir "onnxruntime"
           move "Win64" "onnxruntime\lib"
