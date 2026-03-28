@@ -718,18 +718,39 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 return false;
 
             try {
-                // Store the cache path so the member lives long enough for
-                // AppendExecutionProvider_TensorRT to copy it.
                 m_trtCacheDir = TrtEngineCacheDir();
 
-                OrtTensorRTProviderOptions trt{};
-                trt.device_id                 = 0;
-                trt.trt_max_workspace_size    = 2LL * 1024 * 1024 * 1024; // 2 GB
-                trt.trt_fp16_enable           = 1;   // ~2x faster on RTX cards
-                trt.trt_engine_cache_enable   = 1;
-                trt.trt_engine_cache_path     = m_trtCacheDir.c_str();
-                trt.trt_dump_subgraphs        = 0;
-                m_sessionOpts.AppendExecutionProvider_TensorRT(trt);
+                // Use the V2 provider options API which works across all ORT versions
+                // that support TRT.  The old OrtTensorRTProviderOptions struct API is
+                // deprecated in ORT built from source (≥1.19).
+                const OrtApi& ortApi = Ort::GetApi();
+                OrtTensorRTProviderOptionsV2* trtOpts = nullptr;
+                Ort::ThrowOnError(ortApi.CreateTensorRTProviderOptions(&trtOpts));
+                std::unique_ptr<OrtTensorRTProviderOptionsV2,
+                    decltype(&ortApi.ReleaseTensorRTProviderOptions)>
+                    trtOptsGuard(trtOpts, ortApi.ReleaseTensorRTProviderOptions);
+
+                const char* keys[] = {
+                    "device_id",
+                    "trt_fp16_enable",
+                    "trt_engine_cache_enable",
+                    "trt_engine_cache_path",
+                    "trt_dump_subgraphs",
+                    nullptr
+                };
+                const char* vals[] = {
+                    "0",
+                    "1",
+                    "1",
+                    m_trtCacheDir.c_str(),
+                    "0",
+                    nullptr
+                };
+                int nOpts = 5;
+                Ort::ThrowOnError(ortApi.UpdateTensorRTProviderOptions(
+                    trtOpts, keys, vals, nOpts));
+                Ort::ThrowOnError(ortApi.SessionOptionsAppendExecutionProvider_TensorRT_V2(
+                    m_sessionOpts, trtOpts));
 
                 outInfo = L"NVIDIA TensorRT (FP16, engine cache: "
                         + std::wstring(m_trtCacheDir.begin(), m_trtCacheDir.end())
@@ -742,18 +763,21 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
             } catch (const Ort::Exception& e) {
                 LOG_WARN("TensorRT EP init failed: ", e.what());
                 LOG_WARN("  Common causes:");
-                LOG_WARN("    1. TRT version does not match CUDA version.");
+                LOG_WARN("    1. TRT version does not match the ORT build's CUDA version.");
                 LOG_WARN("       Check zip filename for the cuda-XX.N suffix.");
 #if ORT_CUDA_MAJOR == 13
                 LOG_WARN("       TRT 10.13.x (cuda-13.0 build) is required.");
-                LOG_WARN("    3. nvinfer_10.dll / nvonnxparser_10.dll missing or their deps missing.");
+                LOG_WARN("    2. nvinfer_10.dll / nvonnxparser_10.dll missing or their deps missing.");
+#elif ORT_CUDA_MAJOR == 12
+                LOG_WARN("       TRT 10.16.x (cuda-12.9 build) is required.");
+                LOG_WARN("    2. nvinfer_10.dll / nvonnxparser_10.dll missing or their deps missing.");
 #else
                 LOG_WARN("       TRT 10.0.x (cuda-11.8 build) is required.");
-                LOG_WARN("    3. nvinfer.dll / nvonnxparser.dll missing or their deps missing.");
+                LOG_WARN("    2. nvinfer.dll / nvonnxparser.dll missing or their deps missing.");
                 LOG_WARN("       NOTE: TRT 10.0.x uses plain names (no _10 suffix).");
 #endif
-                LOG_WARN("       Ensure TRT_LIB_PATH was set before launching the host app,");
-                LOG_WARN("       or copy all DLLs from TensorRT lib\\ next to the .ax file.");
+                LOG_WARN("    3. Ensure all TRT lib\\ DLLs are next to the .ax file,");
+                LOG_WARN("       or set TRT_LIB_PATH before launching the host app.");
                 return false;
             }
 #endif // ORT_ENABLE_TENSORRT
@@ -773,16 +797,29 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 return false;
 
             try {
-                OrtCUDAProviderOptions cuda{};
-                cuda.device_id                = 0;
-                cuda.cudnn_conv_algo_search    = OrtCudnnConvAlgoSearchExhaustive;
-                cuda.do_copy_in_default_stream = 1;
-                m_sessionOpts.AppendExecutionProvider_CUDA(cuda);
+                // Use the V2 provider options API (the old OrtCUDAProviderOptions
+                // struct API is deprecated in ORT source builds ≥1.19).
+                const OrtApi& ortApi = Ort::GetApi();
+                OrtCUDAProviderOptionsV2* cudaOpts = nullptr;
+                Ort::ThrowOnError(ortApi.CreateCUDAProviderOptions(&cudaOpts));
+                std::unique_ptr<OrtCUDAProviderOptionsV2,
+                    decltype(&ortApi.ReleaseCUDAProviderOptions)>
+                    cudaOptsGuard(cudaOpts, ortApi.ReleaseCUDAProviderOptions);
+
+                const char* keys[] = {"device_id", nullptr};
+                const char* vals[] = {"0",          nullptr};
+                Ort::ThrowOnError(ortApi.UpdateCUDAProviderOptions(
+                    cudaOpts, keys, vals, 1));
+                Ort::ThrowOnError(ortApi.SessionOptionsAppendExecutionProvider_CUDA_V2(
+                    m_sessionOpts, cudaOpts));
+
                 outInfo = L"NVIDIA CUDA";
                 LOG_INFO("Execution provider: CUDA");
                 return true;
             } catch (const Ort::Exception& e) {
                 LOG_WARN("CUDA EP init failed: ", e.what());
+                LOG_WARN("  Ensure all CUDA + cuDNN DLLs are next to the .ax file.");
+                LOG_WARN("  Run collect_runtime_dlls_cuda12.py --trt-zip <file> to bundle them.");
                 return false;
             }
 #endif // ORT_ENABLE_CUDA
