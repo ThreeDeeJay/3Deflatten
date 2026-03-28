@@ -726,9 +726,12 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 const OrtApi& ortApi = Ort::GetApi();
                 OrtTensorRTProviderOptionsV2* trtOpts = nullptr;
                 Ort::ThrowOnError(ortApi.CreateTensorRTProviderOptions(&trtOpts));
-                std::unique_ptr<OrtTensorRTProviderOptionsV2,
-                    decltype(&ortApi.ReleaseTensorRTProviderOptions)>
-                    trtOptsGuard(trtOpts, ortApi.ReleaseTensorRTProviderOptions);
+                // Copy the function pointer to a local — decltype on a struct
+                // field pointer gives void(*const*)() (ptr-to-ptr), but we need
+                // the plain function pointer type as the unique_ptr deleter.
+                auto trtRelease = ortApi.ReleaseTensorRTProviderOptions;
+                std::unique_ptr<OrtTensorRTProviderOptionsV2, decltype(trtRelease)>
+                    trtOptsGuard(trtOpts, trtRelease);
 
                 const char* keys[] = {
                     "device_id",
@@ -802,9 +805,9 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
                 const OrtApi& ortApi = Ort::GetApi();
                 OrtCUDAProviderOptionsV2* cudaOpts = nullptr;
                 Ort::ThrowOnError(ortApi.CreateCUDAProviderOptions(&cudaOpts));
-                std::unique_ptr<OrtCUDAProviderOptionsV2,
-                    decltype(&ortApi.ReleaseCUDAProviderOptions)>
-                    cudaOptsGuard(cudaOpts, ortApi.ReleaseCUDAProviderOptions);
+                auto cudaRelease = ortApi.ReleaseCUDAProviderOptions;
+                std::unique_ptr<OrtCUDAProviderOptionsV2, decltype(cudaRelease)>
+                    cudaOptsGuard(cudaOpts, cudaRelease);
 
                 const char* keys[] = {"device_id", nullptr};
                 const char* vals[] = {"0",          nullptr};
