@@ -170,17 +170,23 @@ jobs:
 #          name: 3Deflatten_x86_DirectML
 #          path: Release\Win32
 
-      - name: Download x64 DirectML
-        uses: actions/download-artifact@v4
-        with:
-          name: 3Deflatten_x64_DirectML
-          path: Release\Win64
+#      - name: Download x64 DirectML
+#        uses: actions/download-artifact@v4
+#        with:
+#          name: 3Deflatten_x64_DirectML
+#          path: Release\Win64
+#
+#      - name: Download x64 GPU (TensorRT+CUDA)
+#        uses: actions/download-artifact@v4
+#        with:
+#          name: 3Deflatten_x64_GPU
+#          path: Release\Win64_GPU
 
-      - name: Download x64 GPU (TensorRT+CUDA)
+      - name: Download x64 Unified
         uses: actions/download-artifact@v4
         with:
-          name: 3Deflatten_x64_GPU
-          path: Release\Win64_GPU
+          name: 3Deflatten_x64_Unified
+          path: Release\Win64_Unified
 
       - name: Deploy
         run: |
