@@ -116,6 +116,13 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
 
+      - name: Download onnxruntime
+        run: |
+          curl --ssl-revoke-best-effort --create-dirs -L "https://github.com/ThreeDeeJay/onnxruntime/releases/download/TensorRT-RTX-75/onnxruntime.zip" -o "onnxruntime.zip"
+          7z x "onnxruntime.zip"
+          mkdir "onnxruntime"
+          move "Win64" "onnxruntime\lib"
+
       - name: Configure CMake
         run: >
           cmake -B build
@@ -125,6 +132,7 @@ jobs:
           "-DVCPKG_INSTALLED_DIR=${{ github.workspace }}\vcpkg_installed"
           -DCMAKE_BUILD_TYPE=Release
           -DORT_BACKEND=${{ matrix.ort_backend }}
+          -DORT_UNIFIED_DIR="${{github.workspace}}\onnxruntime"
         shell: cmd
 
       - name: Build
@@ -184,6 +192,7 @@ jobs:
           copy "scripts/unregister.bat"                  "Release/"
           copy "scripts/Setup.py"                        "Release/"
           copy "scripts/collect_runtime_dlls.py"         "Release/"
+          copy "scripts/collect_runtime_dlls_cuda12.py"  "Release/"
           copy "scripts/collect_runtime_dlls_cuda13.py"  "Release/"
 #copy "3Deflatten.ini"                   "Release/Win32/"
 #copy -r "Artifacts/Win64"               "Release"
