@@ -28,7 +28,10 @@ cbuffer CBStereo : register(b0) {
     float  g_texelW;
     float  g_texelH;
     int    g_infillMode;  // 0=Inner 1=Outer 2=Blend 3=EdgeClamp 4=Inpaint
-    float  g_pad;
+    float  g_depthOffsetU; // motion-compensated depth UV offset (source pixels / srcW)
+    // row 3
+    float  g_depthOffsetV; // motion-compensated depth UV offset (source pixels / srcH)
+    float  g_pad0; float g_pad1; float g_pad2;
 };
 Texture2D<float4> g_srcTex   : register(t0);
 Texture2D<float>  g_depthTex : register(t1);
@@ -39,6 +42,14 @@ struct VS_OUT { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
 
 VS_OUT VS_FullScreen(VS_IN v) {
     VS_OUT o; o.pos = float4(v.pos, 0, 1); o.uv = v.uv; return o;
+}
+
+// Depth UV: shift eyeUV back to where the pixel was when the depth was computed.
+// If the scene/camera moved by (motionDx, motionDy) source pixels since inference,
+// the depth for current pixel (u,v) lives at (u - offsetU, v - offsetV) in the
+// stored depth map.
+float2 DepthUV(float2 eyeUV) {
+    return saturate(eyeUV - float2(g_depthOffsetU, g_depthOffsetV));
 }
 
 // Walk in source space from 'origin' in 'dir'; return FIRST depth-match sample.
@@ -83,15 +94,19 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
     }
     float eyeSign = isLeft ? 1.0 : -1.0;
 
-    float dC = g_depthTex.SampleLevel(g_sampler, eyeUV, 0).r;
-    float dL = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(-g_texelW * 3.0, 0), 0).r;
-    float dR = g_depthTex.SampleLevel(g_sampler, eyeUV + float2(+g_texelW * 3.0, 0), 0).r;
+    // Motion-compensated depth UV: shift back to where this pixel was in the
+    // depth-estimation frame.  When no motion is accumulated, depUV == eyeUV.
+    float2 depUV = DepthUV(eyeUV);
+
+    float dC = g_depthTex.SampleLevel(g_sampler, depUV, 0).r;
+    float dL = g_depthTex.SampleLevel(g_sampler, DepthUV(eyeUV + float2(-g_texelW * 3.0, 0)), 0).r;
+    float dR = g_depthTex.SampleLevel(g_sampler, DepthUV(eyeUV + float2(+g_texelW * 3.0, 0)), 0).r;
     float depth = max(dC, max(dL, dR));
 
     float  disparity = g_separation * (depth - g_convergence);
     float2 srcUV     = saturate(eyeUV + float2(eyeSign * disparity, 0.0));
 
-    float sampledDepth = g_depthTex.SampleLevel(g_sampler, srcUV, 0).r;
+    float sampledDepth = g_depthTex.SampleLevel(g_sampler, DepthUV(srcUV), 0).r;
     float depthJump    = sampledDepth - dC;
 
     [branch]
@@ -417,6 +432,7 @@ HRESULT StereoRenderer::Render(const BYTE* srcFrame, int srcW, int srcH,
                                 int srcStride,
                                 const float* depthMap,
                                 const DeflattenConfig& cfg,
+                                float motionDx, float motionDy,
                                 BYTE* dstFrame, int dstStride) {
     if (m_renderCount == 0)
         LOG_INFO("First Render: src=", srcW, "x", srcH,
@@ -426,7 +442,7 @@ HRESULT StereoRenderer::Render(const BYTE* srcFrame, int srcW, int srcH,
     ++m_renderCount;
 
     if (m_gpuOK)
-        RenderGPU(srcFrame,srcW,srcH,srcStride,depthMap,cfg,dstFrame,dstStride);
+        RenderGPU(srcFrame,srcW,srcH,srcStride,depthMap,cfg,motionDx,motionDy,dstFrame,dstStride);
     else
         RenderCPU(srcFrame,srcW,srcH,srcStride,depthMap,cfg,dstFrame,dstStride);
     return S_OK;
@@ -436,6 +452,7 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
                                  int srcStride,
                                  const float* depthMap,
                                  const DeflattenConfig& cfg,
+                                 float motionDx, float motionDy,
                                  BYTE* dstFrame, int dstStride) {
     HRESULT hrET = EnsureTextures(srcW, srcH, cfg.outputMode);
     if (FAILED(hrET)) {
@@ -471,14 +488,19 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (SUCCEEDED(m_ctx->Map(m_cb.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) {
         auto* cb = static_cast<CBStereo*>(mapped.pData);
-        cb->convergence = cfg.convergence;
-        cb->separation  = cfg.separation;
-        cb->flipDepth   = cfg.flipDepth ? 1.f : 0.f;
-        cb->outputMode  = (int)cfg.outputMode;
-        cb->texelW      = srcW > 0 ? 1.0f / (float)srcW : 0.0f;
-        cb->texelH      = srcH > 0 ? 1.0f / (float)srcH : 0.0f;
-        cb->infillMode  = (int)cfg.infillMode;
-        cb->pad         = 0.0f;
+        cb->convergence   = cfg.convergence;
+        cb->separation    = cfg.separation;
+        cb->flipDepth     = cfg.flipDepth ? 1.f : 0.f;
+        cb->outputMode    = (int)cfg.outputMode;
+        cb->texelW        = srcW > 0 ? 1.0f / (float)srcW : 0.0f;
+        cb->texelH        = srcH > 0 ? 1.0f / (float)srcH : 0.0f;
+        cb->infillMode    = (int)cfg.infillMode;
+        // Depth UV offsets: convert source-pixel motion to normalised UV delta.
+        // Negative: if scene moved right (+dx), depth for pixel (u,v) lives at
+        // (u - dx/W, v - dy/H) in the stored depth map.
+        cb->depthOffsetU  = srcW > 0 ? motionDx / (float)srcW : 0.f;
+        cb->depthOffsetV  = srcH > 0 ? motionDy / (float)srcH : 0.f;
+        cb->pad0 = cb->pad1 = cb->pad2 = 0.f;
         m_ctx->Unmap(m_cb.Get(), 0);
     }
 

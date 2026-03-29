@@ -85,6 +85,23 @@ private:
     std::vector<float> m_depthRender;   // depth for current render (zero-copy swap from cache)
     bool               m_hadRealDepth = false; // true once we've received a real depth map
 
+    // ── Depth motion compensation ─────────────────────────────────────────────
+    // Between inference frames the depth map is stale.  We estimate the global
+    // 2D translation between consecutive decoded frames (Lucas-Kanade on a
+    // downsampled luma image) and accumulate it as a UV offset that is passed to
+    // the stereo shader to warp depth sampling back in sync with the current frame.
+    // When new depth arrives (haveDepth), the accumulation resets to (0, 0).
+    std::vector<uint8_t> m_prevLumaSmall; // previous frame luma, downsampled
+    int                  m_lumaSmW = 0, m_lumaSmH = 0;
+    float                m_accumDx = 0.f, m_accumDy = 0.f;
+
+    // Estimate global 2D translation between luma images using Lucas-Kanade.
+    // Returns (dx, dy) in SOURCE-RESOLUTION pixels. smallW/H: downsampled dims.
+    // scale: srcW / smallW (to convert small-image offsets back to source pixels).
+    static void EstimateMotionLK(const uint8_t* prev, const uint8_t* curr,
+                                  int w, int h, float scale,
+                                  float& outDx, float& outDy);
+
     // Adaptive frame skipping: when inference is slower than the video frame rate,
     // skip posting frames to the worker so we always infer the LATEST frame rather
     // than a frame that will never be displayed.

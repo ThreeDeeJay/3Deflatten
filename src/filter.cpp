@@ -171,6 +171,8 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_skipEvery       = 1;
     m_skipCounter     = 0;
     m_avgInferMs      = 0.0;
+    m_accumDx = 0.f; m_accumDy = 0.f;
+    m_lumaSmW = 0; m_lumaSmH = 0;
 
     wchar_t envModel[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"DEFLATTEN_MODEL_PATH", envModel, MAX_PATH))
@@ -379,6 +381,41 @@ void C3DeflattenFilter::DepthWorkerThread() {
     }
 }
 
+// ── Global motion estimation (Lucas-Kanade, whole-image translation) ─────────
+// Treats the entire image as one patch; valid for global camera motion.
+// Inputs are 8-bit luma images of dimensions w×h (small, ~128×72).
+// Returns (outDx, outDy) in SOURCE-RESOLUTION pixels (scaled by srcW/w).
+// Capped at ±(w*2) to suppress hard-cut failures.
+/*static*/ void C3DeflattenFilter::EstimateMotionLK(
+        const uint8_t* prev, const uint8_t* curr,
+        int w, int h, float scale,
+        float& outDx, float& outDy) {
+
+    double sIx2  = 0, sIy2  = 0, sIxIy = 0;
+    double sIxIt = 0, sIyIt = 0;
+    for (int y = 1; y < h-1; ++y) {
+        const uint8_t* pr = prev + y * w;
+        const uint8_t* cr = curr + y * w;
+        for (int x = 1; x < w-1; ++x) {
+            double Ix = ((int)pr[x+1] - (int)pr[x-1]) * 0.5;
+            double Iy = ((int)prev[(y+1)*w+x] - (int)prev[(y-1)*w+x]) * 0.5;
+            double It = (int)cr[x] - (int)pr[x];
+            sIx2  += Ix * Ix;
+            sIy2  += Iy * Iy;
+            sIxIy += Ix * Iy;
+            sIxIt += Ix * It;
+            sIyIt += Iy * It;
+        }
+    }
+    double det = sIx2 * sIy2 - sIxIy * sIxIy;
+    if (std::abs(det) < 1.0) { outDx = outDy = 0.f; return; }
+    double dx = (-sIy2 * sIxIt + sIxIy * sIyIt) / det;
+    double dy = ( sIxIy * sIxIt - sIx2 * sIyIt) / det;
+    float cap = (float)w * 2.f;
+    outDx = std::max(-cap, std::min(cap, (float)(dx * scale)));
+    outDy = std::max(-cap, std::min(cap, (float)(dy * scale)));
+}
+
 // ── NV12 -> BGRA ─────────────────────────────────────────────────────────────
 // Writes into a pre-allocated destination buffer (no resize inside hot path).
 static void NV12toBGRA(const BYTE* src, int w, int h, int stride,
@@ -412,6 +449,9 @@ HRESULT C3DeflattenFilter::StartStreaming() {
     m_skipCounter = 0;
     m_skipEvery   = 1;
     m_avgInferMs  = 0.0;
+    m_accumDx = 0.f; m_accumDy = 0.f;
+    m_prevLumaSmall.clear();
+    m_lumaSmW = 0; m_lumaSmH = 0;
 
     HRESULT hr = m_stereo->Init();
     if (FAILED(hr)) { LOG_ERR("StereoRenderer::Init FAILED ",HRStr(hr)); return hr; }
@@ -523,7 +563,43 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         rgbaPtr=m_convBuf.data(); rgbaStride=m_inW*4;
     }
 
-    // ── Post BGRA to depth worker (adaptive frame skip) ──────────────────────
+    // ── Motion estimation for depth compensation ─────────────────────────────
+    // Downsample luma to ~128 pixels wide, run Lucas-Kanade against previous
+    // frame, and accumulate the translation.  When new depth arrives the
+    // accumulator is reset to (0,0) — the depth is in sync with that frame.
+    constexpr int kLumaW = 128;
+    int lumaH = (m_inH * kLumaW + m_inW - 1) / m_inW;
+    if (lumaH < 2) lumaH = 2;
+    size_t lumaN = (size_t)kLumaW * lumaH;
+
+    // Build current luma (box-downsampled from BGRA rgbaPtr)
+    std::vector<uint8_t> curLuma(lumaN);
+    {
+        float scaleX = (float)m_inW  / kLumaW;
+        float scaleY = (float)m_inH  / lumaH;
+        for (int sy = 0; sy < lumaH; ++sy) {
+            int srcY = std::min((int)(sy * scaleY), m_inH - 1);
+            for (int sx = 0; sx < kLumaW; ++sx) {
+                int srcX = std::min((int)(sx * scaleX), m_inW - 1);
+                const BYTE* p = rgbaPtr + srcY * rgbaStride + srcX * 4;
+                // BT.601 luma from BGRA: Y = 0.114*B + 0.587*G + 0.299*R
+                curLuma[sy * kLumaW + sx] = (uint8_t)(
+                    (p[0] * 29 + p[1] * 150 + p[2] * 77) >> 8);
+            }
+        }
+    }
+
+    if (m_prevLumaSmall.size() == lumaN && m_lumaSmW == kLumaW && m_lumaSmH == lumaH
+        && m_hadRealDepth) {
+        float dx = 0.f, dy = 0.f;
+        float scale = (float)m_inW / kLumaW;
+        EstimateMotionLK(m_prevLumaSmall.data(), curLuma.data(),
+                         kLumaW, lumaH, scale, dx, dy);
+        m_accumDx += dx;
+        m_accumDy += dy;
+    }
+    m_prevLumaSmall = curLuma;
+    m_lumaSmW = kLumaW; m_lumaSmH = lumaH;
     // When inference is slower than the video frame rate, skip posting most frames
     // so the worker always sees the LATEST frame rather than one that will never
     // be displayed.  m_skipEvery is recomputed each time a new depth result arrives.
@@ -558,6 +634,8 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
             m_cacheReady = false;
             haveDepth = true;
             m_hadRealDepth = true;
+            m_accumDx = 0.f;   // depth is in sync with this frame — reset offset
+            m_accumDy = 0.f;
 
             // Update skip rate: infer every N frames where N = ceil(inferMs / frameBudgetMs).
             // Frame budget at 24fps = 41.7ms.  We read AvgTimePerFrame from the input
@@ -629,6 +707,7 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
     } else {
         m_stereo->Render(rgbaPtr, m_inW, m_inH, rgbaStride,
                          m_depthRender.data(), cfg,
+                         m_accumDx, m_accumDy,
                          pDst, outStride);
     }
     auto trMs = std::chrono::duration_cast<std::chrono::milliseconds>(

@@ -30,6 +30,8 @@ public:
                    int                   srcStride,
                    const float*          depthMap,
                    const DeflattenConfig& cfg,
+                   float                 motionDx,   // source-pixel offset since depth was computed
+                   float                 motionDy,
                    BYTE*                 dstFrame,
                    int                   dstStride);
 
@@ -40,6 +42,7 @@ private:
 
     void RenderGPU(const BYTE* srcFrame, int srcW, int srcH, int srcStride,
                    const float* depthMap, const DeflattenConfig& cfg,
+                   float motionDx, float motionDy,
                    BYTE* dstFrame, int dstStride);
 
     void RenderCPU(const BYTE* srcFrame, int srcW, int srcH, int srcStride,
@@ -76,14 +79,18 @@ private:
     int  m_renderCount = 0;
 
     // Constant buffer layout (must match stereo_warp.hlsl cbuffer CBStereo)
+    // 48 bytes = 3 × 16-byte D3D11 cbuffer rows.
     struct alignas(16) CBStereo {
         float convergence;
         float separation;
-        float flipDepth;    // unused (depth pre-flipped on CPU)
-        int   outputMode;   // 0=SBS 1=TAB
-        float texelW;       // 1.0f / srcWidth
-        float texelH;       // 1.0f / srcHeight
-        int   infillMode;   // 0=Inner 1=Outer 2=Blend
-        float pad;
+        float flipDepth;      // unused (depth pre-flipped on CPU)
+        int   outputMode;     // 0=SBS 1=TAB
+        float texelW;         // 1.0f / srcWidth
+        float texelH;         // 1.0f / srcHeight
+        int   infillMode;     // 0..4
+        float depthOffsetU;   // UV offset applied to ALL depth samples (motion compensation)
+        // -- row 3 --
+        float depthOffsetV;
+        float pad0, pad1, pad2;
     };
 };
