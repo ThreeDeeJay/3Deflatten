@@ -1038,12 +1038,12 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
         if (flipDepth)
             for (float& v : out) v = 1.f - v;
 
-        // Temporal smoothing (lighter weight when DA3-Streaming is active,
-        // since the window alignment already handles temporal consistency)
-        float effAlpha = (m_da3StreamMode && smoothAlpha > 0.3f)
-                         ? smoothAlpha * 0.5f : smoothAlpha;
-        if (effAlpha > 0.f && effAlpha < 1.f)
-            TemporalSmooth(out, effAlpha);
+        // Temporal smoothing.  Disabled when DA3-Streaming is active because:
+        // (a) the affine alignment already provides temporal consistency, and
+        // (b) feeding smoothed output back into the anchor (via the ring buffer)
+        //     creates a positive feedback loop that drives depth toward 1.0 (white).
+        if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
+            TemporalSmooth(out, smoothAlpha);
 
         result.data   = std::move(out);
         result.width  = srcWidth;
@@ -1392,8 +1392,11 @@ void DepthEstimator::AffineAlignTo(const std::vector<float>& anchor,
     double scale = cov_xy / var_x;
     double shift = mean_y - scale * mean_x;
 
-    // Clamp scale to [0.25, 4.0] to prevent catastrophic divergence on cuts
+    // Clamp scale to [0.25, 4.0] to prevent catastrophic divergence on cuts.
+    // Also clamp shift: after scaling, the combined (scale*x + shift) for a
+    // value in [0,1] must stay roughly in [0,1], so |shift| <= 2.0 is safe.
     scale = std::max(0.25, std::min(4.0, scale));
+    shift = std::max(-2.0, std::min(2.0, shift));
 
     for (int i = 0; i < n; ++i) {
         float v = (float)(scale * depth[i] + shift);
@@ -1432,6 +1435,15 @@ void DepthEstimator::DA3StreamAccumulate(std::vector<float>& depth) {
                 newAnchor[i] += buf[i];
         float inv = 1.f / (float)m_streamBuf.size();
         for (float& v : newAnchor) v *= inv;
+
+        // Renormalise anchor to [0,1] so accumulated clipping bias from
+        // AffineAlignTo's clamping can't cause the anchor to drift toward
+        // 1.0 over successive anchor resets (the white-out feedback loop).
+        float amn = newAnchor[0], amx = newAnchor[0];
+        for (float v : newAnchor) { amn = std::min(amn, v); amx = std::max(amx, v); }
+        float arange = (amx - amn) > 1e-6f ? (amx - amn) : 1e-6f;
+        for (float& v : newAnchor) v = (v - amn) / arange;
+
         m_streamAnchor = std::move(newAnchor);
     }
     // depth is returned as-is (affine-aligned); TemporalSmooth handles flicker

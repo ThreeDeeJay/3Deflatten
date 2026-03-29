@@ -153,6 +153,31 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
                 L"Press 'Reload' to load the selected model.");
             break;
         }
+        if (ctl==IDC_STREAM_CHECK && note==BN_CLICKED) {
+            bool streaming = (SendDlgItemMessage(hwnd, IDC_STREAM_CHECK,
+                                                  BM_GETCHECK, 0, 0) == BST_CHECKED);
+            // Streaming checkbox controls the model path sentinel
+            if (streaming) {
+                wcsncpy_s(m_modelPath, DepthEstimator::STREAMING_SENTINEL, _TRUNCATE);
+            } else {
+                // Revert to first real .onnx in the combo (if any)
+                int idx = (int)SendDlgItemMessage(hwnd, IDC_MODEL_COMBO,
+                                                   CB_GETCURSEL, 0, 0);
+                if (idx >= 0 && idx < (int)m_onnxFiles.size() && !m_onnxFiles[idx].empty())
+                    wcsncpy_s(m_modelPath, m_onnxFiles[idx].c_str(), _TRUNCATE);
+                else
+                    m_modelPath[0] = L'\0';  // auto-detect
+            }
+            if (m_pFilter) m_pFilter->SetModelPath(m_modelPath);
+            // Grey/enable smooth slider to match
+            EnableWindow(GetDlgItem(hwnd, IDC_SMOOTH_SLIDER), !streaming);
+            EnableWindow(GetDlgItem(hwnd, IDC_SMOOTH_LABEL),  !streaming);
+            SetDirty();
+            SetDlgItemTextW(hwnd, IDC_GPU_INFO,
+                streaming ? L"DA3-Streaming enabled — press 'Reload' to activate."
+                           : L"Press 'Reload' to load the selected model.");
+            break;
+        }
         if (ctl==IDC_RELOAD_BTN && m_pFilter) {
             ReadControls(hwnd);
             m_pFilter->SetConfig(&m_cfg);
@@ -209,6 +234,16 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
     SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_SETCURSEL, (int)m_cfg.infillMode,  0);
     SendDlgItemMessage(hwnd, IDC_FLIP_CHECK, BM_SETCHECK,
                        m_cfg.flipDepth ? BST_CHECKED : BST_UNCHECKED, 0);
+
+    // DA3-Streaming checkbox: checked when model path is the sentinel
+    bool streaming = (_wcsicmp(m_modelPath, DepthEstimator::STREAMING_SENTINEL) == 0);
+    SendDlgItemMessage(hwnd, IDC_STREAM_CHECK, BM_SETCHECK,
+                       streaming ? BST_CHECKED : BST_UNCHECKED, 0);
+    // Smooth slider is disabled when streaming is active (streaming handles
+    // temporal consistency; external smoothing creates a feedback loop)
+    EnableWindow(GetDlgItem(hwnd, IDC_SMOOTH_SLIDER), !streaming);
+    EnableWindow(GetDlgItem(hwnd, IDC_SMOOTH_LABEL),  !streaming);
+
     UpdateValueLabels(hwnd);
 }
 
@@ -264,18 +299,6 @@ void C3DeflattenProp::PopulateModelCombo(HWND hwnd) {
     SendDlgItemMessage(hwnd, IDC_MODEL_COMBO, CB_RESETCONTENT, 0, 0);
     m_onnxFiles.clear();
 
-    // ── Pinned entry: DA3-Streaming mode ─────────────────────────────────────
-    // Always listed first regardless of which .onnx files are present.
-    // Requires da3-small.onnx to be available (downloaded via Setup.py).
-    {
-        int idx = (int)SendDlgItemMessage(hwnd, IDC_MODEL_COMBO,
-                      CB_ADDSTRING, 0,
-                      (LPARAM)L"[DA3-Streaming]  (temporally stable, uses da3-small.onnx)");
-        m_onnxFiles.push_back(DepthEstimator::STREAMING_SENTINEL);
-        if (_wcsicmp(m_modelPath, DepthEstimator::STREAMING_SENTINEL) == 0)
-            SendDlgItemMessage(hwnd, IDC_MODEL_COMBO, CB_SETCURSEL, idx, 0);
-    }
-
     // ── Search directories for .onnx files ───────────────────────────────────
     std::vector<std::wstring> searchDirs;
     searchDirs.push_back(GetDllDir());
@@ -298,7 +321,7 @@ void C3DeflattenProp::PopulateModelCombo(HWND hwnd) {
         searchDirs.push_back(dllParent);
     }
 
-    int selIdx = (_wcsicmp(m_modelPath, DepthEstimator::STREAMING_SENTINEL) == 0) ? 0 : -1;
+    int selIdx = -1;
     for (auto& dir : searchDirs) {
         if (dir.empty()) continue;
         wchar_t pattern[MAX_PATH]{};
@@ -324,15 +347,12 @@ void C3DeflattenProp::PopulateModelCombo(HWND hwnd) {
         FindClose(h);
     }
 
-    // If no .onnx files found beyond the sentinel, note it but don't
-    // replace the sentinel — DA3-Streaming is still a valid selection.
-    if ((int)m_onnxFiles.size() == 1) {  // only sentinel
-        SendDlgItemMessage(hwnd, IDC_MODEL_COMBO,
-                       CB_ADDSTRING, 0,
-                       (LPARAM)L"(no additional .onnx files found)");
+    if (m_onnxFiles.empty()) {
+        SendDlgItemMessage(hwnd, IDC_MODEL_COMBO, CB_ADDSTRING, 0,
+                           (LPARAM)L"(no .onnx files found — run Setup.py)");
         m_onnxFiles.push_back(L"");
     }
-    if (selIdx < 0) selIdx = 0;   // default to DA3-Streaming sentinel
+    if (selIdx < 0) selIdx = 0;
     SendDlgItemMessage(hwnd, IDC_MODEL_COMBO, CB_SETCURSEL, selIdx, 0);
-    LOG_DBG("PropPage: found ", m_onnxFiles.size() - 1, " .onnx file(s) + DA3-Streaming option");
+    LOG_DBG("PropPage: found ", m_onnxFiles.size(), " .onnx file(s)");
 }

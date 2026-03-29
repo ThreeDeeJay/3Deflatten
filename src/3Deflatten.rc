@@ -7,7 +7,7 @@ BEGIN
     IDS_PROP_TITLE  "3Deflatten"
 END
 
-IDD_PROP_PAGE DIALOGEX 0, 0, 298, 272
+IDD_PROP_PAGE DIALOGEX 0, 0, 298, 280
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
@@ -21,7 +21,7 @@ BEGIN
     CONTROL   "", IDC_SEP_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  54, 242,  14
     LTEXT     "0.050", IDC_SEP_LABEL,              256,  54,  32,  14, SS_RIGHT
-    LTEXT     "Temporal Smoothing (flicker reduction, 0=off):", -1, 10, 74, 200, 10
+    LTEXT     "Temporal Smoothing (0=off; disabled when streaming):", -1, 10, 74, 200, 10
     CONTROL   "", IDC_SMOOTH_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  84, 242,  14
     LTEXT     "0.40", IDC_SMOOTH_LABEL,            256,  84,  32,  14, SS_RIGHT
@@ -42,20 +42,22 @@ BEGIN
     COMBOBOX  IDC_GPU_COMBO,                      194, 113,  94,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    // ONNX Model
-    GROUPBOX  "ONNX Model", -1,                     4, 162, 290,  50
+    // ONNX Model + DA3-Streaming checkbox
+    GROUPBOX  "ONNX Model", -1,                     4, 162, 290,  58
     LTEXT     "File:",     -1,                     10, 176,  20,  10
     COMBOBOX  IDC_MODEL_COMBO,                     32, 174, 200,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     PUSHBUTTON "Reload",   IDC_RELOAD_BTN,        236, 172,  52,  14
+    AUTOCHECKBOX "DA3-Streaming  (temporal alignment, uses da3-small.onnx)",
+              IDC_STREAM_CHECK,                    10, 191, 278,  12
     LTEXT     "Switching model or provider takes effect after Reload.", -1,
-                                                   10, 192, 278,  10
+                                                   10, 206, 278,  10
 
-    // Apply row – applies ALL settings and reloads the model immediately
-    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 216, 290, 14
+    // Apply row
+    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 224, 290, 14
 
     // Status
-    GROUPBOX  "Active Inference Status", -1,        4, 234, 290,  34
-    LTEXT     "", IDC_GPU_INFO,                    10, 247, 278,  16,
+    GROUPBOX  "Active Inference Status", -1,        4, 242, 290,  34
+    LTEXT     "", IDC_GPU_INFO,                    10, 255, 278,  16,
               SS_NOPREFIX | SS_ENDELLIPSIS
 END
