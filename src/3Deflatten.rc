@@ -24,16 +24,18 @@ BEGIN
     LTEXT     "Temporal Smoothing (0=off; disabled when streaming):", -1, 10, 74, 200, 10
     CONTROL   "", IDC_SMOOTH_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  84, 242,  14
-    LTEXT     "0.40", IDC_SMOOTH_LABEL,            256,  84,  32,  14, SS_RIGHT
+    LTEXT     "0.00", IDC_SMOOTH_LABEL,            256,  84,  32,  14, SS_RIGHT
 
-    // Output (Mode + Flip + Infill)
-    GROUPBOX  "Output",    -1,                      4, 102, 140,  54
+    // Output (Mode + Flip + Depth overlay + Infill)
+    GROUPBOX  "Output",    -1,                      4, 102, 140,  66
     LTEXT     "Mode:",     -1,                     10, 115,  28,  10
     COMBOBOX  IDC_MODE_COMBO,                      40, 113, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    AUTOCHECKBOX "Flip Depth",  IDC_FLIP_CHECK,    10, 129, 100,  12
-    LTEXT     "Infill:",   -1,                     10, 145,  28,  10
-    COMBOBOX  IDC_INFILL_COMBO,                    40, 143, 100,  60,
+    AUTOCHECKBOX "Flip Depth",    IDC_FLIP_CHECK,  10, 129, 130,  12
+    AUTOCHECKBOX "Show Depth Map (Right Shift)",
+                                   IDC_DEPTH_CHECK, 10, 143, 130,  12
+    LTEXT     "Infill:",   -1,                     10, 159,  28,  10
+    COMBOBOX  IDC_INFILL_COMBO,                    40, 157, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
     // Inference (Provider)
@@ -43,21 +45,21 @@ BEGIN
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
     // ONNX Model + DA3-Streaming checkbox
-    GROUPBOX  "ONNX Model", -1,                     4, 162, 290,  58
-    LTEXT     "File:",     -1,                     10, 176,  20,  10
-    COMBOBOX  IDC_MODEL_COMBO,                     32, 174, 200,  80,
+    GROUPBOX  "ONNX Model", -1,                     4, 174, 290,  58
+    LTEXT     "File:",     -1,                     10, 188,  20,  10
+    COMBOBOX  IDC_MODEL_COMBO,                     32, 186, 200,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON "Reload",   IDC_RELOAD_BTN,        236, 172,  52,  14
+    PUSHBUTTON "Reload",   IDC_RELOAD_BTN,        236, 184,  52,  14
     AUTOCHECKBOX "DA3-Streaming  (temporal alignment, uses da3-small.onnx)",
-              IDC_STREAM_CHECK,                    10, 191, 278,  12
+              IDC_STREAM_CHECK,                    10, 203, 278,  12
     LTEXT     "Switching model or provider takes effect after Reload.", -1,
-                                                   10, 206, 278,  10
+                                                   10, 218, 278,  10
 
     // Apply row
-    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 224, 290, 14
+    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 236, 290, 14
 
     // Status
-    GROUPBOX  "Active Inference Status", -1,        4, 242, 290,  34
-    LTEXT     "", IDC_GPU_INFO,                    10, 255, 278,  16,
+    GROUPBOX  "Active Inference Status", -1,        4, 254, 290,  22
+    LTEXT     "", IDC_GPU_INFO,                    10, 263, 278,  10,
               SS_NOPREFIX | SS_ENDELLIPSIS
 END

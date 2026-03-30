@@ -109,13 +109,15 @@ void C3DeflattenFilter::LoadIni() {
         return buf;
     };
 
-    m_cfg.convergence = getF(L"convergence", 0.250f);
-    m_cfg.separation  = getF(L"separation",  0.050f);
-    m_cfg.depthSmooth = getF(L"depthSmooth", 0.4f);
-    m_cfg.outputMode  = (OutputMode)getI(L"outputMode",  (int)OutputMode::SideBySide);
-    m_cfg.gpuProvider = (GPUProvider)getI(L"gpuProvider", (int)GPUProvider::Auto);
-    m_cfg.flipDepth   = getI(L"flipDepth", 0) ? TRUE : FALSE;
-    m_cfg.infillMode  = (InfillMode)getI(L"infillMode", (int)InfillMode::Outer);
+    m_cfg.convergence  = getF(L"convergence", 0.250f);
+    m_cfg.separation   = getF(L"separation",  0.050f);
+    m_cfg.depthSmooth  = getF(L"depthSmooth", 0.0f);
+    m_cfg.outputMode   = (OutputMode)getI(L"outputMode",  (int)OutputMode::SideBySide);
+    m_cfg.gpuProvider  = (GPUProvider)getI(L"gpuProvider", (int)GPUProvider::Auto);
+    m_cfg.flipDepth    = getI(L"flipDepth", 0) ? TRUE : FALSE;
+    m_cfg.infillMode   = (InfillMode)getI(L"infillMode", (int)InfillMode::Outer);
+    m_cfg.showDepth    = getI(L"showDepth", 0) ? TRUE : FALSE;
+    m_cfg.depthViewKey = getI(L"depthViewKey", 161);  // 161 = VK_RSHIFT
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
@@ -146,6 +148,8 @@ void C3DeflattenFilter::SaveIni() const {
     setI(L"gpuProvider",  (int)m_cfg.gpuProvider);
     setI(L"flipDepth",    m_cfg.flipDepth ? 1 : 0);
     setI(L"infillMode",   (int)m_cfg.infillMode);
+    setI(L"showDepth",    m_cfg.showDepth ? 1 : 0);
+    setI(L"depthViewKey", m_cfg.depthViewKey);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
 
     LOG_INFO("SaveIni: '", m_iniPath, "'");
@@ -160,13 +164,15 @@ CUnknown* WINAPI C3DeflattenFilter::CreateInstance(LPUNKNOWN pUnk, HRESULT* phr)
 C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     : CTransformFilter(L"3Deflatten", pUnk, CLSID_3Deflatten)
 {
-    m_cfg.convergence = 0.250f;
-    m_cfg.separation  = 0.050f;
-    m_cfg.outputMode  = OutputMode::SideBySide;
-    m_cfg.gpuProvider = GPUProvider::Auto;
-    m_cfg.depthSmooth = 0.4f;
-    m_cfg.flipDepth   = FALSE;
-    m_cfg.infillMode  = InfillMode::Outer;
+    m_cfg.convergence   = 0.250f;
+    m_cfg.separation    = 0.050f;
+    m_cfg.outputMode    = OutputMode::SideBySide;
+    m_cfg.gpuProvider   = GPUProvider::Auto;
+    m_cfg.depthSmooth   = 0.0f;
+    m_cfg.flipDepth     = FALSE;
+    m_cfg.infillMode    = InfillMode::Outer;
+    m_cfg.showDepth     = FALSE;
+    m_cfg.depthViewKey  = 161;  // VK_RSHIFT
     m_hadRealDepth    = false;
     m_skipEvery       = 1;
     m_skipCounter     = 0;
@@ -267,8 +273,7 @@ void C3DeflattenFilter::OutputDimensions(int inW, int inH,
                                           int& outW, int& outH) const {
     CAutoLock lk(const_cast<CCritSec*>(&m_csConfig));
     if (m_cfg.outputMode == OutputMode::SideBySide) { outW=inW*2; outH=inH; }
-    else if (m_cfg.outputMode == OutputMode::TopAndBottom) { outW=inW; outH=inH*2; }
-    else { outW=inW; outH=inH; }  // DepthOnly: same size as input
+    else { outW=inW; outH=inH*2; }
 }
 
 HRESULT C3DeflattenFilter::GetMediaType(int iPos, CMediaType* pmt) {
@@ -331,6 +336,40 @@ void C3DeflattenFilter::StopDepthThread() {
     if (m_depthThread.joinable()) {
         m_depthThread.join();
         LOG_INFO("Depth worker thread stopped");
+    }
+}
+
+void C3DeflattenFilter::StartHotkeyThread() {
+    StopHotkeyThread();
+    m_hotkeyStop.store(false);
+    m_hotkeyThread = std::thread([this]{ HotkeyThread(); });
+}
+
+void C3DeflattenFilter::StopHotkeyThread() {
+    m_hotkeyStop.store(true);
+    if (m_hotkeyThread.joinable())
+        m_hotkeyThread.join();
+}
+
+void C3DeflattenFilter::HotkeyThread() {
+    // Poll the configured virtual key at ~30 ms intervals.
+    // Toggle showDepth on key-down edge (was-up → is-down).
+    bool prevDown = false;
+    while (!m_hotkeyStop.load()) {
+        int vk = 0;
+        { CAutoLock lk(&m_csConfig); vk = m_cfg.depthViewKey; }
+        if (vk > 0) {
+            bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+            if (down && !prevDown) {
+                CAutoLock lk(&m_csConfig);
+                m_cfg.showDepth = m_cfg.showDepth ? FALSE : TRUE;
+                LOG_INFO("Depth view hotkey: showDepth=", m_cfg.showDepth ? "on" : "off");
+            }
+            prevDown = down;
+        }
+        // ~30 ms poll interval — low enough to feel instant, low CPU cost
+        for (int i = 0; i < 3 && !m_hotkeyStop.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
@@ -511,12 +550,14 @@ HRESULT C3DeflattenFilter::StartStreaming() {
              " smooth=",m_cfg.depthSmooth," flip=",m_cfg.flipDepth?"yes":"no");
 
     StartDepthThread();
+    StartHotkeyThread();
     LOG_INFO("===== StartStreaming done =====");
     return S_OK;
 }
 
 HRESULT C3DeflattenFilter::StopStreaming() {
     StopDepthThread();
+    StopHotkeyThread();
     if (m_depth) m_depth->ResetStreamingContext();
     LOG_INFO("StopStreaming  frames=", m_frameCount);
     return S_OK;
@@ -694,14 +735,39 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
 
     // Write directly into pDst — no intermediate copy
     auto tr0 = Clock::now();
-    if (cfg.outputMode == OutputMode::DepthOnly) {
-        // Render depth map as greyscale directly to pDst (same resolution as input)
+    if (cfg.showDepth) {
+        // Show raw depth map on both views in greyscale.
+        // For SBS: left half and right half both get the same depth greyscale.
+        // For TAB: top half and bottom half both get the same depth greyscale.
         const float* d = m_depthRender.data();
-        int n = m_inW * m_inH;
-        if ((int)m_depthRender.size() >= n) {
-            for (int i = 0; i < n; ++i) {
-                BYTE v = (BYTE)(std::max(0.f, std::min(1.f, d[i])) * 255.f + 0.5f);
-                pDst[i*4+0] = v; pDst[i*4+1] = v; pDst[i*4+2] = v; pDst[i*4+3] = 255;
+        int dn = m_inW * m_inH;
+        if ((int)m_depthRender.size() >= dn) {
+            if (cfg.outputMode == OutputMode::SideBySide) {
+                // Fill both halves of the SBS output (outW = 2*inW)
+                for (int y = 0; y < m_inH; ++y) {
+                    BYTE* row = pDst + y * outStride;
+                    for (int x = 0; x < m_inW; ++x) {
+                        BYTE v = (BYTE)(std::max(0.f, std::min(1.f, d[y*m_inW+x])) * 255.f + 0.5f);
+                        // Left eye
+                        row[x*4+0]=v; row[x*4+1]=v; row[x*4+2]=v; row[x*4+3]=255;
+                        // Right eye (offset by inW pixels)
+                        row[(x+m_inW)*4+0]=v; row[(x+m_inW)*4+1]=v;
+                        row[(x+m_inW)*4+2]=v; row[(x+m_inW)*4+3]=255;
+                    }
+                }
+            } else {
+                // TAB: top half and bottom half
+                for (int y = 0; y < m_inH; ++y) {
+                    for (int x = 0; x < m_inW; ++x) {
+                        BYTE v = (BYTE)(std::max(0.f, std::min(1.f, d[y*m_inW+x])) * 255.f + 0.5f);
+                        // Top eye
+                        BYTE* tp = pDst + y*outStride + x*4;
+                        tp[0]=v; tp[1]=v; tp[2]=v; tp[3]=255;
+                        // Bottom eye
+                        BYTE* bp = pDst + (y+m_inH)*outStride + x*4;
+                        bp[0]=v; bp[1]=v; bp[2]=v; bp[3]=255;
+                    }
+                }
             }
         }
     } else {

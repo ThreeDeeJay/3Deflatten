@@ -21,6 +21,7 @@
 #define IDC_INFILL_COMBO   1013   // occlusion gap infill mode selector
 #define IDC_APPLY_BTN      1014   // Apply all settings + reload immediately
 #define IDC_STREAM_CHECK   1015   // DA3-Streaming temporal alignment checkbox
+#define IDC_DEPTH_CHECK    1016   // Show depth map overlay checkbox
 
 // ── Trackbar style constants (commctrl.h equivalents for rc.exe) ──────────────
 // rc.exe does not automatically include commctrl.h, so we define what we need.

@@ -86,7 +86,6 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         // Output Mode — must match OutputMode enum order exactly
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Side-by-Side (SBS)");
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Top-and-Bottom (TAB)");
-        SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Depth Map only  (diagnostic)");
 
         // Infill mode – 3 options matching InfillMode enum
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inner  (bg behind edge)");
@@ -132,6 +131,9 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_FLIP_CHECK && note==BN_CLICKED) {
+            ReadControls(hwnd); PushConfig(); SetDirty(); break;
+        }
+        if (ctl==IDC_DEPTH_CHECK && note==BN_CLICKED) {
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_GPU_COMBO && note==CBN_SELCHANGE) {
@@ -234,6 +236,8 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
     SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_SETCURSEL, (int)m_cfg.infillMode,  0);
     SendDlgItemMessage(hwnd, IDC_FLIP_CHECK, BM_SETCHECK,
                        m_cfg.flipDepth ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_SETCHECK,
+                       m_cfg.showDepth ? BST_CHECKED : BST_UNCHECKED, 0);
 
     // DA3-Streaming checkbox: checked when model path is the sentinel
     bool streaming = (_wcsicmp(m_modelPath, DepthEstimator::STREAMING_SENTINEL) == 0);
@@ -256,6 +260,8 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
     m_cfg.infillMode  = (InfillMode)std::min(4,
                          std::max(0, (int)SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_GETCURSEL, 0, 0)));
     m_cfg.flipDepth   = (SendDlgItemMessage(hwnd, IDC_FLIP_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                        ? TRUE : FALSE;
+    m_cfg.showDepth   = (SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
 }
 

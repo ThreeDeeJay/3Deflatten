@@ -5,6 +5,7 @@
 #include <memory>
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <condition_variable>
 #include "ideflatten.h"
 #include "depth_estimator.h"
@@ -119,6 +120,17 @@ private:
     void DepthWorkerThread();
 
     std::thread             m_depthThread;
+
+    // ── Depth-view hotkey thread ──────────────────────────────────────────────
+    // Polls GetAsyncKeyState at ~30 ms intervals and toggles m_showDepth when
+    // cfg.depthViewKey is pressed.  Runs independently of the graph thread so
+    // the toggle is responsive during pause as well as during playback.
+    void StartHotkeyThread();
+    void StopHotkeyThread();
+    void HotkeyThread();
+
+    std::thread             m_hotkeyThread;
+    std::atomic<bool>       m_hotkeyStop{false};
 
     // Pending work slot (written by Transform, read by worker)
     std::mutex              m_pendMtx;
