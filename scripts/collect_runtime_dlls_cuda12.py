@@ -1,36 +1,37 @@
 """
-3Deflatten -- Collect GPU Runtime DLLs for the unified build
-           (CUDA 12.9.1 / cuDNN 9.20.0 / TRT 10.16.0.72).
+3Deflatten -- Collect GPU Runtime DLLs for the Unified build (CUDA 12.9 / ORT 1.24.3).
 
+ORT 1.24.3 gpu_cuda12 was compiled against CUDA 12.9 and TRT 10.16.0.72.
 This script downloads the matching NVIDIA installers / zip and extracts ONLY
 the DLLs needed, so users do NOT need system-wide installs.
 
 Sources (official NVIDIA URLs):
   CUDA 12.9.1   : https://developer.download.nvidia.com/compute/cuda/12.9.1/
-                   local_installers/cuda_12.9.1_<ver>_windows.exe
+                   local_installers/cuda_12.9.1_windows.exe
   cuDNN 9.20.0  : https://developer.download.nvidia.com/compute/cudnn/9.20.0/
                    local_installers/cudnn_9.20.0_windows.exe
-  TRT 10.16.0.72: user must supply the zip (NVIDIA auth-wall prevents direct
-                   download; get it from https://developer.nvidia.com/tensorrt)
+  TRT 10.16.0.72 : https://developer.nvidia.com/downloads/compute/machine-learning/
+                   tensorrt/10.16.0/zip/TensorRT-10.16.0.72.Windows.win10.cuda-12.9.zip
 
 DLLs collected:
-  CUDA 12:  cudart64_12, cublas64_12, cublasLt64_12, cufft64_12,
-            nvJitLink_120_0, cusolver64_11, curand64_10
+  CUDA 12:  cudart64_12, cublas64_12, cublasLt64_12, cufft64_11, nvJitLink_120_0,
+            cusolver64_11, curand64_10
   cuDNN 9:  cudnn64_9, cudnn_ops64_9, cudnn_adv64_9, cudnn_cnn64_9,
             cudnn_graph64_9, cudnn_engines_runtime_compiled64_9,
             cudnn_engines_precompiled64_9, cudnn_heuristic64_9
-  TRT 10.16: all *.dll from TRT lib folder (nvinfer_10.dll, nvonnxparser_10.dll, ...)
+  TRT 10.13: all *.dll from TRT lib folder
 
 NOT bundled (always present as a driver component in System32):
   nvcuda.dll
 
 Usage:
-  python collect_runtime_dlls_cuda12.py --trt-zip TensorRT-10.16.0.72.Windows.win10.cuda-12.9.zip
-  python collect_runtime_dlls_cuda12.py --trt-zip <file> --no-confirm
-  python collect_runtime_dlls_cuda12.py --trt-zip <file> --output <dir>
+  python collect_runtime_dlls_cuda12.py                     # download everything
+  python collect_runtime_dlls_cuda12.py --trt-zip <file>    # use local TRT zip
+  python collect_runtime_dlls_cuda12.py --no-confirm        # CI / unattended
+  python collect_runtime_dlls_cuda12.py --output <dir>      # custom output dir
 
-The CUDA and cuDNN .exe installers are NSIS archives extracted via 7z.exe (found
-in common install paths, or 7zr.exe is auto-downloaded from 7-zip.org).
+The .exe installers are NSIS archives extracted via 7z.exe (found in common
+install paths, or 7zr.exe is auto-downloaded from 7-zip.org if not installed).
 Downloads are cached in %LOCALAPPDATA%/3Deflatten/dlcache-cuda12 to avoid
 re-downloading on repeated runs (~5 GB total on first run).
 """
@@ -45,33 +46,27 @@ import urllib.request
 import zipfile
 
 # ── Download URLs ─────────────────────────────────────────────────────────────
-# CUDA 12.9.1 — check for latest installer filename on
-#   https://developer.download.nvidia.com/compute/cuda/12.9.1/local_installers/
 CUDA_URL  = ("https://developer.download.nvidia.com/compute/cuda/12.9.1/"
-             "local_installers/cuda_12.9.1_576.02_windows.exe")
-
-# cuDNN 9.20.0 for CUDA 12
+             "local_installers/cuda_12.9.1_576.57_windows.exe")
 CUDNN_URL = ("https://developer.download.nvidia.com/compute/cudnn/9.20.0/"
-             "local_installers/cudnn_9.20.0_windows.exe")
+             "local_installers/cudnn_9.20.0_windows_x86_64.exe")
+TRT_URL   = ("https://developer.download.nvidia.com/compute/machine-learning/"
+             "tensorrt/10.16.0/zip/TensorRT-10.16.0.72.Windows.amd64.cuda-12.9.zip")
 
-# TRT 10.16.0.72: behind NVIDIA auth wall — user must download manually and
-# pass via --trt-zip.  No TRT_URL constant is defined.
-
-# ── DLL lists ─────────────────────────────────────────────────────────────────
-# CUDA 12.x DLL suffix is "12" for most libs; cuFFT stays at 12,
-# nvJitLink uses "120_0" (major.minor.0 without patch).
-# cusolver/curand keep their CUDA-11-era suffixes for ABI compatibility.
+# DLLs to copy from the CUDA 12.9 installer
+# cusolver64_11 and curand64_10 are loaded by ORT CUDA EP at init time (not lazy).
+# Without them, onnxruntime_providers_cuda.dll fails with error=1114.
 CUDA_DLLS = [
-    "cudart64_12.dll",       # CUDA runtime
-    "cublas64_12.dll",       # cuBLAS
-    "cublasLt64_12.dll",     # cuBLAS-Lt (lightweight)
-    "cufft64_12.dll",        # cuFFT
-    "nvJitLink_120_0.dll",   # JIT linker — required by ORT CUDA EP (CUDA 12.2+)
-    "cusolver64_11.dll",     # cuSolver — loaded by ORT CUDA EP at startup
-    "curand64_10.dll",       # cuRand   — loaded by ORT CUDA EP at startup
+    "cudart64_12.dll",
+    "cublas64_12.dll",
+    "cublasLt64_12.dll",
+    "cufft64_11.dll",       # cuFFT API version stays at 12 inside CUDA 12 toolkit
+    "nvJitLink_120_0.dll",  # required by ORT 1.22+ CUDA EP for JIT kernel compilation
+    "cusolver64_11.dll",    # cuSolver -- loaded by ORT CUDA EP at startup
+    "curand64_10.dll",      # cuRand   -- loaded by ORT CUDA EP at startup
 ]
 
-# cuDNN 9 split-library layout (same as in the cuda13 script).
+# DLLs to copy from the cuDNN 9.x installer (split library layout)
 CUDNN_DLLS = [
     "cudnn64_9.dll",
     "cudnn_ops64_9.dll",
@@ -83,20 +78,21 @@ CUDNN_DLLS = [
     "cudnn_heuristic64_9.dll",
 ]
 
-# TRT 10.3+ uses _10 suffix on the main DLLs.
+# Key TRT DLLs (we copy ALL *.dll from the archive, but warn if these are absent)
 TRT_REQUIRED_DLLS = [
     "nvinfer_10.dll",
     "nvonnxparser_10.dll",
 ]
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# Output and cache paths
 SCRIPT_DIR     = pathlib.Path(__file__).resolve().parent
-_candidate     = SCRIPT_DIR / "Win64_GPU"
-DEFAULT_OUTPUT = _candidate if _candidate.exists() else SCRIPT_DIR.parent / "Win64_GPU"
+_candidate     = SCRIPT_DIR / "Win64_Unified"
+DEFAULT_OUTPUT = _candidate if _candidate.exists() else SCRIPT_DIR.parent / "Win64_Unified"
 
 _appdata   = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
 CACHE_DIR  = pathlib.Path(_appdata) / "3Deflatten" / "dlcache-cuda12"
 
+# 7zr.exe standalone download URL (used if 7-Zip is not installed)
 _7ZR_URL   = "https://www.7-zip.org/a/7zr.exe"
 _7ZR_CACHE = CACHE_DIR / "7zr.exe"
 
@@ -107,7 +103,7 @@ _7Z_CANDIDATES = [
 
 
 # ---------------------------------------------------------------------------
-# Helpers (identical to collect_runtime_dlls_cuda13.py)
+# Helpers (mirrors collect_runtime_dlls.py)
 # ---------------------------------------------------------------------------
 
 def _progress_hook(count, block_size, total_size):
@@ -214,7 +210,9 @@ def collect_named_dlls(src_root: pathlib.Path, dll_names: list[str],
 
 def collect_all_trt_dlls(trt_root: pathlib.Path, out_dir: pathlib.Path) -> list[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Find all *.dll files in the archive
     all_dlls = [p for p in trt_root.rglob("*.dll")]
+    # Filter to lib\ directory if present (excludes samples, doc, etc.)
     lib_dlls = [p for p in all_dlls if "lib" in {part.lower() for part in p.parts}]
     if lib_dlls:
         all_dlls = lib_dlls
@@ -226,6 +224,7 @@ def collect_all_trt_dlls(trt_root: pathlib.Path, out_dir: pathlib.Path) -> list[
         kb = dest.stat().st_size // 1024
         print(f"  [OK] {src.name:<55} {kb:>10,} KB")
         n_copied += 1
+    # Check for required DLLs
     present = {p.name.lower() for p in all_dlls}
     missing = [d for d in TRT_REQUIRED_DLLS if d.lower() not in present]
     if missing:
@@ -244,25 +243,19 @@ def run(output_dir: pathlib.Path,
         no_confirm: bool) -> bool:
 
     print()
-    print("3Deflatten -- Collect GPU Runtime DLLs "
-          "(CUDA 12.9.1 + cuDNN 9.20.0 + TRT 10.16.0.72 / unified build)")
+    print("3Deflatten -- Collect GPU Runtime DLLs (CUDA 12.9 + cuDNN 9 + TRT 10.13 / Unified build)")
     print("=" * 85)
     print(f"Output : {output_dir}")
     print(f"Cache  : {CACHE_DIR}")
     print()
-    print("Unified ORT build targets CUDA 12.9.1 / TRT 10.16.0.72.")
-    print("First-run downloads (~5 GB total; cached in dlcache-cuda12/):")
-    print(f"  CUDA 12.9.1  installer : {CUDA_URL.split('/')[-1]}")
-    print(f"  cuDNN 9.20.0 installer : {CUDNN_URL.split('/')[-1]}")
+    print("ORT 1.24.3 gpu_cuda12 was compiled against CUDA 12.9 / TRT 10.16.0.72.")
+    print("First-run downloads (~5 GB total; cached in dlcache-cuda12/ for subsequent runs):")
+    print(f"  CUDA 12.9.1  installer  : {CUDA_URL.split('/')[-1]}")
+    print(f"  cuDNN 9.20.0 installer  : {CUDNN_URL.split('/')[-1]}")
     if trt_zip_path:
-        print(f"  TRT 10.16.0.72 zip    : {trt_zip_path}")
+        print(f"  TRT 10.16.0 zip (local) : {trt_zip_path}")
     else:
-        print("  TRT 10.16.0.72        : --trt-zip <path> REQUIRED")
-        print("    Download from: https://developer.nvidia.com/tensorrt")
-        print("    Expected file: TensorRT-10.16.0.72.Windows.win10.cuda-12.9.zip")
-        print()
-        print("  Re-run with:  python collect_runtime_dlls_cuda12.py --trt-zip <file>")
-        return False
+        print(f"  TRT 10.16.0 zip         : {TRT_URL.split('/')[-1]}")
     print()
     print("Only the required DLLs will be copied; all are NVIDIA-redistributable.")
     print()
@@ -275,7 +268,7 @@ def run(output_dir: pathlib.Path,
 
     all_missing = []
 
-    # ── CUDA 12.9.1 ───────────────────────────────────────────────────────────
+    # ── CUDA 12.9 ─────────────────────────────────────────────────────────────
     print("\n[1/3]  CUDA 12.9.1")
     cuda_archive = download(CUDA_URL, CACHE_DIR)
     cuda_ext     = CACHE_DIR / "cuda_extracted"
@@ -293,19 +286,22 @@ def run(output_dir: pathlib.Path,
     missing = collect_named_dlls(cudnn_ext, CUDNN_DLLS, output_dir, "cuDNN 9 DLLs")
     all_missing.extend(missing)
 
-    # ── TensorRT 10.16.0.72 ───────────────────────────────────────────────────
+    # ── TensorRT 10.16.0 ──────────────────────────────────────────────────────
     print("\n[3/3]  TensorRT 10.16.0.72")
-    trt_archive = pathlib.Path(trt_zip_path)
-    if not trt_archive.exists():
-        print(f"  [ERROR] TRT zip not found: {trt_archive}")
-        return False
+    if trt_zip_path:
+        trt_archive = pathlib.Path(trt_zip_path)
+        if not trt_archive.exists():
+            print(f"  [ERROR] TRT zip not found: {trt_archive}")
+            return False
+    else:
+        trt_archive = download(TRT_URL, CACHE_DIR)
     trt_ext = CACHE_DIR / "trt_extracted"
     if not trt_ext.exists():
         extract_zip_file(trt_archive, trt_ext)
     trt_missing = collect_all_trt_dlls(trt_ext, output_dir)
     if trt_missing:
         print()
-        print(f"  [WARN] {len(trt_missing)} key TRT DLL(s) not found: "
+        print(f"  [WARN] {len(trt_missing)} key TRT DLL(s) not found in archive: "
               + ", ".join(trt_missing))
 
     # ── Summary ───────────────────────────────────────────────────────────────
@@ -327,8 +323,8 @@ def run(output_dir: pathlib.Path,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download and bundle CUDA 12.9.1 / cuDNN 9.20.0 / TRT 10.16.0.72 DLLs "
-                    "for the 3Deflatten unified build",
+        description="Download and bundle CUDA 12.9 / cuDNN 9 / TRT 10.13 DLLs "
+                    "for the 3Deflatten Unified build",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -336,9 +332,8 @@ def main():
         "--output", default=str(DEFAULT_OUTPUT),
         help=f"Output directory (default: {DEFAULT_OUTPUT})")
     parser.add_argument(
-        "--trt-zip", default=None, metavar="PATH", required=True,
-        help="Path to locally downloaded TensorRT-10.16.0.72 zip "
-             "(required — TRT is behind NVIDIA auth wall)")
+        "--trt-zip", default=None, metavar="PATH",
+        help="Use a locally downloaded TRT zip instead of downloading")
     parser.add_argument(
         "--no-confirm", action="store_true",
         help="Skip the 'Proceed?' prompt (for CI / scripted use)")
