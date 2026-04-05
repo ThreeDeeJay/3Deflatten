@@ -78,19 +78,40 @@ private:
     bool m_gpuOK       = false;
     int  m_renderCount = 0;
 
-    // Constant buffer layout (must match stereo_warp.hlsl cbuffer CBStereo)
-    // 48 bytes = 3 × 16-byte D3D11 cbuffer rows.
+    // Constant buffer layout — 48 bytes = 3 × 16-byte rows.
+    // MUST match the cbuffer CBStereo in all embedded HLSL.
     struct alignas(16) CBStereo {
         float convergence;
         float separation;
         float flipDepth;      // unused (depth pre-flipped on CPU)
         int   outputMode;     // 0=SBS 1=TAB
+        // row 2
         float texelW;         // 1.0f / srcWidth
         float texelH;         // 1.0f / srcHeight
         int   infillMode;     // 0..4
-        float depthOffsetU;   // UV offset applied to ALL depth samples (motion compensation)
-        // -- row 3 --
-        float depthOffsetV;
-        float pad0, pad1, pad2;
+        float depthOffsetU;   // motion-comp UV offset (pixels/srcW)
+        // row 3
+        float depthOffsetV;   // motion-comp UV offset (pixels/srcH)
+        float discThresh;     // depth jump > this → cut mesh edge (default 0.05)
+        float eyeSign;        // +1=left/top eye, −1=right/bottom (mesh pass)
+        float pad1;
     };
+
+    // ── Mesh reprojection resources (pass 2 of 2) ─────────────────────────────
+    // Reference: Shih et al. "3D Photography using Context-aware Layered Depth
+    // Inpainting" (CVPR 2020) §3.  We build a triangle mesh from the depth map at
+    // half source resolution.  Triangles that span depth discontinuities are culled
+    // via SV_CullDistance (§3 "Mesh generation").  The mesh is rendered on top of
+    // the UV-warp background (pass 1) with z-buffering; disoccluded holes retain
+    // the UV-warp inpaint — the groundwork for a future learned inpainter.
+    ComPtr<ID3D11VertexShader>      m_meshVS;
+    ComPtr<ID3D11PixelShader>       m_meshPS;
+    ComPtr<ID3D11InputLayout>       m_meshIL;
+    ComPtr<ID3D11Buffer>            m_meshVB;   // float2 uv per vertex, meshW*meshH verts
+    ComPtr<ID3D11Buffer>            m_meshIB;   // uint32 indices, (meshW-1)*(meshH-1)*6
+    ComPtr<ID3D11Texture2D>         m_dsTex;    // depth-stencil for mesh z-test
+    ComPtr<ID3D11DepthStencilView>  m_dsv;
+    ComPtr<ID3D11DepthStencilState> m_dsState;  // LESS, depth write enabled
+    ComPtr<ID3D11RasterizerState>   m_meshRaster; // no backface cull
+    int                             m_meshW = 0, m_meshH = 0;
 };
