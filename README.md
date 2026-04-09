@@ -4,6 +4,8 @@
 
 **Real-time AI 2D-to-3D DirectShow video filter for Windows (32-bit & 64-bit)**
 
+<img width="3840" height="1080" alt="Image" src="https://github.com/user-attachments/assets/e5618555-f873-4fa3-b0b3-a4e24dbac04e" />
+
 3Deflatten is a DirectShow `.ax` filter that intercepts any video stream, estimates per-frame depth using a GPU-accelerated ONNX AI model (Depth Anything V2), and outputs a full-resolution **Side-by-Side (SBS)** or **Top-and-Bottom (TAB)** stereoscopic frame suitable for 3D displays, HMDs, and media players.
 
 Licensed under the **GNU General Public License v3**.
