@@ -218,8 +218,9 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DORT_BACKEND=${{ matrix.ort_backend }}
           -DORT_UNIFIED_DIR="${{github.workspace}}\onnxruntime"
-          -DCMAKE_CUDA_FLAGS="-I'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\include'"
-          -Ddummy_target=ON
+          -DCUDA_HOME="C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9"
+#          -DCMAKE_CUDA_FLAGS="-I'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\include'"
+#          -Ddummy_target=ON
 #          -DCUDAToolkit_ROOT="C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}"
 #          -DCMAKE_INCLUDE_PATH="C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include"
 
