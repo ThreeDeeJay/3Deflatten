@@ -214,9 +214,6 @@ jobs:
           -DORT_UNIFIED_DIR="${{github.workspace}}\onnxruntime"
         shell: cmd
 
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include\cuda_runtime.h"
-
-
       - name: Build
         run: cmake --build build --config Release --parallel
         shell: cmd
