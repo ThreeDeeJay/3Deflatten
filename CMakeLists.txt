@@ -93,6 +93,15 @@ target_compile_options(strmbase PRIVATE
 # Select with:  cmake -B build -DORT_BACKEND=GPU   (or GPU13, DirectML, Unified)
 #
 set(ORT_BACKEND "DirectML" CACHE STRING "ORT inference backend: DirectML, GPU, GPU13, or Unified")
+# Ensure CUDAToolkit is found for Unified backend support
+if(NOT ORT_UNIFIED_DIR AND NOT DEFINED CUDA_HOME)
+    message(FATAL_ERROR "CUDA_HOME or ORT_UNIFIED_DIR required for GPU inference")
+endif()
+# === ADD THIS BLOCK === #
+find_package(CUDAToolkit REQUIRED)
+# Ensure headers are included and libraries linked properly
+target_include_directories(3Deflatten PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+target_link_libraries(3Deflatten PRIVATE cudart::cudart)
 set_property(CACHE ORT_BACKEND PROPERTY STRINGS "DirectML" "GPU" "GPU13" "Unified")
 message(STATUS "ORT backend: ${ORT_BACKEND}")
 
