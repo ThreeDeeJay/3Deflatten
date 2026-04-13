@@ -3,6 +3,11 @@
 #pragma once
 #include <unknwn.h>
 
+enum class InferenceRuntime : int {
+    OnnxRuntime = 0,  // use ORT with the Provider combo
+    TensorRTRtx = 1,  // native TRT-RTX API (bypasses ORT entirely)
+};
+
 enum class OutputMode : int {
     SideBySide   = 0,   // full-res SBS  (output width  = 2x input)
     TopAndBottom = 1,   // full-res TAB  (output height = 2x input)
@@ -50,6 +55,7 @@ struct DeflattenConfig {
     InfillMode  infillMode;    // occlusion gap fill algorithm        (default Outer)
     BOOL        showDepth;     // overlay depth map on both views (toggleable via hotkey)
     int         depthViewKey;  // VK code to toggle showDepth (default VK_RSHIFT = 161)
+    InferenceRuntime inferenceRuntime; // OnnxRuntime or TensorRTRtx native
 };
 
 MIDL_INTERFACE("4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F")

@@ -32,6 +32,7 @@ public:
 
     HRESULT Load(const std::wstring& modelPath,
                  GPUProvider         provider,
+                 InferenceRuntime    runtime,
                  std::wstring&       outGPUInfo);
 
     HRESULT Estimate(const BYTE* srcData,
@@ -128,6 +129,17 @@ private:
 
     std::vector<float>  m_prevDepth;
     int                 m_prevW = 0, m_prevH = 0;
+
+    // ── Native TRT-RTX session (ORT_ENABLE_TRTRTX builds only) ──────────────
+    // When inferenceRuntime == TensorRTRtx this is used instead of the ORT session.
+    struct TrtRtxSession;
+    std::unique_ptr<TrtRtxSession> m_trtRtx;
+#ifdef ORT_ENABLE_TRTRTX
+    HRESULT LoadTrtRtxNative(const std::wstring& onnxPath, std::wstring& outInfo);
+    HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH, int srcStride,
+                            bool isBGR, bool flipDepth, float smoothAlpha,
+                            DepthResult& result);
+#endif
 
     static constexpr float MEAN[3] = {0.485f, 0.456f, 0.406f};
     static constexpr float STD[3]  = {0.229f, 0.224f, 0.225f};

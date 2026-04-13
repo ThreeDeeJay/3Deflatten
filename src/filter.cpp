@@ -118,6 +118,7 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.infillMode   = (InfillMode)getI(L"infillMode", (int)InfillMode::Outer);
     m_cfg.showDepth    = getI(L"showDepth", 0) ? TRUE : FALSE;
     m_cfg.depthViewKey = getI(L"depthViewKey", 161);  // 161 = VK_RSHIFT
+    m_cfg.inferenceRuntime = (InferenceRuntime)getI(L"inferenceRuntime", 0);
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
@@ -148,8 +149,9 @@ void C3DeflattenFilter::SaveIni() const {
     setI(L"gpuProvider",  (int)m_cfg.gpuProvider);
     setI(L"flipDepth",    m_cfg.flipDepth ? 1 : 0);
     setI(L"infillMode",   (int)m_cfg.infillMode);
-    setI(L"showDepth",    m_cfg.showDepth ? 1 : 0);
-    setI(L"depthViewKey", m_cfg.depthViewKey);
+    setI(L"showDepth",         m_cfg.showDepth ? 1 : 0);
+    setI(L"depthViewKey",      m_cfg.depthViewKey);
+    setI(L"inferenceRuntime",  (int)m_cfg.inferenceRuntime);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
 
     LOG_INFO("SaveIni: '", m_iniPath, "'");
@@ -173,6 +175,7 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.infillMode    = InfillMode::Outer;
     m_cfg.showDepth     = FALSE;
     m_cfg.depthViewKey  = 161;  // VK_RSHIFT
+    m_cfg.inferenceRuntime = InferenceRuntime::OnnxRuntime;
     m_hadRealDepth    = false;
     m_skipEvery       = 1;
     m_skipCounter     = 0;
@@ -499,7 +502,7 @@ HRESULT C3DeflattenFilter::StartStreaming() {
     if (!m_depth->IsLoaded()) {
         LOG_INFO("Loading model path='", m_modelPath,
                  "' provider=", (int)m_cfg.gpuProvider);
-        hr = m_depth->Load(m_modelPath, m_cfg.gpuProvider, m_gpuInfo);
+        hr = m_depth->Load(m_modelPath, m_cfg.gpuProvider, m_cfg.inferenceRuntime, m_gpuInfo);
         if (FAILED(hr))
             LOG_ERR("Model load FAILED ", HRStr(hr), " - flat depth fallback");
         else {
@@ -833,7 +836,7 @@ STDMETHODIMP C3DeflattenFilter::GetGPUInfo(LPWSTR buf, UINT cch) {
 }
 STDMETHODIMP C3DeflattenFilter::ReloadModel() {
     LOG_INFO("ReloadModel path='",m_modelPath,"'");
-    HRESULT hr = m_depth->Load(m_modelPath, m_cfg.gpuProvider, m_gpuInfo);
+    HRESULT hr = m_depth->Load(m_modelPath, m_cfg.gpuProvider, m_cfg.inferenceRuntime, m_gpuInfo);
     LOG_INFO("ReloadModel ",SUCCEEDED(hr)?"OK":"FAILED"," ",HRStr(hr));
     return hr;
 }

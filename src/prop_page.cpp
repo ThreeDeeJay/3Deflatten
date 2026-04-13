@@ -75,24 +75,26 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
     switch (msg) {
 
     case WM_INITDIALOG: {
-        // Note: CBasePropertyPage's DialogProc sets m_hwnd = hwnd BEFORE
-        // calling us, so m_hwnd is valid here.  Use hwnd directly for safety.
-
         // Slider ranges
         SendDlgItemMessage(hwnd, IDC_CONV_SLIDER,   TBM_SETRANGE, TRUE, MAKELPARAM(0, CONV_TICKS));
         SendDlgItemMessage(hwnd, IDC_SEP_SLIDER,    TBM_SETRANGE, TRUE, MAKELPARAM(0, SEP_TICKS));
         SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, SMOOTH_TICKS));
 
-        // Output Mode — must match OutputMode enum order exactly
+        // Output Mode
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Side-by-Side (SBS)");
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Top-and-Bottom (TAB)");
 
-        // Infill mode – 3 options matching InfillMode enum
+        // Infill mode
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inner  (bg behind edge)");
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Outer  (extend far edge)");
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Blend  (context-aware mix)");
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"EdgeClamp  (SuperDepth3D style)");
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inpaint  (3D Photo bilateral)");
+
+        // Inference Runtime — must match InferenceRuntime enum order exactly
+        SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0, (LPARAM)L"ONNXRuntime");
+        SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0,
+            (LPARAM)L"TensorRT RTX  (native, fastest)");
 
         // GPU Provider — must match GPUProvider enum order exactly
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Auto (best available)");
@@ -100,7 +102,7 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"CUDA  (NVIDIA, fast)");
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"DirectML  (any DX12 GPU)");
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"CPU  (slow, always works)");
-        SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"TensorRT-RTX  (NVIDIA, fastest – unified build only)");
+        SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"TensorRT-RTX  (unified build only)");
 
         PopulateModelCombo(hwnd);
         PopulateControls(hwnd);
@@ -137,10 +139,22 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_GPU_COMBO && note==CBN_SELCHANGE) {
-            // Don't reload now; user must press Reload.
             ReadControls(hwnd); SetDirty();
             SetDlgItemTextW(hwnd, IDC_GPU_INFO,
                 L"Press 'Reload' to apply the new provider.");
+            break;
+        }
+        if (ctl==IDC_RUNTIME_COMBO && note==CBN_SELCHANGE) {
+            ReadControls(hwnd);
+            // Show/hide the Provider row based on runtime selection.
+            // TRT-RTX native bypasses ORT entirely so Provider is irrelevant.
+            bool isTrtRtx = (m_cfg.inferenceRuntime == InferenceRuntime::TensorRTRtx);
+            ShowWindow(GetDlgItem(hwnd, IDC_PROVIDER_LABEL), isTrtRtx ? SW_HIDE : SW_SHOW);
+            ShowWindow(GetDlgItem(hwnd, IDC_GPU_COMBO),      isTrtRtx ? SW_HIDE : SW_SHOW);
+            SetDirty();
+            SetDlgItemTextW(hwnd, IDC_GPU_INFO,
+                isTrtRtx ? L"TRT-RTX: engine built next to .onnx file on first Reload."
+                          : L"Press 'Reload' to apply the new runtime/provider.");
             break;
         }
         if (ctl==IDC_MODEL_COMBO && note==CBN_SELCHANGE) {
@@ -231,20 +245,24 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
     SendDlgItemMessage(hwnd, IDC_CONV_SLIDER,   TBM_SETPOS, TRUE, ConvToSlider(m_cfg.convergence));
     SendDlgItemMessage(hwnd, IDC_SEP_SLIDER,    TBM_SETPOS, TRUE, SepToSlider(m_cfg.separation));
     SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER, TBM_SETPOS, TRUE, SmoothToSlider(m_cfg.depthSmooth));
-    SendDlgItemMessage(hwnd, IDC_MODE_COMBO,   CB_SETCURSEL, (int)m_cfg.outputMode,  0);
-    SendDlgItemMessage(hwnd, IDC_GPU_COMBO,    CB_SETCURSEL, (int)m_cfg.gpuProvider, 0);
-    SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_SETCURSEL, (int)m_cfg.infillMode,  0);
-    SendDlgItemMessage(hwnd, IDC_FLIP_CHECK, BM_SETCHECK,
-                       m_cfg.flipDepth ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessage(hwnd, IDC_MODE_COMBO,    CB_SETCURSEL, (int)m_cfg.outputMode,  0);
+    SendDlgItemMessage(hwnd, IDC_GPU_COMBO,     CB_SETCURSEL, (int)m_cfg.gpuProvider, 0);
+    SendDlgItemMessage(hwnd, IDC_INFILL_COMBO,  CB_SETCURSEL, (int)m_cfg.infillMode,  0);
+    SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_SETCURSEL, (int)m_cfg.inferenceRuntime, 0);
+    SendDlgItemMessage(hwnd, IDC_FLIP_CHECK,  BM_SETCHECK,
+                       m_cfg.flipDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_SETCHECK,
-                       m_cfg.showDepth ? BST_CHECKED : BST_UNCHECKED, 0);
+                       m_cfg.showDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    // DA3-Streaming checkbox: checked when model path is the sentinel
+    // Show/hide Provider row based on runtime
+    bool isTrtRtx = (m_cfg.inferenceRuntime == InferenceRuntime::TensorRTRtx);
+    ShowWindow(GetDlgItem(hwnd, IDC_PROVIDER_LABEL), isTrtRtx ? SW_HIDE : SW_SHOW);
+    ShowWindow(GetDlgItem(hwnd, IDC_GPU_COMBO),      isTrtRtx ? SW_HIDE : SW_SHOW);
+
+    // DA3-Streaming checkbox
     bool streaming = (_wcsicmp(m_modelPath, DepthEstimator::STREAMING_SENTINEL) == 0);
     SendDlgItemMessage(hwnd, IDC_STREAM_CHECK, BM_SETCHECK,
                        streaming ? BST_CHECKED : BST_UNCHECKED, 0);
-    // Smooth slider is disabled when streaming is active (streaming handles
-    // temporal consistency; external smoothing creates a feedback loop)
     EnableWindow(GetDlgItem(hwnd, IDC_SMOOTH_SLIDER), !streaming);
     EnableWindow(GetDlgItem(hwnd, IDC_SMOOTH_LABEL),  !streaming);
 
@@ -263,6 +281,8 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
                         ? TRUE : FALSE;
     m_cfg.showDepth   = (SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
+    m_cfg.inferenceRuntime = (InferenceRuntime)std::min(1,
+        std::max(0, (int)SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_GETCURSEL, 0, 0)));
 }
 
 void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {

@@ -22,6 +22,8 @@
 #define IDC_APPLY_BTN      1014   // Apply all settings + reload immediately
 #define IDC_STREAM_CHECK   1015   // DA3-Streaming temporal alignment checkbox
 #define IDC_DEPTH_CHECK    1016   // Show depth map overlay checkbox
+#define IDC_RUNTIME_COMBO  1017   // Inference runtime: ONNXRuntime / TensorRT RTX
+#define IDC_PROVIDER_LABEL 1018   // "Provider:" label (hidden when TRT-RTX selected)
 
 // ── Trackbar style constants (commctrl.h equivalents for rc.exe) ──────────────
 // rc.exe does not automatically include commctrl.h, so we define what we need.
