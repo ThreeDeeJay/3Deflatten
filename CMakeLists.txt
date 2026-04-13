@@ -409,8 +409,6 @@ endif()
 message(STATUS "ORT include: ${ORT_INC}")
 message(STATUS "ORT lib:     ${ORT_LIB}")
 
-find_package(CUDAToolkit REQUIRED)
-
 # ── Shaders ───────────────────────────────────────────────────────────────────
 find_program(FXC fxc
     HINTS
