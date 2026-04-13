@@ -217,7 +217,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DORT_BACKEND=${{ matrix.ort_backend }}
           -DORT_UNIFIED_DIR="${{github.workspace}}\onnxruntime"
-          -DCUDA_TOOLKIT_ROOT_DIR=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}
+          -DCMAKE_INCLUDE_PATH="C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\include"
 
       - name: Build
         run: cmake --build build --config Release --parallel
