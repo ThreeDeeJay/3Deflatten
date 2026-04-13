@@ -298,6 +298,48 @@ elseif(ORT_BACKEND STREQUAL "Unified")
         ORT_ENABLE_TRTRTX
         "ORT_CUDA_MAJOR=12")
 
+    # ── CUDA Toolkit (provides cuda_runtime.h and cudart import lib) ───────────
+    # Required for the TRT-RTX native path.  Install CUDA 12.x and either set
+    # CUDAToolkit_ROOT or let CMake find it via the system registry.
+    find_package(CUDAToolkit REQUIRED)
+    message(STATUS "CUDA Toolkit: ${CUDAToolkit_VERSION}  inc=${CUDAToolkit_INCLUDE_DIRS}")
+
+    # ── TRT-RTX SDK (NvInfer.h, NvOnnxParser.h, nvinfer_10.lib) ──────────────
+    # Set -DORT_TRTRTX_HOME=<path> to the root of the TensorRT-RTX SDK zip, e.g.:
+    #   TensorRT-RTX-1.4.0.76-Windows-amd64-cuda-12.9-Release-external/
+    set(ORT_TRTRTX_HOME "" CACHE PATH
+        "TRT-RTX SDK root (for ORT_ENABLE_TRTRTX; contains include/ and lib/)")
+    if(ORT_TRTRTX_HOME AND EXISTS "${ORT_TRTRTX_HOME}")
+        message(STATUS "TRT-RTX SDK: ${ORT_TRTRTX_HOME}")
+        set(_TRTRTX_INC "${ORT_TRTRTX_HOME}/include")
+        # The import lib may be nvinfer_10.lib or nvinfer.lib depending on the SDK version
+        foreach(_nvinfer_name "nvinfer_10.lib" "nvinfer.lib")
+            if(EXISTS "${ORT_TRTRTX_HOME}/lib/${_nvinfer_name}")
+                set(_TRTRTX_INFER_LIB "${ORT_TRTRTX_HOME}/lib/${_nvinfer_name}")
+                break()
+            endif()
+        endforeach()
+        foreach(_nvonnx_name "nvonnxparser_10.lib" "nvonnxparser.lib")
+            if(EXISTS "${ORT_TRTRTX_HOME}/lib/${_nvonnx_name}")
+                set(_TRTRTX_PARSER_LIB "${ORT_TRTRTX_HOME}/lib/${_nvonnx_name}")
+                break()
+            endif()
+        endforeach()
+        if(NOT _TRTRTX_INFER_LIB)
+            message(WARNING "TRT-RTX: nvinfer*.lib not found in ${ORT_TRTRTX_HOME}/lib/")
+        else()
+            message(STATUS "TRT-RTX infer lib : ${_TRTRTX_INFER_LIB}")
+        endif()
+        if(NOT _TRTRTX_PARSER_LIB)
+            message(WARNING "TRT-RTX: nvonnxparser*.lib not found in ${ORT_TRTRTX_HOME}/lib/")
+        endif()
+    else()
+        message(WARNING
+            "ORT_TRTRTX_HOME not set or not found.\n"
+            "  The TRT-RTX native inference path will fail to compile.\n"
+            "  Set -DORT_TRTRTX_HOME=<path_to_trt_rtx_sdk>")
+    endif()
+
     message(STATUS "ORT Unified build:")
     message(STATUS "  ORT_INC: ${ORT_INC}")
     message(STATUS "  ORT_LIB: ${ORT_LIB}")
@@ -490,8 +532,17 @@ target_include_directories(3Deflatten PRIVATE
     "${CMAKE_BINARY_DIR}"
     "${WINSDK_INC_DIR}/um"
     "${WINSDK_INC_DIR}/shared"
-    "${CUDA_HOME}/include"
 )
+
+# Unified-backend extra includes (CUDA Toolkit + TRT-RTX headers)
+if(ORT_BACKEND STREQUAL "Unified")
+    if(CUDAToolkit_INCLUDE_DIRS)
+        target_include_directories(3Deflatten PRIVATE "${CUDAToolkit_INCLUDE_DIRS}")
+    endif()
+    if(_TRTRTX_INC AND EXISTS "${_TRTRTX_INC}")
+        target_include_directories(3Deflatten PRIVATE "${_TRTRTX_INC}")
+    endif()
+endif()
 
 target_compile_definitions(3Deflatten PRIVATE
     _USRDLL WIN32_LEAN_AND_MEAN NOMINMAX
@@ -509,6 +560,19 @@ target_link_libraries(3Deflatten PRIVATE
     advapi32.lib comdlg32.lib comctl32.lib shlwapi.lib shell32.lib
     delayimp.lib          # required for /DELAYLOAD
 )
+
+# Unified-backend: link CUDA runtime + TRT-RTX import libs
+if(ORT_BACKEND STREQUAL "Unified")
+    if(TARGET CUDA::cudart)
+        target_link_libraries(3Deflatten PRIVATE CUDA::cudart)
+    endif()
+    if(_TRTRTX_INFER_LIB)
+        target_link_libraries(3Deflatten PRIVATE "${_TRTRTX_INFER_LIB}")
+    endif()
+    if(_TRTRTX_PARSER_LIB)
+        target_link_libraries(3Deflatten PRIVATE "${_TRTRTX_PARSER_LIB}")
+    endif()
+endif()
 
 # ── Delay-load ORT ───────────────────────────────────────────────────────────
 # With delay-loading, onnxruntime.dll is NOT resolved at .ax load time; it is
