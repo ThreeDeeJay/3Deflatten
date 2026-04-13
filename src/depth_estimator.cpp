@@ -233,114 +233,170 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 // we use a tiny subset (cudaMalloc, cudaMemcpy, cudaStreamCreate, graph capture).
 #ifdef ORT_ENABLE_TRTRTX
 
-#include <cuda_runtime.h>   // for CUDA types — header-only, no lib needed
+// ── Zero-header CUDA API loader ───────────────────────────────────────────────
+// We never include cuda_runtime.h — the CUDA Toolkit is not required to compile.
+// Instead we declare only the opaque types and function signatures we need, then
+// load them at runtime from the cudart DLL the user already bundled.
+//
+// Opaque CUDA handle types
+using CUstream  = void*;   // cudaStream_t
+using CUgraph   = void*;   // cudaGraph_t
+using CUgraphEx = void*;   // cudaGraphExec_t
+using CUresult  = int;     // cudaError_t  (0 = cudaSuccess)
+enum { CUDA_SUCCESS = 0 };
+// cudaMemcpyKind
+enum { cudaMemcpyHtoD = 1, cudaMemcpyDtoH = 2 };
+// cudaStreamCaptureMode
+enum { cudaCaptureModeGlobal = 0 };
+// cudaDeviceAttr
+enum { cudaAttrComputeCapMajor = 75, cudaAttrComputeCapMinor = 76 };
 
-// ---------------------------------------------------------------------------
-// Minimal TRT vtable wrappers — enough to build and run a model
-// ---------------------------------------------------------------------------
+struct CudaApi {
+    // Function pointer typedefs
+    using Fn_StreamCreate      = CUresult (*)(CUstream*);
+    using Fn_StreamDestroy     = CUresult (*)(CUstream);
+    using Fn_StreamSync        = CUresult (*)(CUstream);
+    using Fn_StreamBeginCap    = CUresult (*)(CUstream, int);
+    using Fn_StreamEndCap      = CUresult (*)(CUstream, CUgraph*);
+    using Fn_GraphInstantiate  = CUresult (*)(CUgraphEx*, CUgraph, void*, void*, unsigned);
+    using Fn_GraphLaunch       = CUresult (*)(CUgraphEx, CUstream);
+    using Fn_GraphDestroy      = CUresult (*)(CUgraph);
+    using Fn_GraphExecDestroy  = CUresult (*)(CUgraphEx);
+    using Fn_Malloc            = CUresult (*)(void**, size_t);
+    using Fn_Free              = CUresult (*)(void*);
+    using Fn_MallocHost        = CUresult (*)(void**, size_t);
+    using Fn_FreeHost          = CUresult (*)(void*);
+    using Fn_MemcpyAsync       = CUresult (*)(void*, const void*, size_t, int, CUstream);
+    using Fn_GetDevice         = CUresult (*)(int*);
+    using Fn_DeviceGetAttr     = CUresult (*)(int*, int, int);
+
+    Fn_StreamCreate     StreamCreate     = nullptr;
+    Fn_StreamDestroy    StreamDestroy    = nullptr;
+    Fn_StreamSync       StreamSync       = nullptr;
+    Fn_StreamBeginCap   StreamBeginCap   = nullptr;
+    Fn_StreamEndCap     StreamEndCap     = nullptr;
+    Fn_GraphInstantiate GraphInstantiate = nullptr;
+    Fn_GraphLaunch      GraphLaunch      = nullptr;
+    Fn_GraphDestroy     GraphDestroy     = nullptr;
+    Fn_GraphExecDestroy GraphExecDestroy = nullptr;
+    Fn_Malloc           Malloc           = nullptr;
+    Fn_Free             Free_            = nullptr;
+    Fn_MallocHost       MallocHost       = nullptr;
+    Fn_FreeHost         FreeHost         = nullptr;
+    Fn_MemcpyAsync      MemcpyAsync      = nullptr;
+    Fn_GetDevice        GetDevice        = nullptr;
+    Fn_DeviceGetAttr    DeviceGetAttr    = nullptr;
+
+    HMODULE hCudart = nullptr;
+    bool    ok      = false;
+
+    bool Load() {
+        // Try all cudart DLL names in priority order
+        const wchar_t* names[] = {
+            L"cudart64_12.dll",   // CUDA 12.x (unified build target)
+            L"cudart64_13.dll",   // CUDA 13.x
+            L"cudart64_110.dll",  // CUDA 11.x (fallback)
+        };
+        for (auto* name : names) {
+            hCudart = LoadLibraryExW(name, nullptr,
+                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
+            if (hCudart) { LOG_INFO("TRT-RTX: loaded ", std::wstring(name)); break; }
+        }
+        if (!hCudart) {
+            LOG_ERR("TRT-RTX: cudart DLL not found. Bundle cudart64_12.dll next to the .ax.");
+            return false;
+        }
+        auto g = [&](const char* n) { return GetProcAddress(hCudart, n); };
+        StreamCreate     = (Fn_StreamCreate)    g("cudaStreamCreate");
+        StreamDestroy    = (Fn_StreamDestroy)   g("cudaStreamDestroy");
+        StreamSync       = (Fn_StreamSync)      g("cudaStreamSynchronize");
+        StreamBeginCap   = (Fn_StreamBeginCap)  g("cudaStreamBeginCapture");
+        StreamEndCap     = (Fn_StreamEndCap)    g("cudaStreamEndCapture");
+        GraphInstantiate = (Fn_GraphInstantiate)g("cudaGraphInstantiate");
+        GraphLaunch      = (Fn_GraphLaunch)     g("cudaGraphLaunch");
+        GraphDestroy     = (Fn_GraphDestroy)    g("cudaGraphDestroy");
+        GraphExecDestroy = (Fn_GraphExecDestroy)g("cudaGraphExecDestroy");
+        Malloc           = (Fn_Malloc)          g("cudaMalloc");
+        Free_            = (Fn_Free)            g("cudaFree");
+        MallocHost       = (Fn_MallocHost)      g("cudaMallocHost");
+        FreeHost         = (Fn_FreeHost)        g("cudaFreeHost");
+        MemcpyAsync      = (Fn_MemcpyAsync)     g("cudaMemcpyAsync");
+        GetDevice        = (Fn_GetDevice)       g("cudaGetDevice");
+        DeviceGetAttr    = (Fn_DeviceGetAttr)   g("cudaDeviceGetAttribute");
+        // Mandatory subset — fail if missing
+        ok = StreamCreate && StreamDestroy && StreamSync && Malloc && Free_ &&
+             MallocHost && FreeHost && MemcpyAsync && GetDevice && DeviceGetAttr;
+        if (!ok) LOG_ERR("TRT-RTX: missing required CUDA functions in cudart DLL.");
+        return ok;
+    }
+
+    ~CudaApi() { if (hCudart) { FreeLibrary(hCudart); hCudart = nullptr; } }
+};
+
+// ── Minimal TRT vtable wrappers ───────────────────────────────────────────────
 namespace TrtApi {
+using FnCreateBuilder = void* (*)(void* logger);
+using FnCreateRuntime = void* (*)(void* logger);
+using FnCreateParser  = void* (*)(void* network, void* logger);
 
-// We load these two entry points from nvinfer_10.dll.
-// createInferBuilder / createInferRuntime use a stable C-linkage export.
-using FnCreateBuilder  = void* (*)(void* logger);
-using FnCreateRuntime  = void* (*)(void* logger);
-
-// nvonnxparser_10.dll
-using FnCreateParser   = void* (*)(void* network, void* logger);
-
-// Vtable slot indices (zero-indexed, counting from IRefCounted):
-// These are fixed in TRT 8+ OSS headers (NvInfer.h):
-//   IBuilder:
-//     0  ~IBuilder            (destructor, don't call)
-//     1  createNetworkV2
-//     2  createOptimizationProfile  (skip)
-//     3  createBuilderConfig
-//     4  buildSerializedNetwork
-//   IBuilderConfig:
-//     3  setMemoryPoolLimit
-//     9  setFlag
-//    32  setBuilderOptimizationLevel  (TRT 8.6+)
-//   INetworkDefinition: (used by parser, not us directly)
-//   IRuntime:
-//     3  deserializeCudaEngine
-//   ICudaEngine:
-//     2  createExecutionContext
-//     7  getIOTensorName
-//     8  getNbIOTensors
-//    13  getTensorIOMode
-//    14  getTensorShape (not available pre-TRT9 for dynamic)
-//   IExecutionContext:
-//     8  setTensorAddress
-//    11  enqueueV3
-//   IHostMemory:
-//     0  data
-//     1  size
-//   IOnnxConfig / IParser:
-//     4  parseFromFile
 template<typename Ret, int Slot, typename... Args>
 static Ret vcall(void* obj, Args... args) {
     using Fn = Ret(__thiscall*)(void*, Args...);
     auto** vtbl = *reinterpret_cast<void***>(obj);
     return reinterpret_cast<Fn>(vtbl[Slot])(obj, std::forward<Args>(args)...);
 }
-
 }  // namespace TrtApi
 
-// Simple TRT logger that routes to our LOG system
+// Simple TRT ILogger — one virtual method: log(severity, msg)
 struct TrtLogger {
     void* vtbl[1];
     static void __cdecl log_cb(void* /*self*/, int sev, const char* msg) {
-        if (sev <= 2) LOG_INFO("[TRT] ", msg);
+        if      (sev <= 2) LOG_INFO("[TRT] ", msg);
         else if (sev == 3) LOG_WARN("[TRT] ", msg);
     }
 };
 
+// Forward-declare GetDllDir (defined later in this file) so LoadTrtRtxNative
+// can call it without requiring a header.
+__declspec(noinline) static std::wstring GetDllDir();
+
 struct DepthEstimator::TrtRtxSession {
-    // Loaded DLLs
-    HMODULE hInfer    = nullptr;
-    HMODULE hParser   = nullptr;
+    HMODULE    hInfer   = nullptr;
+    HMODULE    hParser  = nullptr;
+    void*      builder  = nullptr;
+    void*      runtime_ = nullptr;
+    void*      engine   = nullptr;
+    void*      context  = nullptr;
+    TrtLogger  logger;
+    CudaApi    cuda;
 
-    // Raw TRT object pointers (COM-like vtable layout)
-    void*   builder   = nullptr;
-    void*   runtime_  = nullptr;
-    void*   engine    = nullptr;
-    void*   context   = nullptr;
-    TrtLogger logger;
+    int    modelW = 518, modelH = 518;
+    CUstream    stream  = nullptr;
+    CUgraph     graph   = nullptr;
+    CUgraphEx   graphEx = nullptr;
+    bool        graphReady = false;
 
-    // Model dimensions (determined at build time)
-    int modelW = 518, modelH = 518;
-    bool fp16  = true;
-
-    // CUDA resources
-    cudaStream_t    stream  = nullptr;
-    cudaGraph_t     graph   = nullptr;
-    cudaGraphExec_t graphEx = nullptr;
-    bool            graphReady = false;
-
-    // Device/pinned memory
-    float* d_input   = nullptr;   // device: [1,3,H,W] float32
-    float* d_output  = nullptr;   // device: [1,1,H,W] float32
-    float* h_output  = nullptr;   // pinned host: output readback
-
+    float* d_input  = nullptr;
+    float* d_output = nullptr;
+    float* h_output = nullptr;
     size_t inputBytes  = 0;
     size_t outputBytes = 0;
 
-    // Names of the I/O tensors
     std::string inputName, outputName;
-
-    std::string enginePath;   // disk cache path
+    std::string enginePath;
 
     ~TrtRtxSession() { Destroy(); }
 
     void Destroy() {
         graphReady = false;
-        if (graphEx) { cudaGraphExecDestroy(graphEx); graphEx = nullptr; }
-        if (graph)   { cudaGraphDestroy(graph);        graph   = nullptr; }
-        if (stream)  { cudaStreamDestroy(stream);      stream  = nullptr; }
-        if (d_input)  { cudaFree(d_input);  d_input  = nullptr; }
-        if (d_output) { cudaFree(d_output); d_output = nullptr; }
-        if (h_output) { cudaFreeHost(h_output); h_output = nullptr; }
-        // TRT objects are refcounted via destroy() (vtable slot 1 for most)
+        if (cuda.ok) {
+            if (graphEx) { cuda.GraphExecDestroy(graphEx); graphEx = nullptr; }
+            if (graph)   { cuda.GraphDestroy(graph);        graph   = nullptr; }
+            if (stream)  { cuda.StreamDestroy(stream);      stream  = nullptr; }
+            if (d_input)  { cuda.Free_(d_input);   d_input  = nullptr; }
+            if (d_output) { cuda.Free_(d_output);  d_output = nullptr; }
+            if (h_output) { cuda.FreeHost(h_output); h_output = nullptr; }
+        }
         if (context) { TrtApi::vcall<void,1>(context); context = nullptr; }
         if (engine)  { TrtApi::vcall<void,1>(engine);  engine  = nullptr; }
         if (runtime_){ TrtApi::vcall<void,1>(runtime_);runtime_ = nullptr; }
@@ -349,243 +405,183 @@ struct DepthEstimator::TrtRtxSession {
         if (hInfer)  { FreeLibrary(hInfer);  hInfer  = nullptr; }
     }
 
-    // Try to load nvinfer_10.dll searching: DLL dir, then PATH
-    HMODULE LoadNvInfer(const std::wstring& dllDir) {
+    HMODULE LoadDll(const std::wstring& dllDir, const wchar_t* name) {
         HMODULE h = nullptr;
-        for (auto& name : { dllDir + L"\\nvinfer_10.dll", std::wstring(L"nvinfer_10.dll") }) {
-            h = LoadLibraryExW(name.c_str(), nullptr,
-                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS |
-                (name.find(L'\\') != std::wstring::npos ? LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR : 0));
-            if (h) { LOG_INFO("TRT-RTX: loaded ", std::string(name.begin(), name.end())); break; }
-        }
-        return h;
-    }
-    HMODULE LoadNvOnnx(const std::wstring& dllDir) {
-        HMODULE h = nullptr;
-        for (auto& name : { dllDir + L"\\nvonnxparser_10.dll", std::wstring(L"nvonnxparser_10.dll") }) {
-            h = LoadLibraryExW(name.c_str(), nullptr,
-                LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS |
-                (name.find(L'\\') != std::wstring::npos ? LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR : 0));
-            if (h) break;
+        for (auto& p : { dllDir + L"\\" + name, std::wstring(name) }) {
+            DWORD flags = LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS;
+            if (p.find(L'\\') != std::wstring::npos)
+                flags |= LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR;
+            h = LoadLibraryExW(p.c_str(), nullptr, flags);
+            if (h) { LOG_INFO("TRT-RTX: loaded ", std::string(p.begin(), p.end())); break; }
         }
         return h;
     }
 };
 
-// ── Engine cache path: <onnxpath>.trtrtx_sm<CC>_fp16.bin ─────────────────────
 static std::string TrtRtxEnginePath(const std::wstring& onnxPath, int sm) {
-    std::string base(onnxPath.begin(), onnxPath.end());
-    return base + ".trtrtx_sm" + std::to_string(sm) + "_fp16.bin";
+    return std::string(onnxPath.begin(), onnxPath.end())
+         + ".trtrtx_sm" + std::to_string(sm) + "_fp16.bin";
 }
 
-// ── Detect CUDA device SM version ────────────────────────────────────────────
-static int GetDeviceSM() {
-    int dev = 0; cudaGetDevice(&dev);
-    int major = 0, minor = 0;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-    return major * 10 + minor;
-}
-
-// ── LoadTrtRtxNative ──────────────────────────────────────────────────────────
 HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
                                           std::wstring& outInfo) {
     m_trtRtx.reset();
     auto sess = std::make_unique<DepthEstimator::TrtRtxSession>();
 
-    // Logger vtable — TRT ILogger has one virtual method: log(sev, msg)
+    // Initialise TRT logger vtable — TrtLogger::log_cb is the correct class
     static void* s_logVtbl[2] = {
         nullptr,
-        reinterpret_cast<void*>(&DepthEstimator::TrtRtxSession::log_cb)
+        reinterpret_cast<void*>(&TrtLogger::log_cb)
     };
     sess->logger.vtbl[0] = s_logVtbl;
 
-    // Find DLL dir (same as the .ax file)
-    std::wstring dllDir = GetDllDir();
-    sess->hInfer = sess->LoadNvInfer(dllDir);
+    std::wstring dllDir = GetDllDir();   // DepthEstimator::GetDllDir — visible here
+
+    // Load cudart dynamically (no CUDA Toolkit required at compile time)
+    if (!sess->cuda.Load()) return E_FAIL;
+    auto& cu = sess->cuda;
+
+    sess->hInfer = sess->LoadDll(dllDir, L"nvinfer_10.dll");
     if (!sess->hInfer) {
-        LOG_ERR("TRT-RTX native: nvinfer_10.dll not found. ");
-        LOG_ERR("  Copy all DLLs from TensorRT-RTX lib\\ next to the .ax file.");
+        LOG_ERR("TRT-RTX: nvinfer_10.dll not found. Copy TensorRT lib\\ DLLs next to .ax.");
         return E_FAIL;
     }
 
-    // Get SM version to select / name the engine cache
-    int sm = GetDeviceSM();
-    LOG_INFO("TRT-RTX native: device SM=", sm);
+    // SM version → engine cache filename
+    int dev = 0; cu.GetDevice(&dev);
+    int major = 0, minor = 0;
+    cu.DeviceGetAttr(&major, cudaAttrComputeCapMajor, dev);
+    cu.DeviceGetAttr(&minor, cudaAttrComputeCapMinor, dev);
+    int sm = major * 10 + minor;
+    LOG_INFO("TRT-RTX: device SM=", sm);
     sess->enginePath = TrtRtxEnginePath(onnxPath, sm);
 
-    // ── Create CUDA stream ────────────────────────────────────────────────────
-    if (cudaStreamCreate(&sess->stream) != cudaSuccess) {
+    // CUDA stream
+    if (cu.StreamCreate(&sess->stream) != CUDA_SUCCESS) {
         LOG_ERR("TRT-RTX: cudaStreamCreate failed");
         return E_FAIL;
     }
 
-    // ── Try loading cached engine first ──────────────────────────────────────
+    // Try cached engine
     bool engineLoaded = false;
     if (std::filesystem::exists(sess->enginePath)) {
         LOG_INFO("TRT-RTX: loading cached engine: ", sess->enginePath);
         std::ifstream f(sess->enginePath, std::ios::binary);
         if (f) {
-            f.seekg(0, std::ios::end);
-            size_t sz = (size_t)f.tellg();
-            f.seekg(0);
-            std::vector<char> blob(sz);
-            f.read(blob.data(), sz);
-
-            auto fnRuntime = reinterpret_cast<TrtApi::FnCreateRuntime>(
+            f.seekg(0, std::ios::end); size_t sz = (size_t)f.tellg(); f.seekg(0);
+            std::vector<char> blob(sz);  f.read(blob.data(), sz);
+            auto fnRT = reinterpret_cast<TrtApi::FnCreateRuntime>(
                 GetProcAddress(sess->hInfer, "createInferRuntime_INTERNAL"));
-            if (fnRuntime) {
-                sess->runtime_ = fnRuntime(&sess->logger);
-                if (sess->runtime_) {
-                    // IRuntime::deserializeCudaEngine(data, size) — vtable slot 3
-                    sess->engine = TrtApi::vcall<void*, 3>(
-                        sess->runtime_, blob.data(), sz);
-                    engineLoaded = (sess->engine != nullptr);
-                }
+            if (fnRT) {
+                sess->runtime_ = fnRT(&sess->logger);
+                if (sess->runtime_)
+                    sess->engine = TrtApi::vcall<void*, 3>(sess->runtime_, blob.data(), sz);
+                engineLoaded = (sess->engine != nullptr);
             }
-            if (!engineLoaded)
-                LOG_WARN("TRT-RTX: cached engine load failed — rebuilding.");
+            if (!engineLoaded) LOG_WARN("TRT-RTX: cached engine load failed — rebuilding.");
         }
     }
 
-    // ── Build engine from ONNX ────────────────────────────────────────────────
+    // Build from ONNX if needed
     if (!engineLoaded) {
-        LOG_INFO("TRT-RTX: building engine from ONNX (FP16). This may take 1-5 minutes…");
-        LOG_INFO("  Engine will be cached at: ", sess->enginePath);
+        LOG_INFO("TRT-RTX: building FP16 engine from ONNX (may take 1-5 min)…");
+        LOG_INFO("  Cache: ", sess->enginePath);
+        sess->hParser = sess->LoadDll(dllDir, L"nvonnxparser_10.dll");
+        if (!sess->hParser) { LOG_ERR("TRT-RTX: nvonnxparser_10.dll not found."); return E_FAIL; }
 
-        sess->hParser = sess->LoadNvOnnx(dllDir);
-        if (!sess->hParser) {
-            LOG_ERR("TRT-RTX: nvonnxparser_10.dll not found.");
-            return E_FAIL;
-        }
-
-        auto fnBuilder = reinterpret_cast<TrtApi::FnCreateBuilder>(
+        auto fnBldr = reinterpret_cast<TrtApi::FnCreateBuilder>(
             GetProcAddress(sess->hInfer, "createInferBuilder_INTERNAL"));
-        if (!fnBuilder) { LOG_ERR("TRT-RTX: createInferBuilder_INTERNAL not found."); return E_FAIL; }
-        sess->builder = fnBuilder(&sess->logger);
+        if (!fnBldr) { LOG_ERR("TRT-RTX: createInferBuilder_INTERNAL missing."); return E_FAIL; }
+        sess->builder = fnBldr(&sess->logger);
         if (!sess->builder) { LOG_ERR("TRT-RTX: createInferBuilder returned null."); return E_FAIL; }
 
-        // IBuilder::createNetworkV2(NetworkDefinitionCreationFlag::kEXPLICIT_BATCH=1)
-        void* network = TrtApi::vcall<void*, 1>(sess->builder, 1u);
-        if (!network) { LOG_ERR("TRT-RTX: createNetworkV2 failed."); return E_FAIL; }
+        void* network = TrtApi::vcall<void*, 1>(sess->builder, 1u); // kEXPLICIT_BATCH
+        void* cfg     = TrtApi::vcall<void*, 3>(sess->builder);     // createBuilderConfig
+        TrtApi::vcall<void, 9>(cfg, 0);                            // setFlag(kFP16)
+        TrtApi::vcall<void, 3>(cfg, 0, (size_t)2 << 30);          // setMemoryPoolLimit(WORKSPACE, 2GB)
 
-        // IBuilder::createBuilderConfig() — vtable slot 3
-        void* cfg = TrtApi::vcall<void*, 3>(sess->builder);
-
-        // IBuilderConfig::setFlag(BuilderFlag::kFP16=0) — slot 9
-        TrtApi::vcall<void, 9>(cfg, 0);
-        // IBuilderConfig::setMemoryPoolLimit(MemoryPoolType::kWORKSPACE=0, 2GB) — slot 3
-        TrtApi::vcall<void, 3>(cfg, 0, (size_t)2 << 30);
-
-        // Create ONNX parser
-        auto fnParser = reinterpret_cast<TrtApi::FnCreateParser>(
+        auto fnPar = reinterpret_cast<TrtApi::FnCreateParser>(
             GetProcAddress(sess->hParser, "createParserForNetwork"));
-        if (!fnParser) { LOG_ERR("TRT-RTX: createParserForNetwork not found."); return E_FAIL; }
-        void* parser = fnParser(network, &sess->logger);
-        if (!parser) { LOG_ERR("TRT-RTX: createParserForNetwork returned null."); return E_FAIL; }
-
-        // IParser::parseFromFile(path, verbosity) — slot 4
-        std::string onnxPathA(onnxPath.begin(), onnxPath.end());
-        bool parsed = TrtApi::vcall<bool, 4>(parser, onnxPathA.c_str(), 2);
-        TrtApi::vcall<void, 1>(parser);   // destroy parser
+        if (!fnPar) { LOG_ERR("TRT-RTX: createParserForNetwork missing."); return E_FAIL; }
+        void* parser = fnPar(network, &sess->logger);
+        std::string onnxA(onnxPath.begin(), onnxPath.end());
+        bool parsed = parser && TrtApi::vcall<bool, 4>(parser, onnxA.c_str(), 2);
+        if (parser) TrtApi::vcall<void, 1>(parser);
 
         if (!parsed) {
             LOG_ERR("TRT-RTX: ONNX parse failed.");
-            TrtApi::vcall<void, 1>(network);
-            TrtApi::vcall<void, 1>(cfg);
+            if (network) TrtApi::vcall<void,1>(network);
+            if (cfg)     TrtApi::vcall<void,1>(cfg);
             return E_FAIL;
         }
 
-        // IBuilder::buildSerializedNetwork(network, config) — slot 4
         void* serialized = TrtApi::vcall<void*, 4>(sess->builder, network, cfg);
-        TrtApi::vcall<void, 1>(network);
-        TrtApi::vcall<void, 1>(cfg);
-
+        if (network) TrtApi::vcall<void,1>(network);
+        if (cfg)     TrtApi::vcall<void,1>(cfg);
         if (!serialized) { LOG_ERR("TRT-RTX: buildSerializedNetwork failed."); return E_FAIL; }
 
-        // IHostMemory::data() / size() — slots 0 and 1
-        void*  blob = TrtApi::vcall<void*, 0>(serialized);
+        void*  blob = TrtApi::vcall<void*,  0>(serialized);
         size_t bsz  = TrtApi::vcall<size_t, 1>(serialized);
+        { std::ofstream f(sess->enginePath, std::ios::binary); if (f) f.write((char*)blob, bsz); }
+        LOG_INFO("TRT-RTX: engine saved (", bsz/1024/1024, " MB).");
 
-        // Save engine to disk
-        {
-            std::ofstream f(sess->enginePath, std::ios::binary);
-            if (f) { f.write(reinterpret_cast<const char*>(blob), bsz); }
-            LOG_INFO("TRT-RTX: engine saved (", bsz / 1024 / 1024, " MB).");
-        }
-
-        // Deserialize into runtime
-        auto fnRuntime = reinterpret_cast<TrtApi::FnCreateRuntime>(
+        auto fnRT = reinterpret_cast<TrtApi::FnCreateRuntime>(
             GetProcAddress(sess->hInfer, "createInferRuntime_INTERNAL"));
-        sess->runtime_ = fnRuntime(&sess->logger);
-        sess->engine   = TrtApi::vcall<void*, 3>(sess->runtime_, blob, bsz);
+        sess->runtime_ = fnRT ? fnRT(&sess->logger) : nullptr;
+        if (sess->runtime_)
+            sess->engine = TrtApi::vcall<void*, 3>(sess->runtime_, blob, bsz);
         TrtApi::vcall<void, 1>(serialized);
-
         if (!sess->engine) { LOG_ERR("TRT-RTX: deserializeCudaEngine failed."); return E_FAIL; }
         LOG_INFO("TRT-RTX: engine built OK.");
     }
 
-    // ── Create execution context ──────────────────────────────────────────────
-    // ICudaEngine::createExecutionContext() — vtable slot 2
-    sess->context = TrtApi::vcall<void*, 2>(sess->engine);
+    sess->context = TrtApi::vcall<void*, 2>(sess->engine); // createExecutionContext
     if (!sess->context) { LOG_ERR("TRT-RTX: createExecutionContext failed."); return E_FAIL; }
 
-    // ── Query I/O tensor names and shapes ─────────────────────────────────────
-    // ICudaEngine::getNbIOTensors() — slot 8
     int nbIO = TrtApi::vcall<int, 8>(sess->engine);
     for (int i = 0; i < nbIO; ++i) {
-        // ICudaEngine::getIOTensorName(i) — slot 7
         const char* name = TrtApi::vcall<const char*, 7>(sess->engine, i);
-        // ICudaEngine::getTensorIOMode(name) — slot 13 (0=input, 1=output)
-        int mode = TrtApi::vcall<int, 13>(sess->engine, name);
+        int mode         = TrtApi::vcall<int, 13>(sess->engine, name);
         if (mode == 0) sess->inputName  = name;
         else            sess->outputName = name;
         LOG_INFO("TRT-RTX: tensor[", i, "] '", name, "' mode=", mode);
     }
     if (sess->inputName.empty() || sess->outputName.empty()) {
-        LOG_ERR("TRT-RTX: could not identify input/output tensors.");
-        return E_FAIL;
+        LOG_ERR("TRT-RTX: could not identify I/O tensors."); return E_FAIL;
     }
 
-    // Model fixed input shape — use default 518×518 (DA V2/V3)
     sess->modelW = (int)m_modelInputW;
     sess->modelH = (int)m_modelInputH;
-    sess->inputBytes  = sizeof(float) * 1 * 3 * sess->modelH * sess->modelW;
-    sess->outputBytes = sizeof(float) * 1 * 1 * sess->modelH * sess->modelW;
+    sess->inputBytes  = sizeof(float) * 3 * sess->modelH * sess->modelW;
+    sess->outputBytes = sizeof(float) * 1 * sess->modelH * sess->modelW;
 
-    cudaMalloc(&sess->d_input,  sess->inputBytes);
-    cudaMalloc(&sess->d_output, sess->outputBytes);
-    cudaMallocHost(&sess->h_output, sess->outputBytes);
+    cu.Malloc((void**)&sess->d_input,  sess->inputBytes);
+    cu.Malloc((void**)&sess->d_output, sess->outputBytes);
+    cu.MallocHost((void**)&sess->h_output, sess->outputBytes);
 
-    // Set persistent tensor addresses on the context
-    // IExecutionContext::setTensorAddress(name, ptr) — slot 8
     TrtApi::vcall<bool, 8>(sess->context, sess->inputName.c_str(),  sess->d_input);
     TrtApi::vcall<bool, 8>(sess->context, sess->outputName.c_str(), sess->d_output);
 
-    // ── Warmup + CUDA graph capture ───────────────────────────────────────────
-    // Run one inference to warm up TRT kernels, then capture into a CUDA graph.
-    // Subsequent inferences replay the graph — zero CPU overhead per launch.
+    // Warmup + CUDA graph capture
     {
         std::vector<float> dummy(3 * sess->modelH * sess->modelW, 0.5f);
-        cudaMemcpyAsync(sess->d_input, dummy.data(), sess->inputBytes,
-                        cudaMemcpyHostToDevice, sess->stream);
-        // Warmup (not captured)
+        cu.MemcpyAsync(sess->d_input, dummy.data(), sess->inputBytes, cudaMemcpyHtoD, sess->stream);
         TrtApi::vcall<bool, 11>(sess->context, sess->stream);
-        cudaStreamSynchronize(sess->stream);
+        cu.StreamSync(sess->stream);
 
-        // Graph capture
-        cudaStreamBeginCapture(sess->stream, cudaStreamCaptureModeGlobal);
-        TrtApi::vcall<bool, 11>(sess->context, sess->stream);
-        cudaStreamEndCapture(sess->stream, &sess->graph);
-        cudaGraphInstantiate(&sess->graphEx, sess->graph, nullptr, nullptr, 0);
-        sess->graphReady = (sess->graphEx != nullptr);
-        if (sess->graphReady)
-            LOG_INFO("TRT-RTX: CUDA graph captured OK.");
-        else
-            LOG_WARN("TRT-RTX: CUDA graph capture failed — will use eager launch.");
+        if (cu.StreamBeginCap && cu.StreamEndCap && cu.GraphInstantiate) {
+            cu.StreamBeginCap(sess->stream, cudaCaptureModeGlobal);
+            TrtApi::vcall<bool, 11>(sess->context, sess->stream);
+            cu.StreamEndCap(sess->stream, &sess->graph);
+            cu.GraphInstantiate(&sess->graphEx, sess->graph, nullptr, nullptr, 0);
+            sess->graphReady = (sess->graphEx != nullptr);
+            LOG_INFO("TRT-RTX: CUDA graph ", sess->graphReady ? "captured OK." : "capture failed — eager mode.");
+        } else {
+            LOG_WARN("TRT-RTX: CUDA graph APIs not available in this cudart — using eager launch.");
+        }
     }
 
-    m_trtRtx    = std::move(sess);
+    m_trtRtx     = std::move(sess);
     m_inputName  = m_trtRtx->inputName;
     m_outputName = m_trtRtx->outputName;
     outInfo = L"TRT-RTX native (FP16, CUDA graph)";
@@ -593,38 +589,26 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     return S_OK;
 }
 
-// ── EstimateTrtRtx ────────────────────────────────────────────────────────────
 HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          int srcStride, bool isBGR, bool flipDepth,
                                          float smoothAlpha, DepthResult& result) {
-    auto& s = *m_trtRtx;
-    // Preprocess: normalize to [1,3,H,W] float tensor (same as ORT path)
+    auto& s  = *m_trtRtx;
+    auto& cu = s.cuda;
     std::vector<float> inputTensor;
     int mw, mh;
     PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR, inputTensor, mw, mh);
-
-    // Upload input
-    cudaMemcpyAsync(s.d_input, inputTensor.data(), s.inputBytes,
-                    cudaMemcpyHostToDevice, s.stream);
-
-    // Run inference (CUDA graph or eager)
-    if (s.graphReady)
-        cudaGraphLaunch(s.graphEx, s.stream);
+    cu.MemcpyAsync(s.d_input, inputTensor.data(), s.inputBytes, cudaMemcpyHtoD, s.stream);
+    if (s.graphReady && cu.GraphLaunch)
+        cu.GraphLaunch(s.graphEx, s.stream);
     else
         TrtApi::vcall<bool, 11>(s.context, s.stream);
+    cu.MemcpyAsync(s.h_output, s.d_output, s.outputBytes, cudaMemcpyDtoH, s.stream);
+    cu.StreamSync(s.stream);
 
-    // Download output (pinned memory, async then sync)
-    cudaMemcpyAsync(s.h_output, s.d_output, s.outputBytes,
-                    cudaMemcpyDeviceToHost, s.stream);
-    cudaStreamSynchronize(s.stream);
-
-    // Postprocess: same as ORT path
     std::vector<float> out(srcW * srcH);
     PostprocessDepth(s.h_output, mw, mh, srcW, srcH, flipDepth, out);
-
     if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
         TemporalSmooth(out, smoothAlpha);
-
     result.data   = std::move(out);
     result.width  = srcW;
     result.height = srcH;
@@ -632,6 +616,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
 }
 
 #endif // ORT_ENABLE_TRTRTX
+
 
 // ── BuildSessionOptions ───────────────────────────────────────────────────────
 
