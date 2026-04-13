@@ -129,14 +129,10 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 
     // ── Native TRT-RTX path ───────────────────────────────────────────────────
 #ifdef ORT_ENABLE_TRTRTX
-    if (runtime == InferenceRuntime::TensorRTRtx ||
-        runtime == InferenceRuntime::TensorRTNative) {
-        const char* runtimeName = (runtime == InferenceRuntime::TensorRTRtx)
-            ? "TRT-RTX" : "TensorRT native";
-        LOG_INFO("Native inference runtime: ", runtimeName);
-        HRESULT hr = LoadTrtRtxNative(path, outInfo, runtime);
+    if (runtime == InferenceRuntime::TensorRTRtx) {
+        HRESULT hr = LoadTrtRtxNative(path, outInfo);
         if (SUCCEEDED(hr)) {
-            m_session.reset();
+            m_session.reset();   // ORT session not used in this mode
             m_modelPath     = path;
             m_loaded        = true;
             m_da3StreamMode = wantDA3Stream;
@@ -147,9 +143,8 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
         return hr;
     }
 #else
-    if (runtime == InferenceRuntime::TensorRTRtx ||
-        runtime == InferenceRuntime::TensorRTNative) {
-        LOG_WARN("Native TRT runtime: not compiled in (build requires ORT_ENABLE_TRTRTX).");
+    if (runtime == InferenceRuntime::TensorRTRtx) {
+        LOG_WARN("TRT-RTX native: not compiled in (build requires ORT_ENABLE_TRTRTX).");
         LOG_WARN("  Falling back to ONNXRuntime path.");
     }
 #endif
@@ -240,14 +235,8 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 // NvInfer.h and NvOnnxParser.h come from -DORT_TRTRTX_HOME=<sdk_root>/include
 // cuda_runtime.h comes from FindCUDAToolkit (CUDA Toolkit must be installed).
 // Both are linked via target_link_libraries in CMakeLists.txt (Unified backend only).
-//
-// Suppress C4100 (unreferenced formal parameter) from TRT SDK internal headers —
-// the TRT SDK uses pure-virtual stub methods with intentionally unnamed parameters.
-#pragma warning(push)
-#pragma warning(disable: 4100)
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
-#pragma warning(pop)
 #include <cuda_runtime.h>
 #include <fstream>
 
@@ -321,8 +310,7 @@ static std::string TrtRtxEnginePath(const std::wstring& onnxPath, int sm) {
 
 // ── LoadTrtRtxNative ──────────────────────────────────────────────────────────
 HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
-                                          std::wstring& outInfo,
-                                          InferenceRuntime runtime) {
+                                          std::wstring& outInfo) {
     m_trtRtx.reset();
     auto sess = std::make_unique<DepthEstimator::TrtRtxSession>();
 
@@ -423,15 +411,23 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         TrtConfigPtr cfg(builder->createBuilderConfig());
         if (!cfg) { LOG_ERR("TRT-RTX: createBuilderConfig returned null."); return E_FAIL; }
 
-        // FP16 — always enable; TRT-RTX and TRT 10.x on RTX hardware always support it.
-        // platformHasFastFp16() was removed in TRT-RTX SDK (always true for RTX targets).
-        cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
-        LOG_INFO("TRT-RTX: FP16 enabled.");
+        // FP16
+        if (builder->platformHasFastFp16()) {
+            cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
+            LOG_INFO("TRT-RTX: FP16 enabled.");
+        } else {
+            LOG_WARN("TRT-RTX: platform does not support fast FP16 — using FP32.");
+        }
 
-        // Workspace — use setMemoryPoolLimit (TRT 10.x and TRT-RTX 1.4+ API).
-        // setMaxWorkspaceSize was removed in TRT 10; TRT-RTX follows TRT 10 API.
+        // Workspace (TRT 8-9 API; TRT 10 uses setMemoryPoolLimit)
+        // Try setMemoryPoolLimit first (TRT 10+), fall back to setMaxWorkspaceSize
+#if NV_TENSORRT_MAJOR >= 10
         cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)2 << 30);
-        LOG_INFO("TRT-RTX: workspace=2GB.");
+        LOG_INFO("TRT-RTX: workspace=2GB (via setMemoryPoolLimit).");
+#else
+        cfg->setMaxWorkspaceSize((size_t)2 << 30);
+        LOG_INFO("TRT-RTX: workspace=2GB (via setMaxWorkspaceSize).");
+#endif
 
         // Optimization profile for dynamic-shape models
         // Use fixed 518×518 (default Depth Anything v2/v3 input).
@@ -495,10 +491,11 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     if (!sess->context) { LOG_ERR("TRT-RTX: createExecutionContext failed."); return E_FAIL; }
     LOG_INFO("TRT-RTX: execution context created.");
 
-    // ── Query I/O bindings (TRT 10.x / TRT-RTX 1.4+ API) ────────────────────
-    // getNbIOTensors / getIOTensorName / getTensorIOMode — present in both
-    // standard TRT 10.x and TRT-RTX 1.4.  The legacy TRT 8/9 API
-    // (getNbBindings/getBindingName/bindingIsInput) was removed in TRT 10.
+    // ── Query bindings ────────────────────────────────────────────────────────
+    // TRT 8/9: getBindingIndex / getBindingDimensions
+    // TRT 10:  getNbIOTensors / getIOTensorName / getTensorIOMode
+    // We support both via preprocessor.
+#if NV_TENSORRT_MAJOR >= 10
     {
         int nb = sess->engine->getNbIOTensors();
         for (int i = 0; i < nb; ++i) {
@@ -516,17 +513,46 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
                 sess->outputName = name;
                 sess->outputIdx  = i;
             }
-            LOG_INFO("TRT: binding[", i, "] '", name,
+            LOG_INFO("TRT-RTX: binding[", i, "] '", name,
                      "' ", mode == nvinfer1::TensorIOMode::kINPUT ? "INPUT" : "OUTPUT");
         }
         sess->nbBindings = nb;
-        // Set dynamic input shape on the execution context before allocating memory
+        // For TRT10 executeV2, set dynamic shape on context before allocation
         if (!sess->inputName.empty()) {
             nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
             sess->context->setInputShape(sess->inputName.c_str(), d);
-            LOG_INFO("TRT: context input shape: 1×3×", sess->modelH, "×", sess->modelW);
+            LOG_INFO("TRT-RTX: context input shape set: 1×3×", sess->modelH, "×", sess->modelW);
         }
     }
+#else
+    {
+        int nb = sess->engine->getNbBindings();
+        sess->nbBindings = nb;
+        for (int i = 0; i < nb; ++i) {
+            const char* name = sess->engine->getBindingName(i);
+            if (sess->engine->bindingIsInput(i)) {
+                sess->inputName = name;
+                sess->inputIdx  = i;
+                auto d = sess->engine->getBindingDimensions(i);
+                if (d.nbDims == 4) {
+                    sess->modelH = (int)(d.d[2] > 0 ? d.d[2] : m_modelInputH);
+                    sess->modelW = (int)(d.d[3] > 0 ? d.d[3] : m_modelInputW);
+                }
+            } else {
+                sess->outputName = name;
+                sess->outputIdx  = i;
+            }
+            LOG_INFO("TRT-RTX: binding[", i, "] '", name,
+                     "' ", sess->engine->bindingIsInput(i) ? "INPUT" : "OUTPUT");
+        }
+        // For dynamic shapes, set context dims before allocation
+        if (sess->inputIdx >= 0) {
+            nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
+            sess->context->setBindingDimensions(sess->inputIdx, d);
+            LOG_INFO("TRT-RTX: context binding dims set: 1×3×", sess->modelH, "×", sess->modelW);
+        }
+    }
+#endif
 
     if (sess->inputIdx < 0 || sess->outputIdx < 0) {
         LOG_ERR("TRT-RTX: could not identify input/output bindings.");
@@ -551,11 +577,8 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     m_trtRtx     = std::move(sess);
     m_inputName  = m_trtRtx->inputName;
     m_outputName = m_trtRtx->outputName;
-    outInfo = (runtime == InferenceRuntime::TensorRTRtx)
-        ? L"TensorRT-RTX native (FP16)"
-        : L"TensorRT native (FP16)";
-    LOG_INFO("Native TRT session ready  runtime=",
-             runtime == InferenceRuntime::TensorRTRtx ? "TRT-RTX" : "TensorRT");
+    outInfo = L"TRT-RTX native (FP16)";
+    LOG_INFO("TRT-RTX native session ready.");
     return S_OK;
 }
 
