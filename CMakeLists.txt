@@ -490,6 +490,7 @@ target_include_directories(3Deflatten PRIVATE
     "${CMAKE_BINARY_DIR}"
     "${WINSDK_INC_DIR}/um"
     "${WINSDK_INC_DIR}/shared"
+    "${CUDA_HOME}/include"
 )
 
 target_compile_definitions(3Deflatten PRIVATE
