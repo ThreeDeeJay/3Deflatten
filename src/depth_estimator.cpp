@@ -235,8 +235,14 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 // NvInfer.h and NvOnnxParser.h come from -DORT_TRTRTX_HOME=<sdk_root>/include
 // cuda_runtime.h comes from FindCUDAToolkit (CUDA Toolkit must be installed).
 // Both are linked via target_link_libraries in CMakeLists.txt (Unified backend only).
+//
+// Suppress C4100 (unreferenced formal parameter) from TRT SDK internal headers —
+// the TRT SDK uses pure-virtual stub methods with intentionally unnamed parameters.
+#pragma warning(push)
+#pragma warning(disable: 4100)
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
+#pragma warning(pop)
 #include <cuda_runtime.h>
 #include <fstream>
 
