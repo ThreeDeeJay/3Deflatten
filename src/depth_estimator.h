@@ -135,8 +135,7 @@ private:
     struct TrtRtxSession;
     std::unique_ptr<TrtRtxSession> m_trtRtx;
 #ifdef ORT_ENABLE_TRTRTX
-    HRESULT LoadTrtRtxNative(const std::wstring& onnxPath, std::wstring& outInfo,
-                              InferenceRuntime runtime);
+    HRESULT LoadTrtRtxNative(const std::wstring& onnxPath, std::wstring& outInfo);
     HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH, int srcStride,
                             bool isBGR, bool flipDepth, float smoothAlpha,
                             DepthResult& result);
