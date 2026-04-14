@@ -136,6 +136,7 @@ jobs:
       run: Get-ChildItem -Path "." -File -Recurse | Select-Object FullName
 
     - name: Deploy
+      shell: cmd
       run: |
         move /Y "3Deflatten.ini"                                                                                                                                                         "${{env.Artifacts}}/"
         move /Y "onnxruntime\lib\onnxruntime.dll"                                                                                                                                        "${{env.Artifacts}}/"
