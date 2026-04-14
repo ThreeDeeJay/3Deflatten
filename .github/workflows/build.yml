@@ -63,8 +63,8 @@ jobs:
       if: steps.cache_vcpkg.outputs.cache-hit != 'true'
       run: |
         vcpkg install --triplet ${{matrix.Settings.Triplet}}
-    - name: List vcpkg files
-      run: Get-ChildItem -Path "C:\vcpkg" -File -Recurse | Select-Object FullName
+#    - name: List vcpkg files
+#      run: Get-ChildItem -Path "C:\vcpkg" -File -Recurse | Select-Object FullName
 
     - name: Get Visual Studio path
       run: |
