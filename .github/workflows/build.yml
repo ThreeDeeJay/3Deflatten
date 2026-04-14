@@ -4,7 +4,7 @@ name: Build
 env:
   GH_TOKEN: "${{github.token}}"
   Branch: "${{github.ref_name}}"
-  Artifacts: "build/Release"
+  Artifacts: "build/Win64_Unified"
   Extension: "*"
   Title: "${{github.event.repository.name}}"
   CUDA_VERSION_MAJOR: "12"
@@ -134,6 +134,20 @@ jobs:
 
     - name: List files
       run: Get-ChildItem -Path "." -File -Recurse | Select-Object FullName
+
+    - name: Deploy
+      run: |
+        copy "build\${{matrix.Settings.Name}}_Unified\3Deflatten_${{matrix.Settings.Architecture}}.ax"                                                                                "${{env.Artifacts}}/"
+        copy "3Deflatten.ini"                                                                                                                                                         "${{env.Artifacts}}/"
+        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime.dll"                                                                                                                  "${{env.Artifacts}}/"
+        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime_providers_shared.dll"                                                                                                 "${{env.Artifacts}}/"
+        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime_providers_cuda.dll"                                                                                                   "${{env.Artifacts}}/"
+        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime_providers_tensorrt.dll"                                                                                               "${{env.Artifacts}}/"
+        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime_providers_nv_tensorrt_rtx.dll"                                                                                        "${{env.Artifacts}}/"
+        copy "onnxruntime\${{matrix.Settings.Name}}\DirectML.dll"                                                                                                                     "${{env.Artifacts}}/"
+        copy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}\bin\*.dll"                                                  "${{env.Artifacts}}/"
+        copy "TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}\bin\*.dll"                     "${{env.Artifacts}}/"
+        copy "TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}\bin\*.dll" "${{env.Artifacts}}/"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
