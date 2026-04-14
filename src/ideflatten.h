@@ -4,8 +4,9 @@
 #include <unknwn.h>
 
 enum class InferenceRuntime : int {
-    OnnxRuntime = 0,  // use ORT with the Provider combo
-    TensorRTRtx = 1,  // native TRT-RTX API (bypasses ORT entirely)
+    OnnxRuntime    = 0,  // use ORT with the Provider combo
+    TensorRTRtx    = 1,  // native TRT-RTX API via TensorRT-RTX SDK
+    TensorRTNative = 2,  // native standard TensorRT API via TensorRT 10.x SDK
 };
 
 enum class OutputMode : int {
