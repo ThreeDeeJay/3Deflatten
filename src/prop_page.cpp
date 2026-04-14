@@ -95,8 +95,6 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0, (LPARAM)L"ONNXRuntime");
         SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0,
             (LPARAM)L"TensorRT RTX  (native, fastest)");
-        SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0,
-            (LPARAM)L"TensorRT  (native, standard SDK)");
 
         // GPU Provider — must match GPUProvider enum order exactly
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Auto (best available)");
@@ -150,12 +148,12 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             ReadControls(hwnd);
             // Show/hide the Provider row based on runtime selection.
             // TRT-RTX native bypasses ORT entirely so Provider is irrelevant.
-            bool isTrtRtx = (m_cfg.inferenceRuntime != InferenceRuntime::OnnxRuntime);
+            bool isTrtRtx = (m_cfg.inferenceRuntime == InferenceRuntime::TensorRTRtx);
             ShowWindow(GetDlgItem(hwnd, IDC_PROVIDER_LABEL), isTrtRtx ? SW_HIDE : SW_SHOW);
             ShowWindow(GetDlgItem(hwnd, IDC_GPU_COMBO),      isTrtRtx ? SW_HIDE : SW_SHOW);
             SetDirty();
             SetDlgItemTextW(hwnd, IDC_GPU_INFO,
-                isTrtRtx ? L"Native TRT: engine built next to .onnx file on first Reload."
+                isTrtRtx ? L"TRT-RTX: engine built next to .onnx file on first Reload."
                           : L"Press 'Reload' to apply the new runtime/provider.");
             break;
         }
@@ -257,7 +255,7 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
                        m_cfg.showDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
 
     // Show/hide Provider row based on runtime
-    bool isTrtRtx = (m_cfg.inferenceRuntime != InferenceRuntime::OnnxRuntime);
+    bool isTrtRtx = (m_cfg.inferenceRuntime == InferenceRuntime::TensorRTRtx);
     ShowWindow(GetDlgItem(hwnd, IDC_PROVIDER_LABEL), isTrtRtx ? SW_HIDE : SW_SHOW);
     ShowWindow(GetDlgItem(hwnd, IDC_GPU_COMBO),      isTrtRtx ? SW_HIDE : SW_SHOW);
 
@@ -283,7 +281,7 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
                         ? TRUE : FALSE;
     m_cfg.showDepth   = (SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
-    m_cfg.inferenceRuntime = (InferenceRuntime)std::min(2,
+    m_cfg.inferenceRuntime = (InferenceRuntime)std::min(1,
         std::max(0, (int)SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_GETCURSEL, 0, 0)));
 }
 
