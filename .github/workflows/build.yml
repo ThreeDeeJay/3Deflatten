@@ -137,7 +137,6 @@ jobs:
 
     - name: Deploy
       run: |
-        copy "build\${{matrix.Settings.Name}}_Unified\3Deflatten_${{matrix.Settings.Architecture}}.ax"                                                                                "${{env.Artifacts}}/"
         copy "3Deflatten.ini"                                                                                                                                                         "${{env.Artifacts}}/"
         copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime.dll"                                                                                                                  "${{env.Artifacts}}/"
         copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime_providers_shared.dll"                                                                                                 "${{env.Artifacts}}/"
