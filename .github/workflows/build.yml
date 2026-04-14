@@ -137,16 +137,16 @@ jobs:
 
     - name: Deploy
       run: |
-        copy "3Deflatten.ini"                                                                                                                                                         "${{env.Artifacts}}/"
-        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime.dll"                                                                                                                  "${{env.Artifacts}}/"
-        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime_providers_shared.dll"                                                                                                 "${{env.Artifacts}}/"
-        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime_providers_cuda.dll"                                                                                                   "${{env.Artifacts}}/"
-        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime_providers_tensorrt.dll"                                                                                               "${{env.Artifacts}}/"
-        copy "onnxruntime\${{matrix.Settings.Name}}\onnxruntime_providers_nv_tensorrt_rtx.dll"                                                                                        "${{env.Artifacts}}/"
-        copy "onnxruntime\${{matrix.Settings.Name}}\DirectML.dll"                                                                                                                     "${{env.Artifacts}}/"
-        copy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}\bin\*.dll"                                                  "${{env.Artifacts}}/"
-        copy "TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}\bin\*.dll"                     "${{env.Artifacts}}/"
-        copy "TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}\bin\*.dll" "${{env.Artifacts}}/"
+        move "3Deflatten.ini"                                                                                                                                                         "${{env.Artifacts}}/"
+        move "onnxruntime\lib\onnxruntime.dll"                                                                                                                                        "${{env.Artifacts}}/"
+        move "onnxruntime\lib\onnxruntime_providers_shared.dll"                                                                                                                       "${{env.Artifacts}}/"
+        move "onnxruntime\lib\onnxruntime_providers_cuda.dll"                                                                                                                         "${{env.Artifacts}}/"
+        move "onnxruntime\lib\onnxruntime_providers_tensorrt.dll"                                                                                                                     "${{env.Artifacts}}/"
+        move "onnxruntime\lib\onnxruntime_providers_nv_tensorrt_rtx.dll"                                                                                                              "${{env.Artifacts}}/"
+        move "onnxruntime\lib\DirectML.dll"                                                                                                                                           "${{env.Artifacts}}/"
+        move "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}\bin\*.dll"                                                  "${{env.Artifacts}}/"
+        move "TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}\bin\*.dll"                     "${{env.Artifacts}}/"
+        move "TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}\bin\*.dll" "${{env.Artifacts}}/"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
