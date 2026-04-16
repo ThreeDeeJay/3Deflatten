@@ -41,7 +41,7 @@ jobs:
             Architecture: "x64",
             Triplet: "x64-windows"
           }
-          
+
     steps:
 
     - name: Clone repo and submodules
@@ -197,12 +197,12 @@ jobs:
 #          copy "scripts/collect_runtime_dlls_cuda13.py"  "Release/"
 #          copy "scripts/register.bat"                    "Release/"
 #          copy "scripts/unregister.bat"                  "Release/"
-  
+
       - name: Compress artifacts
         run: |
           7z a "Release/${{env.Title}}.zip" "${{github.workspace}}/Release/*" -mx=9
           cp "Release/${{env.Title}}.zip" "Release/${{env.Title}}_r${{env.CommitCount}}@${{env.CommitHashShort}}.zip"
-  
+
       - name: Purge tag - latest-${{env.Branch}}
         run: |
           gh release delete latest-${{env.Branch}} --repo ${{github.repository}} --cleanup-tag --yes || true
