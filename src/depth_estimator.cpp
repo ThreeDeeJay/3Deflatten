@@ -129,10 +129,14 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 
     // ── Native TRT-RTX path ───────────────────────────────────────────────────
 #ifdef ORT_ENABLE_TRTRTX
-    if (runtime == InferenceRuntime::TensorRTRtx) {
-        HRESULT hr = LoadTrtRtxNative(path, outInfo);
+    if (runtime == InferenceRuntime::TensorRTRtx ||
+        runtime == InferenceRuntime::TensorRTNative) {
+        const char* runtimeName = (runtime == InferenceRuntime::TensorRTRtx)
+            ? "TRT-RTX" : "TensorRT native";
+        LOG_INFO("Native inference runtime: ", runtimeName);
+        HRESULT hr = LoadTrtRtxNative(path, outInfo, runtime);
         if (SUCCEEDED(hr)) {
-            m_session.reset();   // ORT session not used in this mode
+            m_session.reset();
             m_modelPath     = path;
             m_loaded        = true;
             m_da3StreamMode = wantDA3Stream;
@@ -143,8 +147,9 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
         return hr;
     }
 #else
-    if (runtime == InferenceRuntime::TensorRTRtx) {
-        LOG_WARN("TRT-RTX native: not compiled in (build requires ORT_ENABLE_TRTRTX).");
+    if (runtime == InferenceRuntime::TensorRTRtx ||
+        runtime == InferenceRuntime::TensorRTNative) {
+        LOG_WARN("Native TRT runtime: not compiled in (build requires ORT_ENABLE_TRTRTX).");
         LOG_WARN("  Falling back to ONNXRuntime path.");
     }
 #endif
@@ -293,6 +298,14 @@ struct DepthEstimator::TrtRtxSession {
     std::string inputName, outputName;
     std::string enginePath;
 
+    // DLL handles for dynamically loaded factory functions.
+    // Kept alive for the lifetime of the session; freed in Destroy().
+    // Static linking against nvinfer_10.lib / nvonnxparser_10.lib is intentionally
+    // avoided: TRT-RTX 1.4 and standard TRT 10.x may use different export names
+    // in their .lib files even though the DLLs share the same API surface.
+    HMODULE hInfer  = nullptr;
+    HMODULE hParser = nullptr;
+
     ~TrtRtxSession() { Destroy(); }
     void Destroy() {
         context.reset();
@@ -302,6 +315,9 @@ struct DepthEstimator::TrtRtxSession {
         if (d_input)  { cudaFree(d_input);   d_input  = nullptr; }
         if (d_output) { cudaFree(d_output);  d_output = nullptr; }
         if (h_output) { cudaFreeHost(h_output); h_output = nullptr; }
+        // Free DLL handles last — TRT objects above must be destroyed first
+        if (hParser) { FreeLibrary(hParser); hParser = nullptr; }
+        if (hInfer)  { FreeLibrary(hInfer);  hInfer  = nullptr; }
     }
 };
 
@@ -316,7 +332,8 @@ static std::string TrtRtxEnginePath(const std::wstring& onnxPath, int sm) {
 
 // ── LoadTrtRtxNative ──────────────────────────────────────────────────────────
 HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
-                                          std::wstring& outInfo) {
+                                          std::wstring& outInfo,
+                                          InferenceRuntime runtime) {
     m_trtRtx.reset();
     auto sess = std::make_unique<DepthEstimator::TrtRtxSession>();
 
@@ -341,6 +358,55 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         return E_FAIL;
     }
 
+    // ── Dynamically load TRT factory functions ────────────────────────────────
+    // We resolve createInferBuilder_INTERNAL, createInferRuntime_INTERNAL, and
+    // createNvOnnxParser_INTERNAL via GetProcAddress instead of relying on the
+    // .lib import library.  This decouples us from symbol-name differences between
+    // the standard TRT 10.x .lib and TRT-RTX 1.4 .lib — both DLLs export the
+    // same functions at runtime, but their .lib files may differ.
+    //
+    // NvInfer.h signatures (stable since TRT 8):
+    //   IBuilder*  createInferBuilder_INTERNAL (void* logger, int32_t version)
+    //   IRuntime*  createInferRuntime_INTERNAL (void* logger, int32_t version)
+    //   IParser*   createNvOnnxParser_INTERNAL(void* network, void* logger, int32_t version)
+    using FnMkBuilder = nvinfer1::IBuilder*       (*)(void*, int32_t);
+    using FnMkRuntime = nvinfer1::IRuntime*        (*)(void*, int32_t);
+    using FnMkParser  = nvonnxparser::IParser*     (*)(void*, void*, int32_t);
+
+    auto loadTrtDll = [&](const wchar_t* name) -> HMODULE {
+        std::wstring full = std::wstring(GetDllDir().c_str()) + L"\\" + name;
+        HMODULE h = LoadLibraryExW(full.c_str(), nullptr,
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS |
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
+        if (!h) h = LoadLibraryExW(name, nullptr,
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
+        if (h) LOG_INFO("TRT: loaded ", std::string(name, name + wcslen(name)));
+        else   LOG_ERR ("TRT: failed to load ", std::string(name, name + wcslen(name)));
+        return h;
+    };
+
+    sess->hInfer  = loadTrtDll(L"nvinfer_10.dll");
+    sess->hParser = loadTrtDll(L"nvonnxparser_10.dll");
+    if (!sess->hInfer)  { LOG_ERR("TRT: nvinfer_10.dll not found next to the .ax"); return E_FAIL; }
+    if (!sess->hParser) { LOG_ERR("TRT: nvonnxparser_10.dll not found next to the .ax"); return E_FAIL; }
+
+    auto fnMkBuilder = reinterpret_cast<FnMkBuilder>(
+        GetProcAddress(sess->hInfer, "createInferBuilder_INTERNAL"));
+    auto fnMkRuntime = reinterpret_cast<FnMkRuntime>(
+        GetProcAddress(sess->hInfer, "createInferRuntime_INTERNAL"));
+    auto fnMkParser  = reinterpret_cast<FnMkParser>(
+        GetProcAddress(sess->hParser, "createNvOnnxParser_INTERNAL"));
+
+    if (!fnMkBuilder || !fnMkRuntime || !fnMkParser) {
+        LOG_ERR("TRT: could not resolve factory functions from DLLs:");
+        LOG_ERR("  createInferBuilder_INTERNAL : ", fnMkBuilder ? "OK" : "MISSING");
+        LOG_ERR("  createInferRuntime_INTERNAL : ", fnMkRuntime ? "OK" : "MISSING");
+        LOG_ERR("  createNvOnnxParser_INTERNAL : ", fnMkParser  ? "OK" : "MISSING");
+        LOG_ERR("  Ensure nvinfer_10.dll/nvonnxparser_10.dll are from TRT 10.x or TRT-RTX 1.4+");
+        return E_FAIL;
+    }
+    LOG_INFO("TRT: factory functions resolved OK");
+
     // ── Attempt to load serialized engine from disk ───────────────────────────
     bool engineLoaded = false;
     if (std::filesystem::exists(sess->enginePath)) {
@@ -353,9 +419,9 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
             LOG_INFO("TRT-RTX: cached engine size=", sz, " bytes");
             std::vector<uint8_t> blob(sz);
             if (f.read(reinterpret_cast<char*>(blob.data()), sz)) {
-                sess->runtime.reset(nvinfer1::createInferRuntime(sess->logger));
+                sess->runtime.reset(fnMkRuntime(&sess->logger, NV_TENSORRT_VERSION));
                 if (!sess->runtime) {
-                    LOG_ERR("TRT-RTX: createInferRuntime returned null.");
+                    LOG_ERR("TRT: createInferRuntime returned null (cached engine path).");
                 } else {
                     sess->engine.reset(
                         sess->runtime->deserializeCudaEngine(blob.data(), sz));
@@ -375,8 +441,8 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         LOG_INFO("  ONNX: ", std::string(onnxPath.begin(), onnxPath.end()));
         LOG_INFO("  Cache will be saved to: ", sess->enginePath);
 
-        TrtBuilderPtr builder(nvinfer1::createInferBuilder(sess->logger));
-        if (!builder) { LOG_ERR("TRT-RTX: createInferBuilder returned null."); return E_FAIL; }
+        TrtBuilderPtr builder(fnMkBuilder(&sess->logger, NV_TENSORRT_VERSION));
+        if (!builder) { LOG_ERR("TRT: createInferBuilder returned null."); return E_FAIL; }
         LOG_INFO("TRT-RTX: builder created.");
 
         // kEXPLICIT_BATCH = 0 (from reference code)
@@ -385,8 +451,8 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         LOG_INFO("TRT-RTX: network created.");
 
         // Parse ONNX
-        TrtParserPtr parser(nvonnxparser::createParser(*network, sess->logger));
-        if (!parser) { LOG_ERR("TRT-RTX: createParser returned null."); return E_FAIL; }
+        TrtParserPtr parser(fnMkParser(network.get(), &sess->logger, NV_ONNX_PARSER_VERSION));
+        if (!parser) { LOG_ERR("TRT: createParser returned null."); return E_FAIL; }
         LOG_INFO("TRT-RTX: parser created. Parsing ONNX...");
         std::string onnxA(onnxPath.begin(), onnxPath.end());
         if (!parser->parseFromFile(onnxA.c_str(),
@@ -417,23 +483,15 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         TrtConfigPtr cfg(builder->createBuilderConfig());
         if (!cfg) { LOG_ERR("TRT-RTX: createBuilderConfig returned null."); return E_FAIL; }
 
-        // FP16
-        if (builder->platformHasFastFp16()) {
-            cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
-            LOG_INFO("TRT-RTX: FP16 enabled.");
-        } else {
-            LOG_WARN("TRT-RTX: platform does not support fast FP16 — using FP32.");
-        }
+        // FP16 — always enable; TRT-RTX and TRT 10.x on RTX hardware always support it.
+        // platformHasFastFp16() was removed in TRT-RTX SDK (always true for RTX targets).
+        cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
+        LOG_INFO("TRT-RTX: FP16 enabled.");
 
-        // Workspace (TRT 8-9 API; TRT 10 uses setMemoryPoolLimit)
-        // Try setMemoryPoolLimit first (TRT 10+), fall back to setMaxWorkspaceSize
-#if NV_TENSORRT_MAJOR >= 10
+        // Workspace — use setMemoryPoolLimit (TRT 10.x and TRT-RTX 1.4+ API).
+        // setMaxWorkspaceSize was removed in TRT 10; TRT-RTX follows TRT 10 API.
         cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)2 << 30);
-        LOG_INFO("TRT-RTX: workspace=2GB (via setMemoryPoolLimit).");
-#else
-        cfg->setMaxWorkspaceSize((size_t)2 << 30);
-        LOG_INFO("TRT-RTX: workspace=2GB (via setMaxWorkspaceSize).");
-#endif
+        LOG_INFO("TRT-RTX: workspace=2GB.");
 
         // Optimization profile for dynamic-shape models
         // Use fixed 518×518 (default Depth Anything v2/v3 input).
@@ -484,8 +542,8 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         }
 
         // Deserialize for use
-        sess->runtime.reset(nvinfer1::createInferRuntime(sess->logger));
-        if (!sess->runtime) { LOG_ERR("TRT-RTX: createInferRuntime returned null."); return E_FAIL; }
+        sess->runtime.reset(fnMkRuntime(&sess->logger, NV_TENSORRT_VERSION));
+        if (!sess->runtime) { LOG_ERR("TRT: createInferRuntime returned null (post-build)."); return E_FAIL; }
         sess->engine.reset(sess->runtime->deserializeCudaEngine(
             serialized->data(), serialized->size()));
         if (!sess->engine) { LOG_ERR("TRT-RTX: deserializeCudaEngine (after build) failed."); return E_FAIL; }
@@ -497,11 +555,10 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     if (!sess->context) { LOG_ERR("TRT-RTX: createExecutionContext failed."); return E_FAIL; }
     LOG_INFO("TRT-RTX: execution context created.");
 
-    // ── Query bindings ────────────────────────────────────────────────────────
-    // TRT 8/9: getBindingIndex / getBindingDimensions
-    // TRT 10:  getNbIOTensors / getIOTensorName / getTensorIOMode
-    // We support both via preprocessor.
-#if NV_TENSORRT_MAJOR >= 10
+    // ── Query I/O bindings (TRT 10.x / TRT-RTX 1.4+ API) ────────────────────
+    // getNbIOTensors / getIOTensorName / getTensorIOMode — present in both
+    // standard TRT 10.x and TRT-RTX 1.4.  The legacy TRT 8/9 API
+    // (getNbBindings/getBindingName/bindingIsInput) was removed in TRT 10.
     {
         int nb = sess->engine->getNbIOTensors();
         for (int i = 0; i < nb; ++i) {
@@ -519,46 +576,17 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
                 sess->outputName = name;
                 sess->outputIdx  = i;
             }
-            LOG_INFO("TRT-RTX: binding[", i, "] '", name,
+            LOG_INFO("TRT: binding[", i, "] '", name,
                      "' ", mode == nvinfer1::TensorIOMode::kINPUT ? "INPUT" : "OUTPUT");
         }
         sess->nbBindings = nb;
-        // For TRT10 executeV2, set dynamic shape on context before allocation
+        // Set dynamic input shape on the execution context before allocating memory
         if (!sess->inputName.empty()) {
             nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
             sess->context->setInputShape(sess->inputName.c_str(), d);
-            LOG_INFO("TRT-RTX: context input shape set: 1×3×", sess->modelH, "×", sess->modelW);
+            LOG_INFO("TRT: context input shape: 1×3×", sess->modelH, "×", sess->modelW);
         }
     }
-#else
-    {
-        int nb = sess->engine->getNbBindings();
-        sess->nbBindings = nb;
-        for (int i = 0; i < nb; ++i) {
-            const char* name = sess->engine->getBindingName(i);
-            if (sess->engine->bindingIsInput(i)) {
-                sess->inputName = name;
-                sess->inputIdx  = i;
-                auto d = sess->engine->getBindingDimensions(i);
-                if (d.nbDims == 4) {
-                    sess->modelH = (int)(d.d[2] > 0 ? d.d[2] : m_modelInputH);
-                    sess->modelW = (int)(d.d[3] > 0 ? d.d[3] : m_modelInputW);
-                }
-            } else {
-                sess->outputName = name;
-                sess->outputIdx  = i;
-            }
-            LOG_INFO("TRT-RTX: binding[", i, "] '", name,
-                     "' ", sess->engine->bindingIsInput(i) ? "INPUT" : "OUTPUT");
-        }
-        // For dynamic shapes, set context dims before allocation
-        if (sess->inputIdx >= 0) {
-            nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
-            sess->context->setBindingDimensions(sess->inputIdx, d);
-            LOG_INFO("TRT-RTX: context binding dims set: 1×3×", sess->modelH, "×", sess->modelW);
-        }
-    }
-#endif
 
     if (sess->inputIdx < 0 || sess->outputIdx < 0) {
         LOG_ERR("TRT-RTX: could not identify input/output bindings.");
@@ -583,8 +611,11 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     m_trtRtx     = std::move(sess);
     m_inputName  = m_trtRtx->inputName;
     m_outputName = m_trtRtx->outputName;
-    outInfo = L"TRT-RTX native (FP16)";
-    LOG_INFO("TRT-RTX native session ready.");
+    outInfo = (runtime == InferenceRuntime::TensorRTRtx)
+        ? L"TensorRT-RTX native (FP16)"
+        : L"TensorRT native (FP16)";
+    LOG_INFO("Native TRT session ready  runtime=",
+             runtime == InferenceRuntime::TensorRTRtx ? "TRT-RTX" : "TensorRT");
     return S_OK;
 }
 

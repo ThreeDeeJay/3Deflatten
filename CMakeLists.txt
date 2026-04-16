@@ -561,16 +561,13 @@ target_link_libraries(3Deflatten PRIVATE
     delayimp.lib          # required for /DELAYLOAD
 )
 
-# Unified-backend: link CUDA runtime + TRT-RTX import libs
+# Unified-backend: link CUDA runtime (headers + cudart needed at compile time).
+# nvinfer_10.lib and nvonnxparser_10.lib are intentionally NOT linked here —
+# their factory functions are loaded via GetProcAddress at runtime, making the
+# build independent of .lib symbol-name differences between TRT 10.x and TRT-RTX 1.4.
 if(ORT_BACKEND STREQUAL "Unified")
     if(TARGET CUDA::cudart)
         target_link_libraries(3Deflatten PRIVATE CUDA::cudart)
-    endif()
-    if(_TRTRTX_INFER_LIB)
-        target_link_libraries(3Deflatten PRIVATE "${_TRTRTX_INFER_LIB}")
-    endif()
-    if(_TRTRTX_PARSER_LIB)
-        target_link_libraries(3Deflatten PRIVATE "${_TRTRTX_PARSER_LIB}")
     endif()
 endif()
 
