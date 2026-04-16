@@ -30,7 +30,7 @@ FetchContent_Declare(win_classic_samples
         "Samples/Win7Samples/multimedia/directshow/baseclasses"
     SOURCE_SUBDIR  "Samples/Win7Samples/multimedia/directshow/baseclasses"
 )
-FetchContent_Populate(win_classic_samples)
+FetchContent_MakeAvailable(win_classic_samples)
 
 set(BASECLASSES_DIR
     "${win_classic_samples_SOURCE_DIR}/Samples/Win7Samples/multimedia/directshow/baseclasses")
