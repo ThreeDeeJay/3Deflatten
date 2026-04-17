@@ -104,6 +104,7 @@ jobs:
         ls -R "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}\extras\visual_studio_integration\MSBuildExtensions"
         ls -R "${{env.VS_PATH}}\MSBuild\Microsoft\VC\v160\BuildCustomizations"
         ls -R "${{env.VS_PATH}}\MSBuild\Microsoft\VC\v170\BuildCustomizations"
+
     - name: Download TensorRT
       run: |
         curl --ssl-revoke-best-effort --create-dirs -L "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}/zip/TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}.Windows.amd64.cuda-${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}.zip" -o "TensorRT.zip" || true
@@ -114,6 +115,7 @@ jobs:
         curl --ssl-revoke-best-effort --fail --create-dirs -L "https://developer.nvidia.com/downloads/trt/rtx_sdk/secure/${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}/TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}-Windows-amd64-cuda-${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}-Release-external.zip" -o "TensorRT-RTX.zip" || true
         7z x "TensorRT-RTX.zip"
         ROBOCOPY /MOVE /S "TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}" "TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}" || true
+
     - name: Download onnxruntime
       run: |
         curl --ssl-revoke-best-effort --create-dirs -L "https://github.com/ThreeDeeJay/onnxruntime/releases/download/TensorRT-RTX-75/onnxruntime.zip" -o "onnxruntime.zip"
