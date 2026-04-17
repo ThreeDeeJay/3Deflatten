@@ -272,6 +272,10 @@ public:
     }
 };
 
+// Forward declaration — GetDllDir is defined later in this file.
+// Required so LoadTrtRtxNative (inside #ifdef ORT_ENABLE_TRTRTX) can call it.
+__declspec(noinline) static std::wstring GetDllDir();
+
 // ── TrtRtxSession ─────────────────────────────────────────────────────────────
 // Holds all TRT and CUDA state for one loaded model.
 struct DepthEstimator::TrtRtxSession {
@@ -374,32 +378,7 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     using FnMkParser  = nvonnxparser::IParser*     (*)(void*, void*, int32_t);
 
     auto loadTrtDll = [&](const wchar_t* name) -> HMODULE {
-        // Try executable directory first (preferred)
-        char exePath[MAX_PATH];
-        if (!GetModuleFileNameA(NULL, exePath, MAX_PATH)) {
-            LOG_WARN("Failed to get executable path; falling back to system directory");
-        } else {
-            std::string fullPath(exePath);
-            auto lastSlash = fullPath.find_last_of("\\/");
-            if (lastSlash != std::string::npos) {
-                full = std::wstring(fullPath.substr(0, lastSlash).c_str()) + L"\\";
-                full += name;
-            } else {
-                // If no path separator found — treat as root dir
-                full = std::wstring(exePath);
-                full += L"\\" + name;
-            }
-        }
-        // Fall back to system directory if needed
-        if (full.empty()) {
-            char sysDir[MAX_PATH];
-            if (!GetSystemDirectoryA(sysDir, MAX_PATH)) {
-                LOG_ERROR("Could not load model: failed to get system directory");
-                return E_FAIL;
-            }
-            full = std::wstring(sysDir) + L"\\" + name;
-            LOG_WARN("Falling back to system directory.");
-        }
+        std::wstring full = std::wstring(GetDllDir().c_str()) + L"\\" + name;
         HMODULE h = LoadLibraryExW(full.c_str(), nullptr,
             LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS |
             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
