@@ -107,12 +107,12 @@ jobs:
     - name: Download TensorRT
       run: |
         curl --ssl-revoke-best-effort --create-dirs -L "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}/zip/TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}.Windows.amd64.cuda-${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}.zip" -o "TensorRT.zip" || true
-        7z x "TensorRT.zip"
+        7z e -y "TensorRT.zip" "TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}" -o"TensorRT"
     - name: Download TensorRT RTX
       run: |
         curl --ssl-revoke-best-effort --fail --create-dirs -L "https://developer.nvidia.com/downloads/trt/rtx_sdk/secure/${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}/TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}.Windows.win10.cuda-${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}.zip" -o "TensorRT-RTX.zip" || true
         curl --ssl-revoke-best-effort --fail --create-dirs -L "https://developer.nvidia.com/downloads/trt/rtx_sdk/secure/${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}/TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}-Windows-amd64-cuda-${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}-Release-external.zip" -o "TensorRT-RTX.zip" || true
-        7z x "TensorRT-RTX.zip"
+        7z e -y "TensorRT-RTX.zip" "TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}" -o"TensorRT"
     - name: Download onnxruntime
       run: |
         curl --ssl-revoke-best-effort --create-dirs -L "https://github.com/ThreeDeeJay/onnxruntime/releases/download/TensorRT-RTX-75/onnxruntime.zip" -o "onnxruntime.zip"
@@ -129,7 +129,8 @@ jobs:
         -DCMAKE_PREFIX_PATH=C:\vcpkg\installed\${{matrix.Settings.Triplet}}
         -DORT_BACKEND=Unified
         -DORT_UNIFIED_DIR="${{github.workspace}}\onnxruntime"
-        -DORT_TRTRTX_HOME="${{github.workspace}}\TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}"
+        -DORT_TRTRTX_HOME="${{github.workspace}}\TensorRT"
+#        -DORT_TRTRTX_HOME="${{github.workspace}}\TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}"
 #        -DORT_TRTRTX_HOME="${{github.workspace}}\TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}"
 
     - name: Build
