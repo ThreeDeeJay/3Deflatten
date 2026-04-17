@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED TRUE)
+set(FETCHCONTENT_USES_GIT FALSE)
 
 # ── Platform ──────────────────────────────────────────────────────────────────
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
