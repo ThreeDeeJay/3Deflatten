@@ -415,7 +415,26 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     }
     LOG_INFO("TRT: factory functions resolved OK");
 
-    // ── Attempt to load serialized engine from disk ───────────────────────────
+    // ── Compute target resolution (same formula as PreprocessFrame dynamic path) ──
+    // Always done here regardless of cache hit/miss so that:
+    //   (a) sess->modelW/H are correct for setInputShape and buffer allocation, and
+    //   (b) the cache filename encodes the same SM — a stale cache with wrong profile
+    //       simply fails to deserialise and triggers a rebuild.
+    int dmd = (sess->depthMaxDim > 0) ? sess->depthMaxDim : 1022;
+    const int base = 14;
+    float sc  = std::min((float)dmd / 1920, (float)dmd / 1080);
+    int optW = std::min(dmd, std::max(base, (int)std::round(1920*sc/base)*base));
+    int optH = std::min(dmd, std::max(base, (int)std::round(1080*sc/base)*base));
+    sess->modelW = optW;
+    sess->modelH = optH;
+    // Buffers are allocated at MAX profile size (dmd×dmd) so any dynamic input
+    // within the profile range fits without reallocation.
+    size_t maxElems    = (size_t)dmd * dmd;
+    size_t inputBufSz  = sizeof(float) * 3 * maxElems;
+    size_t outputBufSz = sizeof(float) * 1 * maxElems;
+    LOG_INFO("TRT: target OPT=", optW, "×", optH,
+             " MAX=", dmd, "×", dmd,
+             " input_buf=", inputBufSz/1024, " KB");
     bool engineLoaded = false;
     if (std::filesystem::exists(sess->enginePath)) {
         LOG_INFO("TRT-RTX: loading cached engine: ", sess->enginePath);
@@ -501,18 +520,7 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)2 << 30);
         LOG_INFO("TRT-RTX: workspace=2GB.");
 
-        // Optimization profile: MIN=14×14, OPT=aspect-scaled to depthMaxDim, MAX=depthMaxDim²
-        // This matches the DML/ORT dynamic-input resolution (PreprocessFrame logic).
-        int dmd = (sess->depthMaxDim > 0) ? sess->depthMaxDim : 1022;
-        const int base = 14;
-        float sc = std::min((float)dmd / 1920, (float)dmd / 1080);  // OPT for 1920×1080
-        int optW = std::min(dmd, std::max(base, (int)std::round(1920*sc/base)*base));
-        int optH = std::min(dmd, std::max(base, (int)std::round(1080*sc/base)*base));
-        // Store OPT dims — used for buffer allocation and context shape
-        sess->modelW = optW;
-        sess->modelH = optH;
-        LOG_INFO("TRT: depthMaxDim=", dmd, " OPT=", optW, "×", optH);
-
+        // Optimization profile uses pre-computed optW/optH/dmd/base from above.
         if (network->getNbInputs() > 0) {
             auto* inp = network->getInput(0);
             auto  dims = inp->getDimensions();
@@ -532,6 +540,7 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
                 LOG_INFO("TRT: profile min=14×14 opt=", optW, "×", optH,
                          " max=", dmd, "×", dmd);
             } else if (dims.nbDims == 4 && dims.d[2] > 0 && dims.d[3] > 0) {
+                // Fixed-shape: override with actual network dims
                 sess->modelW = (int)dims.d[3];
                 sess->modelH = (int)dims.d[2];
             }
@@ -609,9 +618,11 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
              "  output='", sess->outputName, "' idx=", sess->outputIdx);
     LOG_INFO("TRT-RTX: model dims: ", sess->modelW, "×", sess->modelH);
 
-    // ── Allocate device/host memory ───────────────────────────────────────────
-    sess->inputBytes  = sizeof(float) * 3 * sess->modelH * sess->modelW;
-    sess->outputBytes = sizeof(float) * 1 * sess->modelH * sess->modelW;
+    // ── Allocate device/host memory at MAX profile size ───────────────────────
+    // inputBufSz/outputBufSz cover the full dmd×dmd maximum so any dynamic input
+    // within the profile range fits without reallocation or buffer overflow.
+    sess->inputBytes  = inputBufSz;
+    sess->outputBytes = outputBufSz;
     cerr = cudaMalloc(reinterpret_cast<void**>(&sess->d_input),  sess->inputBytes);
     if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMalloc(input) failed (", cerr, ")"); return E_FAIL; }
     cerr = cudaMalloc(reinterpret_cast<void**>(&sess->d_output), sess->outputBytes);
@@ -619,7 +630,7 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     cerr = cudaMallocHost(reinterpret_cast<void**>(&sess->h_output), sess->outputBytes);
     if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMallocHost failed (", cerr, ")"); return E_FAIL; }
     LOG_INFO("TRT-RTX: device memory allocated  input=", sess->inputBytes/1024,
-             " KB  output=", sess->outputBytes/1024, " KB");
+             " KB (max=", dmd, "×", dmd, ")  output=", sess->outputBytes/1024, " KB");
 
     m_trtRtx     = std::move(sess);
     m_inputName  = m_trtRtx->inputName;
