@@ -33,6 +33,7 @@ public:
     HRESULT Load(const std::wstring& modelPath,
                  GPUProvider         provider,
                  InferenceRuntime    runtime,
+                 int                 depthMaxDim,
                  std::wstring&       outGPUInfo);
 
     HRESULT Estimate(const BYTE* srcData,
@@ -136,7 +137,7 @@ private:
     std::unique_ptr<TrtRtxSession> m_trtRtx;
 #ifdef ORT_ENABLE_TRTRTX
     HRESULT LoadTrtRtxNative(const std::wstring& onnxPath, std::wstring& outInfo,
-                              InferenceRuntime runtime);
+                              InferenceRuntime runtime, int depthMaxDim);
     HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH, int srcStride,
                             bool isBGR, bool flipDepth, float smoothAlpha,
                             DepthResult& result);

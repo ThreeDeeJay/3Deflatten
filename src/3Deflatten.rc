@@ -7,7 +7,7 @@ BEGIN
     IDS_PROP_TITLE  "3Deflatten"
 END
 
-IDD_PROP_PAGE DIALOGEX 0, 0, 298, 280
+IDD_PROP_PAGE DIALOGEX 0, 0, 298, 298
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
@@ -38,14 +38,19 @@ BEGIN
     COMBOBOX  IDC_INFILL_COMBO,                    40, 157, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    // Inference (Runtime + optional Provider)
-    // Height 52 fits: Runtime row (14) + gap (4) + Provider row (14) + padding
-    GROUPBOX  "Inference", -1,                    150, 102, 144,  52
+    // Inference (Runtime + Provider + Depth Dim + Mesh Div)
+    GROUPBOX  "Inference", -1,                    150, 102, 144,  84
     LTEXT     "Runtime:",  -1,                    156, 115,  36,  10
     COMBOBOX  IDC_RUNTIME_COMBO,                  194, 113,  94,  50,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT     "Provider:", IDC_PROVIDER_LABEL,    156, 131,  36,  10
     COMBOBOX  IDC_GPU_COMBO,                      194, 129,  94,  80,
+              CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT     "Depth dim:",-1,                    156, 147,  36,  10
+    COMBOBOX  IDC_DEPTHDIM_COMBO,                 194, 145,  94,  60,
+              CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT     "Mesh res:", -1,                    156, 163,  36,  10
+    COMBOBOX  IDC_MESHDIV_COMBO,                  194, 161,  94,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
     // ONNX Model + DA3-Streaming checkbox
@@ -63,7 +68,7 @@ BEGIN
     PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 236, 290, 14
 
     // Status
-    GROUPBOX  "Active Inference Status", -1,        4, 254, 290,  22
-    LTEXT     "", IDC_GPU_INFO,                    10, 263, 278,  10,
+    GROUPBOX  "Active Inference Status", -1,        4, 254, 290,  40
+    LTEXT     "", IDC_GPU_INFO,                    10, 267, 278,  22,
               SS_NOPREFIX | SS_ENDELLIPSIS
 END

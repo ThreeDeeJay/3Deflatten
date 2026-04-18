@@ -24,6 +24,8 @@
 #define IDC_DEPTH_CHECK    1016   // Show depth map overlay checkbox
 #define IDC_RUNTIME_COMBO  1017   // Inference runtime: ONNXRuntime / TensorRT RTX
 #define IDC_PROVIDER_LABEL 1018   // "Provider:" label (hidden when TRT-RTX selected)
+#define IDC_MESHDIV_COMBO  1019   // Mesh resolution divisor: 1/2/4
+#define IDC_DEPTHDIM_COMBO 1020   // Max depth tensor dim: Auto/518/720/1022
 
 // ── Trackbar style constants (commctrl.h equivalents for rc.exe) ──────────────
 // rc.exe does not automatically include commctrl.h, so we define what we need.

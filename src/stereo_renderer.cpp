@@ -494,8 +494,9 @@ HRESULT StereoRenderer::CreateShaders() {
 #endif
 }
 
-HRESULT StereoRenderer::EnsureTextures(int srcW, int srcH, OutputMode mode) {
-    if (m_lastSrcW==srcW && m_lastSrcH==srcH && m_lastMode==mode) return S_OK;
+HRESULT StereoRenderer::EnsureTextures(int srcW, int srcH, OutputMode mode, int meshDiv) {
+    if (m_lastSrcW==srcW && m_lastSrcH==srcH && m_lastMode==mode && m_lastMeshDiv==meshDiv)
+        return S_OK;
 
     int dstW2 = (mode == OutputMode::SideBySide)  ? srcW*2 : srcW;
     int dstH2 = (mode == OutputMode::TopAndBottom) ? srcH*2 : srcH;
@@ -578,7 +579,7 @@ HRESULT StereoRenderer::EnsureTextures(int srcW, int srcH, OutputMode mode) {
         if (FAILED(hr)) return hr;
     }
 
-    m_lastSrcW=srcW; m_lastSrcH=srcH; m_lastMode=mode;
+    m_lastSrcW=srcW; m_lastSrcH=srcH; m_lastMode=mode; m_lastMeshDiv=meshDiv;
     LOG_DBG("StereoRenderer: textures ", srcW,"x",srcH,
             " -> ", dstW,"x",dstH);
 
@@ -586,8 +587,11 @@ HRESULT StereoRenderer::EnsureTextures(int srcW, int srcH, OutputMode mode) {
     // Using srcW/2 × srcH/2 vertices balances edge-cutting accuracy with GPU cost.
     // Each vertex stores (u, v) in [0,1]; position is computed in the VS from depth.
     if (m_meshVS) {   // only build if mesh shaders compiled successfully
-        int mW = std::max(2, srcW / 2);
-        int mH = std::max(2, srcH / 2);
+        // meshDiv: 1=full source resolution, 2=half(default), 4=quarter.
+        // Clamped so the grid is at least 2×2.
+        int div = std::max(1, meshDiv);
+        int mW = std::max(2, srcW / div);
+        int mH = std::max(2, srcH / div);
 
         // Vertex buffer: mW*mH float2 UVs
         std::vector<float> vdata;
@@ -674,7 +678,7 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
                                  const DeflattenConfig& cfg,
                                  float motionDx, float motionDy,
                                  BYTE* dstFrame, int dstStride) {
-    HRESULT hrET = EnsureTextures(srcW, srcH, cfg.outputMode);
+    HRESULT hrET = EnsureTextures(srcW, srcH, cfg.outputMode, cfg.meshDiv);
     if (FAILED(hrET)) {
         LOG_ERR("EnsureTextures failed hr=0x", std::hex, (unsigned)hrET, std::dec,
                 " -- CPU fallback");

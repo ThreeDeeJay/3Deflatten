@@ -91,12 +91,23 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"EdgeClamp  (SuperDepth3D style)");
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inpaint  (3D Photo bilateral)");
 
-        // Inference Runtime — must match InferenceRuntime enum order exactly
+        // Inference Runtime
         SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0, (LPARAM)L"ONNXRuntime");
         SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0,
             (LPARAM)L"TensorRT RTX  (native, fastest)");
         SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0,
             (LPARAM)L"TensorRT  (native, standard SDK)");
+
+        // Depth tensor max dim — 0=Auto matches label index 0
+        SendDlgItemMessage(hwnd, IDC_DEPTHDIM_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Auto (model default)");
+        SendDlgItemMessage(hwnd, IDC_DEPTHDIM_COMBO, CB_ADDSTRING, 0, (LPARAM)L"518  (small, fast)");
+        SendDlgItemMessage(hwnd, IDC_DEPTHDIM_COMBO, CB_ADDSTRING, 0, (LPARAM)L"756  (medium)");
+        SendDlgItemMessage(hwnd, IDC_DEPTHDIM_COMBO, CB_ADDSTRING, 0, (LPARAM)L"1022 (full quality)");
+
+        // Mesh resolution divisor
+        SendDlgItemMessage(hwnd, IDC_MESHDIV_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Full (1:1 source)");
+        SendDlgItemMessage(hwnd, IDC_MESHDIV_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Half (default)");
+        SendDlgItemMessage(hwnd, IDC_MESHDIV_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Quarter");
 
         // GPU Provider — must match GPUProvider enum order exactly
         SendDlgItemMessage(hwnd, IDC_GPU_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Auto (best available)");
@@ -132,6 +143,15 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_INFILL_COMBO && note==CBN_SELCHANGE) {
+            ReadControls(hwnd); PushConfig(); SetDirty(); break;
+        }
+        if (ctl==IDC_DEPTHDIM_COMBO && note==CBN_SELCHANGE) {
+            ReadControls(hwnd); SetDirty();
+            SetDlgItemTextW(hwnd, IDC_GPU_INFO,
+                L"Press 'Reload' to apply new depth resolution.");
+            break;
+        }
+        if (ctl==IDC_MESHDIV_COMBO && note==CBN_SELCHANGE) {
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_FLIP_CHECK && note==BN_CLICKED) {
@@ -251,6 +271,17 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
     SendDlgItemMessage(hwnd, IDC_GPU_COMBO,     CB_SETCURSEL, (int)m_cfg.gpuProvider, 0);
     SendDlgItemMessage(hwnd, IDC_INFILL_COMBO,  CB_SETCURSEL, (int)m_cfg.infillMode,  0);
     SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_SETCURSEL, (int)m_cfg.inferenceRuntime, 0);
+
+    // depthMaxDim → combo index: 0=Auto, 1=518, 2=756, 3=1022
+    static const int kDepthDims[] = {0, 518, 756, 1022};
+    int ddIdx = 0;
+    for (int i = 1; i < 4; ++i)
+        if (m_cfg.depthMaxDim == kDepthDims[i]) { ddIdx = i; break; }
+    SendDlgItemMessage(hwnd, IDC_DEPTHDIM_COMBO, CB_SETCURSEL, ddIdx, 0);
+
+    // meshDiv → combo index: 0=div1, 1=div2, 2=div4
+    int mdIdx = (m_cfg.meshDiv <= 1) ? 0 : (m_cfg.meshDiv <= 2) ? 1 : 2;
+    SendDlgItemMessage(hwnd, IDC_MESHDIV_COMBO, CB_SETCURSEL, mdIdx, 0);
     SendDlgItemMessage(hwnd, IDC_FLIP_CHECK,  BM_SETCHECK,
                        m_cfg.flipDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_SETCHECK,
@@ -285,6 +316,16 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
                         ? TRUE : FALSE;
     m_cfg.inferenceRuntime = (InferenceRuntime)std::min(2,
         std::max(0, (int)SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_GETCURSEL, 0, 0)));
+    // depthMaxDim: index 0=Auto(0), 1=518, 2=756, 3=1022
+    static const int kDepthDims[] = {0, 518, 756, 1022};
+    int ddIdx = std::min(3, std::max(0,
+        (int)SendDlgItemMessage(hwnd, IDC_DEPTHDIM_COMBO, CB_GETCURSEL, 0, 0)));
+    m_cfg.depthMaxDim = kDepthDims[ddIdx];
+    // meshDiv: index 0=1, 1=2, 2=4
+    static const int kMeshDivs[] = {1, 2, 4};
+    int mdIdx = std::min(2, std::max(0,
+        (int)SendDlgItemMessage(hwnd, IDC_MESHDIV_COMBO, CB_GETCURSEL, 0, 0)));
+    m_cfg.meshDiv = kMeshDivs[mdIdx];
 }
 
 void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {

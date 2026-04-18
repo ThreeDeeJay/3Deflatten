@@ -38,7 +38,7 @@ public:
 private:
     HRESULT InitGPU();
     HRESULT CreateShaders();
-    HRESULT EnsureTextures(int srcW, int srcH, OutputMode mode);
+    HRESULT EnsureTextures(int srcW, int srcH, OutputMode mode, int meshDiv);
 
     void RenderGPU(const BYTE* srcFrame, int srcW, int srcH, int srcStride,
                    const float* depthMap, const DeflattenConfig& cfg,
@@ -72,8 +72,9 @@ private:
     ComPtr<ID3D11Texture2D>           m_stagingTex[3];
     int                               m_stagingFrame = 0;
 
-    int        m_lastSrcW = 0, m_lastSrcH = 0;
-    OutputMode m_lastMode = OutputMode::SideBySide;
+    int        m_lastSrcW    = 0, m_lastSrcH = 0;
+    OutputMode m_lastMode    = OutputMode::SideBySide;
+    int        m_lastMeshDiv = 0;  // track meshDiv so EnsureTextures rebuilds on change
 
     bool m_gpuOK       = false;
     int  m_renderCount = 0;

@@ -57,6 +57,8 @@ struct DeflattenConfig {
     BOOL        showDepth;     // overlay depth map on both views (toggleable via hotkey)
     int         depthViewKey;  // VK code to toggle showDepth (default VK_RSHIFT = 161)
     InferenceRuntime inferenceRuntime; // OnnxRuntime or TensorRTRtx native
+    int         depthMaxDim;   // max depth tensor side (0=auto 1022 for dynamic, ignored for fixed)
+    int         meshDiv;       // mesh vertex grid divisor: 1=full 2=half(default) 4=quarter
 };
 
 MIDL_INTERFACE("4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F")

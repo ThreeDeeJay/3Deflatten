@@ -92,6 +92,7 @@ DepthEstimator::~DepthEstimator() {
 HRESULT DepthEstimator::Load(const std::wstring& modelPath,
                               GPUProvider        provider,
                               InferenceRuntime   runtime,
+                              int                depthMaxDim,
                               std::wstring&      outInfo) {
     // ── DA3-Streaming sentinel ────────────────────────────────────────────────
     bool wantDA3Stream = (modelPath == STREAMING_SENTINEL);
@@ -134,7 +135,7 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
         const char* runtimeName = (runtime == InferenceRuntime::TensorRTRtx)
             ? "TRT-RTX" : "TensorRT native";
         LOG_INFO("Native inference runtime: ", runtimeName);
-        HRESULT hr = LoadTrtRtxNative(path, outInfo, runtime);
+        HRESULT hr = LoadTrtRtxNative(path, outInfo, runtime, depthMaxDim);
         if (SUCCEEDED(hr)) {
             m_session.reset();
             m_modelPath     = path;
@@ -286,6 +287,7 @@ struct DepthEstimator::TrtRtxSession {
 
     // Model I/O dimensions (determined from engine after load)
     int modelW = 518, modelH = 518;
+    int depthMaxDim = 0;   // passed from DeflattenConfig; 0 = auto (1022)
     int nbBindings = 0;
     int inputIdx  = -1;
     int outputIdx = -1;
@@ -337,9 +339,11 @@ static std::string TrtRtxEnginePath(const std::wstring& onnxPath, int sm) {
 // ── LoadTrtRtxNative ──────────────────────────────────────────────────────────
 HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
                                           std::wstring& outInfo,
-                                          InferenceRuntime runtime) {
+                                          InferenceRuntime runtime,
+                                          int depthMaxDim) {
     m_trtRtx.reset();
     auto sess = std::make_unique<DepthEstimator::TrtRtxSession>();
+    sess->depthMaxDim = depthMaxDim;
 
     // ── Detect device SM ─────────────────────────────────────────────────────
     int dev = 0;
@@ -497,9 +501,18 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)2 << 30);
         LOG_INFO("TRT-RTX: workspace=2GB.");
 
-        // Optimization profile for dynamic-shape models
-        // Use fixed 518×518 (default Depth Anything v2/v3 input).
-        // If the model has no dynamic dims this profile is harmless.
+        // Optimization profile: MIN=14×14, OPT=aspect-scaled to depthMaxDim, MAX=depthMaxDim²
+        // This matches the DML/ORT dynamic-input resolution (PreprocessFrame logic).
+        int dmd = (sess->depthMaxDim > 0) ? sess->depthMaxDim : 1022;
+        const int base = 14;
+        float sc = std::min((float)dmd / 1920, (float)dmd / 1080);  // OPT for 1920×1080
+        int optW = std::min(dmd, std::max(base, (int)std::round(1920*sc/base)*base));
+        int optH = std::min(dmd, std::max(base, (int)std::round(1080*sc/base)*base));
+        // Store OPT dims — used for buffer allocation and context shape
+        sess->modelW = optW;
+        sess->modelH = optH;
+        LOG_INFO("TRT: depthMaxDim=", dmd, " OPT=", optW, "×", optH);
+
         if (network->getNbInputs() > 0) {
             auto* inp = network->getInput(0);
             auto  dims = inp->getDimensions();
@@ -508,19 +521,19 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
                 if (dims.d[k] < 0) { hasDynamic = true; break; }
 
             if (hasDynamic) {
-                LOG_INFO("TRT-RTX: dynamic input detected — adding optimization profile.");
                 auto* profile = builder->createOptimizationProfile();
-                // Fix H and W at 518, batch=1, C=3
-                nvinfer1::Dims4 fixedDims{1, 3, (int)m_modelInputH, (int)m_modelInputW};
-                profile->setDimensions(inp->getName(),
-                    nvinfer1::OptProfileSelector::kMIN, fixedDims);
-                profile->setDimensions(inp->getName(),
-                    nvinfer1::OptProfileSelector::kOPT, fixedDims);
-                profile->setDimensions(inp->getName(),
-                    nvinfer1::OptProfileSelector::kMAX, fixedDims);
+                profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMIN,
+                    nvinfer1::Dims4{1, 3, base, base});
+                profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kOPT,
+                    nvinfer1::Dims4{1, 3, optH, optW});
+                profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMAX,
+                    nvinfer1::Dims4{1, 3, dmd,  dmd});
                 cfg->addOptimizationProfile(profile);
-                LOG_INFO("TRT-RTX: profile set: 1×3×",
-                         (int)m_modelInputH, "×", (int)m_modelInputW);
+                LOG_INFO("TRT: profile min=14×14 opt=", optW, "×", optH,
+                         " max=", dmd, "×", dmd);
+            } else if (dims.nbDims == 4 && dims.d[2] > 0 && dims.d[3] > 0) {
+                sess->modelW = (int)dims.d[3];
+                sess->modelH = (int)dims.d[2];
             }
         }
 
@@ -571,11 +584,8 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
             if (mode == nvinfer1::TensorIOMode::kINPUT) {
                 sess->inputName = name;
                 sess->inputIdx  = i;
-                auto d = sess->engine->getTensorShape(name);
-                if (d.nbDims == 4) {
-                    sess->modelH = (int)(d.d[2] > 0 ? d.d[2] : m_modelInputH);
-                    sess->modelW = (int)(d.d[3] > 0 ? d.d[3] : m_modelInputW);
-                }
+                // modelW/H already set from optimization profile (dynamic)
+                // or from fixed dims in the build block above.
             } else if (mode == nvinfer1::TensorIOMode::kOUTPUT) {
                 sess->outputName = name;
                 sess->outputIdx  = i;
@@ -584,7 +594,6 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
                      "' ", mode == nvinfer1::TensorIOMode::kINPUT ? "INPUT" : "OUTPUT");
         }
         sess->nbBindings = nb;
-        // Set dynamic input shape on the execution context before allocating memory
         if (!sess->inputName.empty()) {
             nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
             sess->context->setInputShape(sess->inputName.c_str(), d);
@@ -615,6 +624,10 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     m_trtRtx     = std::move(sess);
     m_inputName  = m_trtRtx->inputName;
     m_outputName = m_trtRtx->outputName;
+    // Tell PreprocessFrame to use aspect-correct scaling (same as DML dynamic path)
+    m_dynamicInput = true;
+    m_modelInputW  = m_trtRtx->modelW;
+    m_modelInputH  = m_trtRtx->modelH;
     outInfo = (runtime == InferenceRuntime::TensorRTRtx)
         ? L"TensorRT-RTX native (FP16)"
         : L"TensorRT native (FP16)";
@@ -629,14 +642,26 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          float smoothAlpha, DepthResult& result) {
     auto& s = *m_trtRtx;
 
-    // Preprocess: BGRA → [1,3,H,W] float tensor (same normalisation as ORT path)
     std::vector<float> inputTensor;
     int mw, mh;
     PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR, inputTensor, mw, mh);
 
-    // Upload to device
+    size_t uploadBytes = inputTensor.size() * sizeof(float);
+    if (uploadBytes > s.inputBytes) {
+        LOG_ERR("TRT-RTX: input tensor (", uploadBytes, ") exceeds allocated buffer (",
+                s.inputBytes, "). Re-run Reload to rebuild the engine with larger profile.");
+        return E_FAIL;
+    }
+
+    // Update context input shape if dims changed (e.g. first frame after load)
+    if (mw != s.modelW || mh != s.modelH) {
+        nvinfer1::Dims4 d{1, 3, mh, mw};
+        s.context->setInputShape(s.inputName.c_str(), d);
+        s.modelW = mw; s.modelH = mh;
+    }
+
     cudaError_t cerr = cudaMemcpyAsync(
-        s.d_input, inputTensor.data(), s.inputBytes,
+        s.d_input, inputTensor.data(), uploadBytes,
         cudaMemcpyHostToDevice, s.stream);
     if (cerr != cudaSuccess) {
         LOG_ERR("TRT-RTX: cudaMemcpyAsync(HtoD) failed (", cerr, ")");
@@ -654,8 +679,8 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         return E_FAIL;
     }
 
-    // Download result
-    cerr = cudaMemcpy(s.h_output, s.d_output, s.outputBytes, cudaMemcpyDeviceToHost);
+    size_t downloadBytes = sizeof(float) * mw * mh;
+    cerr = cudaMemcpy(s.h_output, s.d_output, downloadBytes, cudaMemcpyDeviceToHost);
     if (cerr != cudaSuccess) {
         LOG_ERR("TRT-RTX: cudaMemcpy(DtoH) failed (", cerr, ")");
         return E_FAIL;
@@ -1546,18 +1571,17 @@ void DepthEstimator::PreprocessFrame(const BYTE* src,
                                       std::vector<float>& tensor,
                                       int& mw, int& mh) {
     if (m_dynamicInput) {
-        // Fit the longer side to 1022 (Depth Anything V2 max) and scale the
-        // shorter side proportionally, then snap BOTH to the nearest multiple
-        // of 14 (patch size).  Without this both dimensions were clamped to
-        // 1022 independently, turning 16:9 footage into a 1:1 square tensor
-        // and distorting all geometry in the depth output.
-        const int maxDim = 1022;
+        // Fit the longer side to m_modelInputW (or 1022 if still default) keeping
+        // aspect ratio, snapped to multiples of 14 (ViT patch size).
+        // m_modelInputW is set to depthMaxDim-derived OPT dims for TRT sessions,
+        // so both ORT/DML and TRT produce comparable resolution tensors.
+        const int maxDim = (m_modelInputW > 0 && m_modelInputW != 518)
+                         ? (int)std::max(m_modelInputW, m_modelInputH)
+                         : 1022;
         const int base   = 14;
         float scale = std::min((float)maxDim / w, (float)maxDim / h);
-        // Round to nearest multiple of 14, minimum 14
         mw = std::max(base, (int)std::round(w * scale / base) * base);
         mh = std::max(base, (int)std::round(h * scale / base) * base);
-        // Clamp in case rounding pushed past maxDim
         mw = std::min(mw, maxDim);
         mh = std::min(mh, maxDim);
     } else {
