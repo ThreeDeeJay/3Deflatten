@@ -306,6 +306,13 @@ struct DepthEstimator::TrtRtxSession {
     std::string inputName, outputName;
     std::string enginePath;
 
+    // Pre-built bindings vector: one entry per IO tensor.
+    // Entries for inputIdx → d_input, outputIdx → d_output,
+    // all other outputs → d_dummy (a valid non-null device pointer).
+    // TRT10 requires every output tensor to have a non-null address.
+    std::vector<void*> bindings;
+    void*  d_dummy = nullptr;   // single shared dummy device buffer for unused outputs
+
     // DLL handles for dynamically loaded factory functions.
     // Kept alive for the lifetime of the session; freed in Destroy().
     // Static linking against nvinfer_10.lib / nvonnxparser_10.lib is intentionally
@@ -322,6 +329,7 @@ struct DepthEstimator::TrtRtxSession {
         if (stream)  { cudaStreamDestroy(stream);  stream  = nullptr; }
         if (d_input)  { cudaFree(d_input);   d_input  = nullptr; }
         if (d_output) { cudaFree(d_output);  d_output = nullptr; }
+        if (d_dummy)  { cudaFree(d_dummy);   d_dummy  = nullptr; }
         if (h_output) { cudaFreeHost(h_output); h_output = nullptr; }
         // Free DLL handles last — TRT objects above must be destroyed first
         if (hParser) { FreeLibrary(hParser); hParser = nullptr; }
@@ -700,6 +708,24 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     cerr = cudaMallocHost(reinterpret_cast<void**>(&sess->h_output), sess->outputBytes);
     if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMallocHost failed (", cerr, ")"); return E_FAIL; }
 
+    // Allocate a small shared dummy buffer for all unused output tensors.
+    // TRT10 requires every output tensor to have a non-null device address in
+    // the bindings array — nullptr is only permitted for shape tensors or
+    // IOuputAllocator-backed tensors, which these are not.
+    cerr = cudaMalloc(&sess->d_dummy, 16);   // 16 bytes — enough for any scalar output
+    if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMalloc(dummy) failed (", cerr, ")"); return E_FAIL; }
+
+    // Pre-build the bindings array used by executeV2 every frame.
+    // This avoids rebuilding it per inference call.
+    sess->bindings.assign((size_t)sess->nbBindings, sess->d_dummy);
+    if (sess->inputIdx  >= 0 && sess->inputIdx  < sess->nbBindings)
+        sess->bindings[sess->inputIdx]  = sess->d_input;
+    if (sess->outputIdx >= 0 && sess->outputIdx < sess->nbBindings)
+        sess->bindings[sess->outputIdx] = sess->d_output;
+    LOG_INFO("TRT-RTX: bindings array built  nbBindings=", sess->nbBindings,
+             "  in=", sess->inputIdx, " out=", sess->outputIdx,
+             "  dummy slots=", sess->nbBindings - 2);
+
     m_trtRtx     = std::move(sess);
     m_inputName  = m_trtRtx->inputName;
     m_outputName = m_trtRtx->outputName;
@@ -754,14 +780,9 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         return E_FAIL;
     }
 
-    // Build bindings array: only set input[inputIdx] and output[outputIdx].
-    // All other tensor slots stay nullptr — TRT allows this for outputs we
-    // don't use (sky, depth_conf, pose_enc, etc.).
-    std::vector<void*> bindings((size_t)s.nbBindings, nullptr);
-    if (s.inputIdx  >= 0 && s.inputIdx  < s.nbBindings) bindings[s.inputIdx]  = s.d_input;
-    if (s.outputIdx >= 0 && s.outputIdx < s.nbBindings) bindings[s.outputIdx] = s.d_output;
-
-    if (!s.context->executeV2(bindings.data())) {
+    // Use the pre-built bindings vector (input→d_input, output→d_output,
+    // all other outputs→d_dummy). TRT10 requires every output to be non-null.
+    if (!s.context->executeV2(s.bindings.data())) {
         LOG_ERR("TRT-RTX: executeV2 failed.");
         return E_FAIL;
     }
