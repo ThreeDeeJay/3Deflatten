@@ -708,12 +708,31 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     cerr = cudaMallocHost(reinterpret_cast<void**>(&sess->h_output), sess->outputBytes);
     if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMallocHost failed (", cerr, ")"); return E_FAIL; }
 
-    // Allocate a small shared dummy buffer for all unused output tensors.
-    // TRT10 requires every output tensor to have a non-null device address in
-    // the bindings array — nullptr is only permitted for shape tensors or
-    // IOuputAllocator-backed tensors, which these are not.
-    cerr = cudaMalloc(&sess->d_dummy, 16);   // 16 bytes — enough for any scalar output
-    if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMalloc(dummy) failed (", cerr, ")"); return E_FAIL; }
+    // Allocate dummy buffer for unused output tensors (sky, depth_conf, pose_enc …).
+    // TRT10 requires a non-null device address for every output tensor.
+    // IMPORTANT: each unused output may be full-resolution (e.g. sky: 1×1×280×504),
+    // so the dummy buffer must be large enough to hold the largest unused output —
+    // otherwise TRT writes past the buffer and corrupts adjacent allocations.
+    {
+        size_t dummyBytes = 16;  // minimum; will be grown to fit all unused outputs
+        for (int i = 0; i < sess->nbBindings; ++i) {
+            if (i == sess->inputIdx || i == sess->outputIdx) continue;
+            const char* name = sess->engine->getIOTensorName(i);
+            auto shape = sess->engine->getTensorShape(name);
+            size_t elems = 1;
+            for (int k = 0; k < shape.nbDims; ++k)
+                elems *= (shape.d[k] > 0 ? (size_t)shape.d[k] : (size_t)dmd);
+            size_t needed = elems * sizeof(float);
+            if (needed > dummyBytes) dummyBytes = needed;
+            LOG_INFO("TRT: unused output '", name, "' needs ", needed/1024, " KB dummy");
+        }
+        cerr = cudaMalloc(&sess->d_dummy, dummyBytes);
+        if (cerr != cudaSuccess) {
+            LOG_ERR("TRT-RTX: cudaMalloc(dummy, ", dummyBytes, ") failed (", cerr, ")");
+            return E_FAIL;
+        }
+        LOG_INFO("TRT-RTX: dummy buffer allocated: ", dummyBytes/1024, " KB");
+    }
 
     // Pre-build the bindings array used by executeV2 every frame.
     // This avoids rebuilding it per inference call.
