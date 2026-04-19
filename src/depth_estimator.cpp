@@ -584,52 +584,73 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     LOG_INFO("TRT-RTX: execution context created.");
 
     // ── Query I/O bindings + detect fixed vs dynamic input ────────────────────
-    // After loading (cache or build), query the engine's actual tensor shape
-    // to determine whether this is a dynamic or fixed-shape model.
-    // Fixed:   all dims > 0  (e.g. DA v3: 1×3×280×504) — do NOT call setInputShape
-    //          with wrong dims; allocate exactly what the engine expects.
-    // Dynamic: any dim < 0   (e.g. DA v2 dynamic) — call setInputShape with
-    //          optW/optH; allocate at dmd×dmd MAX profile size.
+    // Selection rules:
+    //   Input : always Input[0] ("img" for DA models).
+    //   Output: prefer the tensor named "depth"; fall back to the first output.
+    //           All other outputs (sky, depth_conf, pose_enc, …) are ignored —
+    //           never bound, never allocated.  Binding nullptr for them is valid
+    //           only when we don't call setTensorAddress for those names.
     bool engineIsDynamic = false;
     {
         int nb = sess->engine->getNbIOTensors();
+        int firstOutputIdx = -1;
+
         for (int i = 0; i < nb; ++i) {
             const char* name = sess->engine->getIOTensorName(i);
             auto mode = sess->engine->getTensorIOMode(name);
-            if (mode == nvinfer1::TensorIOMode::kINPUT) {
+            bool isInput  = (mode == nvinfer1::TensorIOMode::kINPUT);
+            bool isOutput = (mode == nvinfer1::TensorIOMode::kOUTPUT);
+
+            LOG_INFO("TRT: tensor[", i, "] '", name,
+                     "' ", isInput ? "INPUT" : "OUTPUT");
+
+            // ── Input: take only the first one ───────────────────────────────
+            if (isInput && sess->inputIdx < 0) {
                 sess->inputName = name;
                 sess->inputIdx  = i;
-                // Query the engine's profile shape for this tensor
+
                 auto engineShape = sess->engine->getTensorShape(name);
                 bool hasDyn = false;
                 for (int k = 0; k < engineShape.nbDims; ++k)
                     if (engineShape.d[k] < 0) { hasDyn = true; break; }
                 engineIsDynamic = hasDyn;
+
                 if (!hasDyn && engineShape.nbDims == 4) {
-                    // Fixed-shape: use engine dims exactly
                     sess->modelH = (int)engineShape.d[2];
                     sess->modelW = (int)engineShape.d[3];
-                    LOG_INFO("TRT: fixed-shape engine: 1×3×",
+                    LOG_INFO("TRT: fixed-shape engine input: 1×3×",
                              sess->modelH, "×", sess->modelW);
                 } else {
-                    // Dynamic: keep optW/optH computed above
-                    LOG_INFO("TRT: dynamic engine — using OPT dims: 1×3×",
+                    LOG_INFO("TRT: dynamic engine input — OPT: 1×3×",
                              sess->modelH, "×", sess->modelW);
                 }
-            } else if (mode == nvinfer1::TensorIOMode::kOUTPUT) {
-                if (sess->outputIdx < 0) {   // first output only (ignore sky etc.)
+            }
+
+            // ── Output: prefer "depth"; record first output as fallback ──────
+            if (isOutput) {
+                if (firstOutputIdx < 0) firstOutputIdx = i;
+                // Exact match wins; keep the first match only
+                if (sess->outputIdx < 0 && std::strcmp(name, "depth") == 0) {
                     sess->outputName = name;
                     sess->outputIdx  = i;
+                    LOG_INFO("TRT: selected output 'depth' at idx=", i);
                 }
             }
-            LOG_INFO("TRT: tensor[", i, "] '", name,
-                     "' ", mode == nvinfer1::TensorIOMode::kINPUT ? "INPUT" : "OUTPUT");
         }
+
+        // Fall back to first output if "depth" not found by name
+        if (sess->outputIdx < 0 && firstOutputIdx >= 0) {
+            const char* name = sess->engine->getIOTensorName(firstOutputIdx);
+            sess->outputName = name;
+            sess->outputIdx  = firstOutputIdx;
+            LOG_INFO("TRT: 'depth' not found by name — using first output '",
+                     name, "' at idx=", firstOutputIdx);
+        }
+
         sess->nbBindings = nb;
 
-        // setInputShape: for dynamic engines only; for fixed-shape engines TRT10
-        // requires it to match exactly — safest to skip it and let TRT use the
-        // compiled-in shape.
+        // setInputShape: dynamic engines only; fixed-shape engines must not have
+        // it called with mismatched dims — TRT uses the compiled-in shape.
         if (!sess->inputName.empty()) {
             if (engineIsDynamic) {
                 nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
@@ -642,7 +663,7 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
                 LOG_INFO("TRT: context input shape set: 1×3×",
                          sess->modelH, "×", sess->modelW);
             } else {
-                LOG_INFO("TRT: fixed-shape — skipping setInputShape; engine uses: 1×3×",
+                LOG_INFO("TRT: fixed-shape — skipping setInputShape; engine dims: 1×3×",
                          sess->modelH, "×", sess->modelW);
             }
         }
@@ -733,8 +754,9 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         return E_FAIL;
     }
 
-    // Run inference using executeV2 (synchronous, old-style bindings array)
-    // Bindings array: index 0 = input, index 1 = output (as per nbBindings order).
+    // Build bindings array: only set input[inputIdx] and output[outputIdx].
+    // All other tensor slots stay nullptr — TRT allows this for outputs we
+    // don't use (sky, depth_conf, pose_enc, etc.).
     std::vector<void*> bindings((size_t)s.nbBindings, nullptr);
     if (s.inputIdx  >= 0 && s.inputIdx  < s.nbBindings) bindings[s.inputIdx]  = s.d_input;
     if (s.outputIdx >= 0 && s.outputIdx < s.nbBindings) bindings[s.outputIdx] = s.d_output;
