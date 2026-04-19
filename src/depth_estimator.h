@@ -121,6 +121,7 @@ private:
     int64_t m_modelInputW  = 518;
     int64_t m_modelInputH  = 518;
     bool    m_dynamicInput = false;
+    int     m_depthMaxDim  = 0;   // from DeflattenConfig; 0=auto(1022)
 
     // Recurrent-context streaming state (future models)
     bool                m_streaming = false;

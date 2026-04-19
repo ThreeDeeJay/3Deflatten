@@ -140,6 +140,7 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
             m_session.reset();
             m_modelPath     = path;
             m_loaded        = true;
+            m_depthMaxDim   = depthMaxDim;
             m_da3StreamMode = wantDA3Stream;
             m_streamBuf.clear();
             m_streamAnchor.clear();
@@ -196,6 +197,7 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 
         m_modelPath = path;
         m_loaded    = true;
+        m_depthMaxDim      = depthMaxDim;
         m_da3StreamMode    = wantDA3Stream;
         m_streamBuf.clear();
         m_streamAnchor.clear();
@@ -581,10 +583,14 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     if (!sess->context) { LOG_ERR("TRT-RTX: createExecutionContext failed."); return E_FAIL; }
     LOG_INFO("TRT-RTX: execution context created.");
 
-    // ── Query I/O bindings (TRT 10.x / TRT-RTX 1.4+ API) ────────────────────
-    // getNbIOTensors / getIOTensorName / getTensorIOMode — present in both
-    // standard TRT 10.x and TRT-RTX 1.4.  The legacy TRT 8/9 API
-    // (getNbBindings/getBindingName/bindingIsInput) was removed in TRT 10.
+    // ── Query I/O bindings + detect fixed vs dynamic input ────────────────────
+    // After loading (cache or build), query the engine's actual tensor shape
+    // to determine whether this is a dynamic or fixed-shape model.
+    // Fixed:   all dims > 0  (e.g. DA v3: 1×3×280×504) — do NOT call setInputShape
+    //          with wrong dims; allocate exactly what the engine expects.
+    // Dynamic: any dim < 0   (e.g. DA v2 dynamic) — call setInputShape with
+    //          optW/optH; allocate at dmd×dmd MAX profile size.
+    bool engineIsDynamic = false;
     {
         int nb = sess->engine->getNbIOTensors();
         for (int i = 0; i < nb; ++i) {
@@ -593,57 +599,101 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
             if (mode == nvinfer1::TensorIOMode::kINPUT) {
                 sess->inputName = name;
                 sess->inputIdx  = i;
-                // modelW/H already set from optimization profile (dynamic)
-                // or from fixed dims in the build block above.
+                // Query the engine's profile shape for this tensor
+                auto engineShape = sess->engine->getTensorShape(name);
+                bool hasDyn = false;
+                for (int k = 0; k < engineShape.nbDims; ++k)
+                    if (engineShape.d[k] < 0) { hasDyn = true; break; }
+                engineIsDynamic = hasDyn;
+                if (!hasDyn && engineShape.nbDims == 4) {
+                    // Fixed-shape: use engine dims exactly
+                    sess->modelH = (int)engineShape.d[2];
+                    sess->modelW = (int)engineShape.d[3];
+                    LOG_INFO("TRT: fixed-shape engine: 1×3×",
+                             sess->modelH, "×", sess->modelW);
+                } else {
+                    // Dynamic: keep optW/optH computed above
+                    LOG_INFO("TRT: dynamic engine — using OPT dims: 1×3×",
+                             sess->modelH, "×", sess->modelW);
+                }
             } else if (mode == nvinfer1::TensorIOMode::kOUTPUT) {
-                sess->outputName = name;
-                sess->outputIdx  = i;
+                if (sess->outputIdx < 0) {   // first output only (ignore sky etc.)
+                    sess->outputName = name;
+                    sess->outputIdx  = i;
+                }
             }
-            LOG_INFO("TRT: binding[", i, "] '", name,
+            LOG_INFO("TRT: tensor[", i, "] '", name,
                      "' ", mode == nvinfer1::TensorIOMode::kINPUT ? "INPUT" : "OUTPUT");
         }
         sess->nbBindings = nb;
+
+        // setInputShape: for dynamic engines only; for fixed-shape engines TRT10
+        // requires it to match exactly — safest to skip it and let TRT use the
+        // compiled-in shape.
         if (!sess->inputName.empty()) {
-            nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
-            sess->context->setInputShape(sess->inputName.c_str(), d);
-            LOG_INFO("TRT: context input shape: 1×3×", sess->modelH, "×", sess->modelW);
+            if (engineIsDynamic) {
+                nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
+                bool ok = sess->context->setInputShape(sess->inputName.c_str(), d);
+                if (!ok) {
+                    LOG_ERR("TRT: setInputShape(", sess->modelH, "×", sess->modelW,
+                            ") failed — check depthMaxDim vs engine profile.");
+                    return E_FAIL;
+                }
+                LOG_INFO("TRT: context input shape set: 1×3×",
+                         sess->modelH, "×", sess->modelW);
+            } else {
+                LOG_INFO("TRT: fixed-shape — skipping setInputShape; engine uses: 1×3×",
+                         sess->modelH, "×", sess->modelW);
+            }
         }
     }
 
     if (sess->inputIdx < 0 || sess->outputIdx < 0) {
-        LOG_ERR("TRT-RTX: could not identify input/output bindings.");
+        LOG_ERR("TRT-RTX: could not identify input/output bindings. "
+                "nbIOTensors=", sess->nbBindings);
         return E_FAIL;
     }
     LOG_INFO("TRT-RTX: input='", sess->inputName, "' idx=", sess->inputIdx,
              "  output='", sess->outputName, "' idx=", sess->outputIdx);
-    LOG_INFO("TRT-RTX: model dims: ", sess->modelW, "×", sess->modelH);
+    LOG_INFO("TRT-RTX: model ", engineIsDynamic ? "DYNAMIC" : "FIXED",
+             " dims: ", sess->modelW, "×", sess->modelH);
 
-    // ── Allocate device/host memory at MAX profile size ───────────────────────
-    // inputBufSz/outputBufSz cover the full dmd×dmd maximum so any dynamic input
-    // within the profile range fits without reallocation or buffer overflow.
-    sess->inputBytes  = inputBufSz;
-    sess->outputBytes = outputBufSz;
+    // ── Allocate device/host memory ───────────────────────────────────────────
+    // Dynamic: allocate at dmd×dmd MAX so any frame within the profile fits.
+    // Fixed:   allocate exactly at the engine's fixed dims.
+    if (engineIsDynamic) {
+        sess->inputBytes  = inputBufSz;   // dmd×dmd×3ch×4B
+        sess->outputBytes = outputBufSz;  // dmd×dmd×1ch×4B
+        LOG_INFO("TRT-RTX: dynamic — buffer MAX=", dmd, "×", dmd,
+                 " input=", sess->inputBytes/1024, " KB");
+    } else {
+        sess->inputBytes  = sizeof(float) * 3 * sess->modelH * sess->modelW;
+        sess->outputBytes = sizeof(float) * 1 * sess->modelH * sess->modelW;
+        LOG_INFO("TRT-RTX: fixed — buffer=", sess->modelW, "×", sess->modelH,
+                 " input=", sess->inputBytes/1024, " KB");
+    }
     cerr = cudaMalloc(reinterpret_cast<void**>(&sess->d_input),  sess->inputBytes);
     if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMalloc(input) failed (", cerr, ")"); return E_FAIL; }
     cerr = cudaMalloc(reinterpret_cast<void**>(&sess->d_output), sess->outputBytes);
     if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMalloc(output) failed (", cerr, ")"); return E_FAIL; }
     cerr = cudaMallocHost(reinterpret_cast<void**>(&sess->h_output), sess->outputBytes);
     if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMallocHost failed (", cerr, ")"); return E_FAIL; }
-    LOG_INFO("TRT-RTX: device memory allocated  input=", sess->inputBytes/1024,
-             " KB (max=", dmd, "×", dmd, ")  output=", sess->outputBytes/1024, " KB");
 
     m_trtRtx     = std::move(sess);
     m_inputName  = m_trtRtx->inputName;
     m_outputName = m_trtRtx->outputName;
-    // Tell PreprocessFrame to use aspect-correct scaling (same as DML dynamic path)
-    m_dynamicInput = true;
+    // For dynamic engines: PreprocessFrame scales to optW/optH (same as DML path).
+    // For fixed engines:   PreprocessFrame uses the exact engine dims (no scaling).
+    m_dynamicInput = engineIsDynamic;
     m_modelInputW  = m_trtRtx->modelW;
     m_modelInputH  = m_trtRtx->modelH;
     outInfo = (runtime == InferenceRuntime::TensorRTRtx)
         ? L"TensorRT-RTX native (FP16)"
         : L"TensorRT native (FP16)";
     LOG_INFO("Native TRT session ready  runtime=",
-             runtime == InferenceRuntime::TensorRTRtx ? "TRT-RTX" : "TensorRT");
+             runtime == InferenceRuntime::TensorRTRtx ? "TRT-RTX" : "TensorRT",
+             "  dynamic=", engineIsDynamic ? "yes" : "no",
+             "  dims=", m_modelInputW, "×", m_modelInputH);
     return S_OK;
 }
 
@@ -664,10 +714,14 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         return E_FAIL;
     }
 
-    // Update context input shape if dims changed (e.g. first frame after load)
-    if (mw != s.modelW || mh != s.modelH) {
+    // For dynamic engines: update context shape if dims differ frame-to-frame.
+    // For fixed-shape engines: shape is baked in — never call setInputShape.
+    if (m_dynamicInput && (mw != s.modelW || mh != s.modelH)) {
         nvinfer1::Dims4 d{1, 3, mh, mw};
-        s.context->setInputShape(s.inputName.c_str(), d);
+        if (!s.context->setInputShape(s.inputName.c_str(), d)) {
+            LOG_ERR("TRT-RTX: setInputShape(", mh, "×", mw, ") failed per-frame.");
+            return E_FAIL;
+        }
         s.modelW = mw; s.modelH = mh;
     }
 
@@ -1582,13 +1636,10 @@ void DepthEstimator::PreprocessFrame(const BYTE* src,
                                       std::vector<float>& tensor,
                                       int& mw, int& mh) {
     if (m_dynamicInput) {
-        // Fit the longer side to m_modelInputW (or 1022 if still default) keeping
-        // aspect ratio, snapped to multiples of 14 (ViT patch size).
-        // m_modelInputW is set to depthMaxDim-derived OPT dims for TRT sessions,
-        // so both ORT/DML and TRT produce comparable resolution tensors.
-        const int maxDim = (m_modelInputW > 0 && m_modelInputW != 518)
-                         ? (int)std::max(m_modelInputW, m_modelInputH)
-                         : 1022;
+        // Scale the longer side to maxDim keeping aspect ratio,
+        // snapped to multiples of 14 (ViT patch size).
+        // maxDim comes from the user's depthMaxDim setting (0 = auto = 1022).
+        const int maxDim = (m_depthMaxDim > 0) ? m_depthMaxDim : 1022;
         const int base   = 14;
         float scale = std::min((float)maxDim / w, (float)maxDim / h);
         mw = std::max(base, (int)std::round(w * scale / base) * base);
