@@ -155,7 +155,8 @@ private:
     static constexpr int kRingSize = 8;
     struct RingSlot {
         std::vector<BYTE> bgra;
-        int stride = 0;
+        int stride  = 0;
+        int frameNo = -1;   // m_frameCount when this slot was written
     };
     RingSlot m_ring[kRingSize];
     int      m_ringWr = 0;   // next slot to write (Transform thread only)

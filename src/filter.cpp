@@ -670,7 +670,8 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         const size_t bgraBytes = (size_t)m_inH * rgbaStride;
         if (slot.bgra.size() != bgraBytes) slot.bgra.resize(bgraBytes);
         memcpy(slot.bgra.data(), rgbaPtr, bgraBytes);
-        slot.stride = rgbaStride;
+        slot.stride  = rgbaStride;
+        slot.frameNo = m_frameCount;
     }
 
     // ── Post to depth worker ─────────────────────────────────────────────────
@@ -711,12 +712,16 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
             haveDepth    = true;
             m_hadRealDepth = true;
 
-            // Use the source frame the depth was actually computed from.
-            // Guard: if the slot has been recycled (gap > kRingSize frames),
-            // the content is stale — fall back to current frame silently.
+            // Use the source frame the depth was computed from, BUT only if it
+            // is at most 1 frame old.  If inference lagged (skipEvery > 1) and
+            // the matched slot is already several frames in the past, rendering
+            // it would show an old frame out of sequence — visible stutter.
+            // In that case fall back to the current live BGRA (original behaviour:
+            // no stutter, just a slight depth-vs-RGB offset during fast motion).
             int s = m_cachedSlot;
             if (s >= 0 && s < kRingSize && !m_ring[s].bgra.empty()
-                && m_ring[s].stride > 0) {
+                && m_ring[s].stride > 0
+                && (m_frameCount - m_ring[s].frameNo) <= 1) {
                 renderBGRA   = m_ring[s].bgra.data();
                 renderStride = m_ring[s].stride;
             }
