@@ -3,6 +3,7 @@
 #pragma once
 #include <streams.h>
 #include <memory>
+#include <vector>
 #include <thread>
 #include <mutex>
 #include <atomic>
@@ -167,3 +168,4 @@ private:
     int                     m_cachedSlot = -1;  // which ring slot this depth matches
     bool                    m_cacheReady = false;
     double                  m_lastInferMs = 0.0;
+};
