@@ -140,17 +140,30 @@ private:
     std::vector<BYTE>       m_pendBGRA;
     int                     m_pendW     = 0;
     int                     m_pendH     = 0;
+    int                     m_pendSlot  = 0;   // ring-buffer slot index for this post
+
+    // ── RGB ring buffer for depth-matched rendering ───────────────────────────
+    // When a depth result arrives it was computed from the BGRA that was posted
+    // m_skipEvery frames ago.  We keep a small ring of source BGRAs so we can
+    // render the CORRECT source frame paired with its matching depth, rather than
+    // the current live frame (which causes visible depth lag on fast motion).
+    //
+    // Ring size 8 safely covers max skipEvery=4 plus 4 frames of headroom.
+    // Each slot holds one BGRA frame; slots are overwritten in round-robin order.
+    // Audio sync is unaffected: output sample timestamps always come from pIn.
+    static constexpr int kRingSize = 8;
+    struct RingSlot {
+        std::vector<BYTE> bgra;
+        int stride = 0;
+    };
+    RingSlot m_ring[kRingSize];
+    int      m_ringWr = 0;   // next slot to write (Transform thread only)
 
     // Depth result cache (written by worker, read by Transform)
-    // We always render the CURRENT input frame with the LATEST cached depth.
-    // The old "matched-source" approach (m_cachedBGRA) caused PotPlayer to
-    // receive 5-6 identical output frames per inference cycle at slow model
-    // speeds (e.g. 250ms/frame) → looked completely frozen. The tiny temporal
-    // desync (depth is ~1 frame stale during fast motion) is imperceptible.
     std::mutex              m_cacheMtx;
     std::vector<float>      m_cachedDepth;
     int                     m_cachedW    = 0;
     int                     m_cachedH    = 0;
+    int                     m_cachedSlot = -1;  // which ring slot this depth matches
     bool                    m_cacheReady = false;
-    double                  m_lastInferMs = 0.0;  // inference time of most recent result
-};
+    double                  m_lastInferMs = 0.0;
