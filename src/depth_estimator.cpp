@@ -766,7 +766,8 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
 // ── EstimateTrtRtx ────────────────────────────────────────────────────────────
 HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          int srcStride, bool isBGR, bool flipDepth,
-                                         float smoothAlpha, DepthResult& result) {
+                                         float smoothAlpha, int depthDilate,
+                                         float depthEdgeThresh, DepthResult& result) {
     auto& s = *m_trtRtx;
 
     std::vector<float> inputTensor;
@@ -815,7 +816,8 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
 
     // Postprocess: same pipeline as ORT path
     std::vector<float> out(srcW * srcH);
-    PostprocessDepth(s.h_output, mw, mh, srcW, srcH, flipDepth, out);
+    PostprocessDepth(s.h_output, mw, mh, srcW, srcH, flipDepth, out,
+                     depthDilate, depthEdgeThresh);
 
     if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
         TemporalSmooth(out, smoothAlpha);
@@ -1586,6 +1588,8 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
                                   bool  isBGR,
                                   bool  flipDepth,
                                   float smoothAlpha,
+                                  int   depthDilate,
+                                  float depthEdgeThresh,
                                   DepthResult& result) {
     if (!m_loaded) {
         LOG_ERR("Estimate called but model not loaded");
@@ -1594,7 +1598,8 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
 #ifdef ORT_ENABLE_TRTRTX
     if (m_trtRtx)
         return EstimateTrtRtx(srcData, srcWidth, srcHeight, srcStride,
-                              isBGR, flipDepth, smoothAlpha, result);
+                              isBGR, flipDepth, smoothAlpha,
+                              depthDilate, depthEdgeThresh, result);
 #endif
     if (!m_session) {
         LOG_ERR("Estimate: no ORT session and no native TRT session");
@@ -1603,7 +1608,8 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
     // Recurrent-context streaming (future models with context_in/out tensors)
     if (m_streaming)
         return EstimateStreaming(srcData, srcWidth, srcHeight, srcStride,
-                                 isBGR, flipDepth, smoothAlpha, result);
+                                 isBGR, flipDepth, smoothAlpha,
+                                 depthDilate, depthEdgeThresh, result);
 
     try {
         std::vector<float> inputTensor;
@@ -1672,6 +1678,11 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
         // Apply flip after accumulation
         if (flipDepth)
             for (float& v : out) v = 1.f - v;
+
+        // Edge dilation: expand foreground (high-depth) pixels outward to fill
+        // the thin background halo at silhouette edges.
+        if (depthDilate > 0)
+            DilateDepth(out, srcWidth, srcHeight, depthDilate, depthEdgeThresh);
 
         // Temporal smoothing.  Disabled when DA3-Streaming is active because:
         // (a) the affine alignment already provides temporal consistency, and
@@ -1761,7 +1772,9 @@ void DepthEstimator::PostprocessDepth(const float* raw,
                                        int rawW, int rawH,
                                        int dstW, int dstH,
                                        bool flipDepth,
-                                       std::vector<float>& depth) {
+                                       std::vector<float>& depth,
+                                       int depthDilate,
+                                       float depthEdgeThresh) {
     std::vector<float> resized(dstW * dstH);
     BilinearResize(raw, rawW, rawH, resized.data(), dstW, dstH);
 
@@ -1774,6 +1787,9 @@ void DepthEstimator::PostprocessDepth(const float* raw,
         float v = (resized[i] - mn) / range;
         depth[i] = flipDepth ? (1.f - v) : v;
     }
+
+    if (depthDilate > 0)
+        DilateDepth(depth, dstW, dstH, depthDilate, depthEdgeThresh);
 }
 
 // ── BilinearResize ────────────────────────────────────────────────────────────
@@ -1814,7 +1830,67 @@ void DepthEstimator::TemporalSmooth(std::vector<float>& cur, float alpha) {
     m_prevDepth = cur;
 }
 
-// ── DA3-Streaming support ─────────────────────────────────────────────────────
+// ── DilateDepth ───────────────────────────────────────────────────────────────
+// Morphological max-dilation with a separable sliding-window algorithm O(W×H).
+//
+// In [0,1]-normalised depth, depth=1 = near (foreground), depth=0 = far (bg).
+// A max-dilation expands bright (near) regions into dark (far) neighbours,
+// filling the thin background halo at silhouette edges caused by bilinear
+// upsampling and the model's receptive-field blur at object boundaries.
+//
+// edgeThresh: only propagate a foreground value into a neighbour if the
+// absolute depth difference exceeds edgeThresh, i.e. only at real edges.
+// Within smooth flat regions (|diff| < thresh) the original pixel is kept.
+// This prevents foreground from bleeding into distant background across the
+// full image — only hard discontinuities are treated.
+void DepthEstimator::DilateDepth(std::vector<float>& depth, int w, int h,
+                                  int radius, float edgeThresh) {
+    if (radius <= 0 || depth.empty()) return;
+
+    std::vector<float> tmp(w * h);
+
+    // ── Horizontal pass ───────────────────────────────────────────────────────
+    for (int y = 0; y < h; ++y) {
+        const float* src = depth.data() + y * w;
+        float*       dst = tmp.data()   + y * w;
+
+        // Sliding-window max over [x-radius, x+radius]
+        // We use a deque-based O(n) sliding max.
+        // But since radius is small (4-8 px), a simple two-pointer scan is
+        // fast enough and avoids deque overhead.
+        for (int x = 0; x < w; ++x) {
+            float center = src[x];
+            float best   = center;
+            int   x0 = std::max(0,   x - radius);
+            int   x1 = std::min(w-1, x + radius);
+            for (int xi = x0; xi <= x1; ++xi) {
+                float v = src[xi];
+                // Only accept neighbours that are clearly brighter (foreground)
+                // — i.e. on the near side of an edge.
+                if (v > best && (v - center) >= edgeThresh)
+                    best = v;
+            }
+            dst[x] = best;
+        }
+    }
+
+    // ── Vertical pass (on the horizontally-dilated buffer) ────────────────────
+    for (int x = 0; x < w; ++x) {
+        for (int y = 0; y < h; ++y) {
+            float center = tmp[y * w + x];
+            float best   = center;
+            int   y0 = std::max(0,   y - radius);
+            int   y1 = std::min(h-1, y + radius);
+            for (int yi = y0; yi <= y1; ++yi) {
+                float v = tmp[yi * w + x];
+                if (v > best && (v - center) >= edgeThresh)
+                    best = v;
+            }
+            depth[y * w + x] = best;
+        }
+    }
+}
+
 //
 // DA3-Streaming (ByteDance Seed, Depth-Anything-3) is a recurrent model that
 // maintains a context tensor across frames to improve temporal consistency and
@@ -1896,6 +1972,7 @@ HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
                                            int srcW, int srcH, int srcStride,
                                            bool isBGR, bool flipDepth,
                                            float smoothAlpha,
+                                           int depthDilate, float depthEdgeThresh,
                                            DepthResult& result) {
     try {
         std::vector<float> imgTensor;
@@ -1964,7 +2041,8 @@ HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
 
         // Postprocess depth → [0,1], resample to source resolution
         std::vector<float> depth(srcW * srcH);
-        PostprocessDepth(rawDepth, rawW, rawH, srcW, srcH, flipDepth, depth);
+        PostprocessDepth(rawDepth, rawW, rawH, srcW, srcH, flipDepth, depth,
+                         depthDilate, depthEdgeThresh);
 
         // Temporal smoothing is redundant when streaming context is active
         // (the model itself provides temporal consistency), but we still

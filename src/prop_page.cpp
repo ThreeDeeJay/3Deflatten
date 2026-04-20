@@ -12,13 +12,17 @@ static constexpr int CONV_TICKS   = 1000;  // -> [0.000 .. 1.000]
 static constexpr int SEP_TICKS    = 1000;  // -> [0.000 .. 0.200]
 static constexpr int SMOOTH_TICKS = 100;   // -> [0.00  .. 1.00 ]
 static constexpr float SEP_MAX    = 0.20f;
+static constexpr int DILATE_MAX   = 16;    // 0..16 px
+static constexpr int ETHRESH_TICKS = 100;  // -> [0.00 .. 1.00]
 
-static int   ConvToSlider(float f)  { return (int)(f * CONV_TICKS + 0.5f); }
-static float SliderToConv(int v)    { return (float)v / CONV_TICKS; }
-static int   SepToSlider(float f)   { return (int)(f / SEP_MAX * SEP_TICKS + 0.5f); }
-static float SliderToSep(int v)     { return (float)v / SEP_TICKS * SEP_MAX; }
-static int   SmoothToSlider(float f){ return (int)(f * SMOOTH_TICKS + 0.5f); }
-static float SliderToSmooth(int v)  { return (float)v / SMOOTH_TICKS; }
+static int   ConvToSlider(float f)    { return (int)(f * CONV_TICKS + 0.5f); }
+static float SliderToConv(int v)      { return (float)v / CONV_TICKS; }
+static int   SepToSlider(float f)     { return (int)(f / SEP_MAX * SEP_TICKS + 0.5f); }
+static float SliderToSep(int v)       { return (float)v / SEP_TICKS * SEP_MAX; }
+static int   SmoothToSlider(float f)  { return (int)(f * SMOOTH_TICKS + 0.5f); }
+static float SliderToSmooth(int v)    { return (float)v / SMOOTH_TICKS; }
+static int   EThreshToSlider(float f) { return (int)(f * ETHRESH_TICKS + 0.5f); }
+static float SliderToEThresh(int v)   { return (float)v / ETHRESH_TICKS; }
 
 // ── CreateInstance ────────────────────────────────────────────────────────────
 // g_hInst is the DirectShow baseclasses global used by CBasePropertyPage::
@@ -76,9 +80,11 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
 
     case WM_INITDIALOG: {
         // Slider ranges
-        SendDlgItemMessage(hwnd, IDC_CONV_SLIDER,   TBM_SETRANGE, TRUE, MAKELPARAM(0, CONV_TICKS));
-        SendDlgItemMessage(hwnd, IDC_SEP_SLIDER,    TBM_SETRANGE, TRUE, MAKELPARAM(0, SEP_TICKS));
-        SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, SMOOTH_TICKS));
+        SendDlgItemMessage(hwnd, IDC_CONV_SLIDER,       TBM_SETRANGE, TRUE, MAKELPARAM(0, CONV_TICKS));
+        SendDlgItemMessage(hwnd, IDC_SEP_SLIDER,        TBM_SETRANGE, TRUE, MAKELPARAM(0, SEP_TICKS));
+        SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER,     TBM_SETRANGE, TRUE, MAKELPARAM(0, SMOOTH_TICKS));
+        SendDlgItemMessage(hwnd, IDC_DILATE_SLIDER,     TBM_SETRANGE, TRUE, MAKELPARAM(0, DILATE_MAX));
+        SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
 
         // Output Mode
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Side-by-Side (SBS)");
@@ -126,7 +132,8 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
     case WM_HSCROLL: {
         HWND hCtl = (HWND)lParam;
         int  id   = GetDlgCtrlID(hCtl);
-        if (id==IDC_CONV_SLIDER || id==IDC_SEP_SLIDER || id==IDC_SMOOTH_SLIDER) {
+        if (id==IDC_CONV_SLIDER || id==IDC_SEP_SLIDER || id==IDC_SMOOTH_SLIDER ||
+            id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER) {
             ReadControls(hwnd);
             UpdateValueLabels(hwnd);
             PushConfig();   // real-time update while scrubbing
@@ -299,6 +306,11 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
     EnableWindow(GetDlgItem(hwnd, IDC_SMOOTH_SLIDER), !streaming);
     EnableWindow(GetDlgItem(hwnd, IDC_SMOOTH_LABEL),  !streaming);
 
+    SendDlgItemMessage(hwnd, IDC_DILATE_SLIDER,
+        TBM_SETPOS, TRUE, std::min(DILATE_MAX, std::max(0, m_cfg.depthDilate)));
+    SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER,
+        TBM_SETPOS, TRUE, EThreshToSlider(m_cfg.depthEdgeThresh));
+
     UpdateValueLabels(hwnd);
 }
 
@@ -326,6 +338,10 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
     int mdIdx = std::min(2, std::max(0,
         (int)SendDlgItemMessage(hwnd, IDC_MESHDIV_COMBO, CB_GETCURSEL, 0, 0)));
     m_cfg.meshDiv = kMeshDivs[mdIdx];
+    m_cfg.depthDilate = std::min(DILATE_MAX, std::max(0,
+        (int)SendDlgItemMessage(hwnd, IDC_DILATE_SLIDER, TBM_GETPOS, 0, 0)));
+    m_cfg.depthEdgeThresh = SliderToEThresh(
+        (int)SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER, TBM_GETPOS, 0, 0));
 }
 
 void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {
@@ -336,6 +352,10 @@ void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {
     SetDlgItemTextW(hwnd, IDC_SEP_LABEL, buf);
     swprintf_s(buf, L"%.2f", m_cfg.depthSmooth);
     SetDlgItemTextW(hwnd, IDC_SMOOTH_LABEL, buf);
+    swprintf_s(buf, L"%d px", m_cfg.depthDilate);
+    SetDlgItemTextW(hwnd, IDC_DILATE_LABEL, buf);
+    swprintf_s(buf, L"%.2f", m_cfg.depthEdgeThresh);
+    SetDlgItemTextW(hwnd, IDC_EDGETHRESH_LABEL, buf);
 }
 
 void C3DeflattenProp::RefreshStatus(HWND hwnd) {

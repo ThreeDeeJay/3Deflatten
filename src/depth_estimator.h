@@ -43,6 +43,8 @@ public:
                      bool        isBGR,
                      bool        flipDepth,
                      float       smoothAlpha,
+                     int         depthDilate,
+                     float       depthEdgeThresh,
                      DepthResult& result);
 
     bool         IsLoaded()     const { return m_loaded; }
@@ -60,15 +62,22 @@ private:
                          int& modelW, int& modelH);
     void PostprocessDepth(const float* raw, int rawW, int rawH,
                           int dstW, int dstH, bool flipDepth,
-                          std::vector<float>& depth);
+                          std::vector<float>& depth,
+                          int depthDilate = 0, float depthEdgeThresh = 0.20f);
     void BilinearResize(const float* src, int sw, int sh,
                         float* dst,       int dw, int dh);
     void TemporalSmooth(std::vector<float>& current, float alpha);
+    // Morphological max-dilation: expands foreground (depth=1=near) edges
+    // outward by radius pixels, using a separable sliding-window max filter.
+    // edgeThresh: depth jump that counts as a discontinuity [0,1].
+    void DilateDepth(std::vector<float>& depth, int w, int h,
+                     int radius, float edgeThresh);
 
     // ── Recurrent-context streaming (future recurrent ONNX models) ───────────
     HRESULT EstimateStreaming(const BYTE* srcData,
                               int srcW, int srcH, int srcStride,
                               bool isBGR, bool flipDepth, float smoothAlpha,
+                              int depthDilate, float depthEdgeThresh,
                               DepthResult& result);
     bool DetectStreamingModel();
     void InitStreamingContext(int modelW, int modelH);
@@ -141,6 +150,7 @@ private:
                               InferenceRuntime runtime, int depthMaxDim);
     HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH, int srcStride,
                             bool isBGR, bool flipDepth, float smoothAlpha,
+                            int depthDilate, float depthEdgeThresh,
                             DepthResult& result);
 #endif
 

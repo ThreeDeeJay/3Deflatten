@@ -121,6 +121,8 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.inferenceRuntime = (InferenceRuntime)getI(L"inferenceRuntime", 0);
     m_cfg.depthMaxDim      = getI(L"depthMaxDim", 0);
     m_cfg.meshDiv          = getI(L"meshDiv", 2);
+    m_cfg.depthDilate      = getI(L"depthDilate", 4);
+    m_cfg.depthEdgeThresh  = getF(L"depthEdgeThresh", 0.20f);
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
@@ -156,6 +158,8 @@ void C3DeflattenFilter::SaveIni() const {
     setI(L"inferenceRuntime",  (int)m_cfg.inferenceRuntime);
     setI(L"depthMaxDim",       m_cfg.depthMaxDim);
     setI(L"meshDiv",           m_cfg.meshDiv);
+    setI(L"depthDilate",       m_cfg.depthDilate);
+    setF(L"depthEdgeThresh",   m_cfg.depthEdgeThresh);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
 
     LOG_INFO("SaveIni: '", m_iniPath, "'");
@@ -180,8 +184,10 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.showDepth     = FALSE;
     m_cfg.depthViewKey  = 161;  // VK_RSHIFT
     m_cfg.inferenceRuntime = InferenceRuntime::OnnxRuntime;
-    m_cfg.depthMaxDim      = 0;   // 0 = auto (1022 for dynamic models)
-    m_cfg.meshDiv          = 2;   // half source resolution
+    m_cfg.depthMaxDim      = 0;
+    m_cfg.meshDiv          = 2;
+    m_cfg.depthDilate      = 4;
+    m_cfg.depthEdgeThresh  = 0.20f;
     m_hadRealDepth    = false;
     m_skipEvery       = 1;
     m_skipCounter     = 0;
@@ -411,7 +417,9 @@ void C3DeflattenFilter::DepthWorkerThread() {
         HRESULT hr = m_depth->Estimate(bgra.data(), w, h, w*4,
                                         true /*isBGR*/,
                                         cfg.flipDepth == TRUE,
-                                        cfg.depthSmooth, result);
+                                        cfg.depthSmooth,
+                                        cfg.depthDilate,
+                                        cfg.depthEdgeThresh, result);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
 

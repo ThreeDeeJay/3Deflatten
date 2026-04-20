@@ -59,6 +59,8 @@ struct DeflattenConfig {
     InferenceRuntime inferenceRuntime; // OnnxRuntime or TensorRTRtx native
     int         depthMaxDim;   // max depth tensor side (0=auto 1022 for dynamic, ignored for fixed)
     int         meshDiv;       // mesh vertex grid divisor: 1=full 2=half(default) 4=quarter
+    int         depthDilate;   // foreground edge dilation radius in pixels (0=off, default 4)
+    float       depthEdgeThresh; // depth discontinuity threshold for dilation [0,1] (default 0.20)
 };
 
 MIDL_INTERFACE("4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F")
