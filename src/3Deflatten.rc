@@ -7,7 +7,7 @@ BEGIN
     IDS_PROP_TITLE  "3Deflatten"
 END
 
-IDD_PROP_PAGE DIALOGEX 0, 0, 298, 316
+IDD_PROP_PAGE DIALOGEX 0, 0, 298, 330
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
@@ -53,33 +53,36 @@ BEGIN
     COMBOBOX  IDC_MESHDIV_COMBO,                  194, 161,  94,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    // Depth Post-processing (Dilation + Edge Threshold)
-    GROUPBOX  "Depth Post-processing", -1,          4, 174, 290,  42
-    LTEXT     "Edge Dilate (0-16 px):", -1,         10, 186, 100,  10
+    // Depth Post-processing (JBU + Dilation + Edge Threshold)
+    // Height 56 = 14 (JBU row) + 14 (dilate row) + 14 (thresh row) + 14 padding
+    GROUPBOX  "Depth Post-processing", -1,          4, 174, 290,  56
+    AUTOCHECKBOX "Edge-guided upscaling (JBU — uses RGB edges to sharpen depth)",
+              IDC_JBU_CHECK,                        10, 186, 278,  12
+    LTEXT     "Edge Dilate (0-16 px):", -1,         10, 202, 100,  10
     CONTROL   "", IDC_DILATE_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 186, 130,  12
-    LTEXT     "4 px", IDC_DILATE_LABEL,            244, 186,  24,  10, SS_RIGHT
-    LTEXT     "Edge Threshold (0-1):",  -1,         10, 200, 100,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 202, 130,  12
+    LTEXT     "4 px", IDC_DILATE_LABEL,            244, 202,  24,  10, SS_RIGHT
+    LTEXT     "Edge Threshold (0-1):",  -1,         10, 216, 100,  10
     CONTROL   "", IDC_EDGETHRESH_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 200, 130,  12
-    LTEXT     "0.20", IDC_EDGETHRESH_LABEL,        244, 200,  24,  10, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 216, 130,  12
+    LTEXT     "0.20", IDC_EDGETHRESH_LABEL,        244, 216,  24,  10, SS_RIGHT
 
     // ONNX Model + DA3-Streaming checkbox
-    GROUPBOX  "ONNX Model", -1,                     4, 222, 290,  58
-    LTEXT     "File:",     -1,                     10, 236,  20,  10
-    COMBOBOX  IDC_MODEL_COMBO,                     32, 234, 200,  80,
+    GROUPBOX  "ONNX Model", -1,                     4, 236, 290,  58
+    LTEXT     "File:",     -1,                     10, 250,  20,  10
+    COMBOBOX  IDC_MODEL_COMBO,                     32, 248, 200,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON "Reload",   IDC_RELOAD_BTN,        236, 232,  52,  14
+    PUSHBUTTON "Reload",   IDC_RELOAD_BTN,        236, 246,  52,  14
     AUTOCHECKBOX "DA3-Streaming  (temporal alignment, uses da3-small.onnx)",
-              IDC_STREAM_CHECK,                    10, 251, 278,  12
+              IDC_STREAM_CHECK,                    10, 265, 278,  12
     LTEXT     "Switching model or provider takes effect after Reload.", -1,
-                                                   10, 265, 278,  10
+                                                   10, 279, 278,  10
 
     // Apply row
-    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 282, 290, 14
+    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 298, 290, 14
 
     // Status
-    GROUPBOX  "Active Inference Status", -1,        4, 300, 290,  12
-    LTEXT     "", IDC_GPU_INFO,                    10, 304, 278,  6,
+    GROUPBOX  "Active Inference Status", -1,        4, 316, 290,  12
+    LTEXT     "", IDC_GPU_INFO,                    10, 320, 278,   6,
               SS_NOPREFIX | SS_ENDELLIPSIS
 END

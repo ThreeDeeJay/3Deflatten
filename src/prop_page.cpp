@@ -85,7 +85,6 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER,     TBM_SETRANGE, TRUE, MAKELPARAM(0, SMOOTH_TICKS));
         SendDlgItemMessage(hwnd, IDC_DILATE_SLIDER,     TBM_SETRANGE, TRUE, MAKELPARAM(0, DILATE_MAX));
         SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
-
         // Output Mode
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Side-by-Side (SBS)");
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Top-and-Bottom (TAB)");
@@ -165,6 +164,9 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_DEPTH_CHECK && note==BN_CLICKED) {
+            ReadControls(hwnd); PushConfig(); SetDirty(); break;
+        }
+        if (ctl==IDC_JBU_CHECK && note==BN_CLICKED) {
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_GPU_COMBO && note==CBN_SELCHANGE) {
@@ -310,6 +312,8 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
         TBM_SETPOS, TRUE, std::min(DILATE_MAX, std::max(0, m_cfg.depthDilate)));
     SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER,
         TBM_SETPOS, TRUE, EThreshToSlider(m_cfg.depthEdgeThresh));
+    SendDlgItemMessage(hwnd, IDC_JBU_CHECK, BM_SETCHECK,
+                       m_cfg.depthJBU ? BST_CHECKED : BST_UNCHECKED, 0);
 
     UpdateValueLabels(hwnd);
 }
@@ -338,6 +342,8 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
     int mdIdx = std::min(2, std::max(0,
         (int)SendDlgItemMessage(hwnd, IDC_MESHDIV_COMBO, CB_GETCURSEL, 0, 0)));
     m_cfg.meshDiv = kMeshDivs[mdIdx];
+    m_cfg.depthJBU = (SendDlgItemMessage(hwnd, IDC_JBU_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                     ? TRUE : FALSE;
     m_cfg.depthDilate = std::min(DILATE_MAX, std::max(0,
         (int)SendDlgItemMessage(hwnd, IDC_DILATE_SLIDER, TBM_GETPOS, 0, 0)));
     m_cfg.depthEdgeThresh = SliderToEThresh(

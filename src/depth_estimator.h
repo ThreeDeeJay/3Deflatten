@@ -45,6 +45,7 @@ public:
                      float       smoothAlpha,
                      int         depthDilate,
                      float       depthEdgeThresh,
+                     bool        depthJBU,
                      DepthResult& result);
 
     bool         IsLoaded()     const { return m_loaded; }
@@ -63,7 +64,16 @@ private:
     void PostprocessDepth(const float* raw, int rawW, int rawH,
                           int dstW, int dstH, bool flipDepth,
                           std::vector<float>& depth,
+                          const BYTE* guide = nullptr, int guideStride = 0,
+                          bool depthJBU = false,
                           int depthDilate = 0, float depthEdgeThresh = 0.20f);
+    // Joint bilateral upsampling: upscale low-res depth using full-res RGB guide.
+    // For each output pixel, compute a weighted sum of nearby low-res depth
+    // samples where weight = spatial_gaussian × colour_gaussian(guide).
+    // Produces crisp depth edges aligned to colour edges (no halo/bleed).
+    void JBUResize(const float* src, int sw, int sh,
+                   const BYTE* guide, int gw, int gh, int guideStride,
+                   float* dst, int dw, int dh);
     void BilinearResize(const float* src, int sw, int sh,
                         float* dst,       int dw, int dh);
     void TemporalSmooth(std::vector<float>& current, float alpha);
@@ -77,7 +87,7 @@ private:
     HRESULT EstimateStreaming(const BYTE* srcData,
                               int srcW, int srcH, int srcStride,
                               bool isBGR, bool flipDepth, float smoothAlpha,
-                              int depthDilate, float depthEdgeThresh,
+                              int depthDilate, float depthEdgeThresh, bool depthJBU,
                               DepthResult& result);
     bool DetectStreamingModel();
     void InitStreamingContext(int modelW, int modelH);
@@ -150,7 +160,7 @@ private:
                               InferenceRuntime runtime, int depthMaxDim);
     HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH, int srcStride,
                             bool isBGR, bool flipDepth, float smoothAlpha,
-                            int depthDilate, float depthEdgeThresh,
+                            int depthDilate, float depthEdgeThresh, bool depthJBU,
                             DepthResult& result);
 #endif
 

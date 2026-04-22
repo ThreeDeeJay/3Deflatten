@@ -30,6 +30,8 @@
 #define IDC_DILATE_LABEL   1022   // "4 px" label
 #define IDC_EDGETHRESH_SLIDER 1023 // Edge contrast threshold
 #define IDC_EDGETHRESH_LABEL  1024 // "0.20" label
+#define IDC_JBU_CHECK      1025   // Joint Bilateral Upsampling guided by RGB
+#define IDC_JBU_CHECK      1025   // Joint bilateral upscaling checkbox
 
 // ── Trackbar style constants (commctrl.h equivalents for rc.exe) ──────────────
 // rc.exe does not automatically include commctrl.h, so we define what we need.

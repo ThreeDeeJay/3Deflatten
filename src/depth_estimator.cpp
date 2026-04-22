@@ -767,7 +767,8 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
 HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          int srcStride, bool isBGR, bool flipDepth,
                                          float smoothAlpha, int depthDilate,
-                                         float depthEdgeThresh, DepthResult& result) {
+                                         float depthEdgeThresh, bool depthJBU,
+                                         DepthResult& result) {
     auto& s = *m_trtRtx;
 
     std::vector<float> inputTensor;
@@ -814,9 +815,10 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         return E_FAIL;
     }
 
-    // Postprocess: same pipeline as ORT path
+    // Postprocess: same pipeline as ORT path; pass srcData as JBU guide
     std::vector<float> out(srcW * srcH);
     PostprocessDepth(s.h_output, mw, mh, srcW, srcH, flipDepth, out,
+                     depthJBU ? srcData : nullptr, srcStride, depthJBU,
                      depthDilate, depthEdgeThresh);
 
     if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
@@ -1590,6 +1592,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
                                   float smoothAlpha,
                                   int   depthDilate,
                                   float depthEdgeThresh,
+                                  bool  depthJBU,
                                   DepthResult& result) {
     if (!m_loaded) {
         LOG_ERR("Estimate called but model not loaded");
@@ -1599,17 +1602,16 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
     if (m_trtRtx)
         return EstimateTrtRtx(srcData, srcWidth, srcHeight, srcStride,
                               isBGR, flipDepth, smoothAlpha,
-                              depthDilate, depthEdgeThresh, result);
+                              depthDilate, depthEdgeThresh, depthJBU, result);
 #endif
     if (!m_session) {
         LOG_ERR("Estimate: no ORT session and no native TRT session");
         return E_FAIL;
     }
-    // Recurrent-context streaming (future models with context_in/out tensors)
     if (m_streaming)
         return EstimateStreaming(srcData, srcWidth, srcHeight, srcStride,
                                  isBGR, flipDepth, smoothAlpha,
-                                 depthDilate, depthEdgeThresh, result);
+                                 depthDilate, depthEdgeThresh, depthJBU, result);
 
     try {
         std::vector<float> inputTensor;
@@ -1670,10 +1672,17 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
             DA3StreamAccumulate(depth);
         }
 
-        // Resize to source resolution
+        // Resize to source resolution — use JBU when enabled (guide=srcData)
         std::vector<float> out(srcWidth * srcHeight);
-        BilinearResize(depth.data(), accumW, accumH,
-                       out.data(), srcWidth, srcHeight);
+        if (depthJBU) {
+            // Guide is the full-res BGRA source frame (srcData, srcWidth × srcHeight)
+            JBUResize(depth.data(), accumW, accumH,
+                      srcData, srcWidth, srcHeight, srcStride,
+                      out.data(), srcWidth, srcHeight);
+        } else {
+            BilinearResize(depth.data(), accumW, accumH,
+                           out.data(), srcWidth, srcHeight);
+        }
 
         // Apply flip after accumulation
         if (flipDepth)
@@ -1773,26 +1782,114 @@ void DepthEstimator::PostprocessDepth(const float* raw,
                                        int dstW, int dstH,
                                        bool flipDepth,
                                        std::vector<float>& depth,
+                                       const BYTE* guide,
+                                       int guideStride,
+                                       bool depthJBU,
                                        int depthDilate,
                                        float depthEdgeThresh) {
-    std::vector<float> resized(dstW * dstH);
-    BilinearResize(raw, rawW, rawH, resized.data(), dstW, dstH);
-
-    float mn = resized[0], mx = resized[0];
-    for (float v : resized) { mn = std::min(mn,v); mx = std::max(mx,v); }
-    float range = (mx - mn) > 1e-6f ? (mx - mn) : 1e-6f;
+    // Min-max normalise at raw (model) resolution before upscaling
+    // so the normalisation isn't affected by the upscaling algorithm.
+    std::vector<float> normalised(rawW * rawH);
+    {
+        float mn = raw[0], mx = raw[0];
+        for (int i = 0; i < rawW * rawH; ++i) { mn = std::min(mn,raw[i]); mx = std::max(mx,raw[i]); }
+        float range = (mx - mn) > 1e-6f ? (mx - mn) : 1e-6f;
+        for (int i = 0; i < rawW * rawH; ++i)
+            normalised[i] = (raw[i] - mn) / range;
+    }
 
     depth.resize(dstW * dstH);
-    for (int i = 0; i < (int)depth.size(); ++i) {
-        float v = (resized[i] - mn) / range;
-        depth[i] = flipDepth ? (1.f - v) : v;
+    if (depthJBU && guide && guideStride > 0) {
+        JBUResize(normalised.data(), rawW, rawH,
+                  guide, dstW, dstH, guideStride,
+                  depth.data(), dstW, dstH);
+    } else {
+        BilinearResize(normalised.data(), rawW, rawH, depth.data(), dstW, dstH);
     }
+
+    if (flipDepth)
+        for (float& v : depth) v = 1.f - v;
 
     if (depthDilate > 0)
         DilateDepth(depth, dstW, dstH, depthDilate, depthEdgeThresh);
 }
 
-// ── BilinearResize ────────────────────────────────────────────────────────────
+// ── JBUResize ─────────────────────────────────────────────────────────────────
+// Joint Bilateral Upsampling (Kopf et al. 2007).
+// Upscales a low-res depth map (sw×sh) to full-res (dw×dh) using a full-res
+// RGB guide image to preserve colour-aligned edges.
+//
+// For each output pixel p:
+//   depth[p] = Σ_q  w_s(p,q) · w_c(p,q) · src[q]  /  Σ weights
+//   w_s = spatial Gaussian  exp(-dist²  / 2σ_s²)
+//   w_c = colour  Gaussian  exp(-Δcol² / 2σ_c²)
+//
+// σ_s ≈ 1.0 low-res pixels (kernel radius 2 → covers ±2 low-res samples)
+// σ_c ≈ 0.1 (colour range [0,1]; edges ≥ 0.2 luma contrast get sharp cutoff)
+//
+// Performance: O(W·H·kernel²) — at 1920×1080 with kernel=5×5 ≈ 50M mpy/frame.
+// Acceptable for background thread; ~8 ms on a modern CPU core.
+void DepthEstimator::JBUResize(const float* src, int sw, int sh,
+                                const BYTE* guide, int gw, int gh, int guideStride,
+                                float* dst, int dw, int dh) {
+    // Lookup tables for spatial and colour Gaussians
+    // Spatial: σ_s = 1.0 low-res px; kernel radius = 2 → 5×5 samples
+    const int   kR   = 2;
+    const float sig_s = 1.0f;
+    const float sig_c = 0.1f;
+    const float inv2ss = 0.5f / (sig_s * sig_s);
+    const float inv2sc = 0.5f / (sig_c * sig_c);
+
+    // Pre-compute spatial weights for the (2kR+1)×(2kR+1) kernel
+    const int kSz = 2 * kR + 1;
+    float spat[kSz * kSz];
+    for (int ky = -kR; ky <= kR; ++ky)
+        for (int kx = -kR; kx <= kR; ++kx)
+            spat[(ky+kR)*kSz+(kx+kR)] = std::exp(-((float)(kx*kx+ky*ky))*inv2ss);
+
+    // Scale factors: output pixel (dx,dy) → low-res position (fx,fy)
+    float scaleX = (float)sw / dw;
+    float scaleY = (float)sh / dh;
+
+    for (int dy = 0; dy < dh; ++dy) {
+        float fy = (dy + 0.5f) * scaleY - 0.5f;
+        int   cy = (int)std::round(fy);   // nearest low-res row
+
+        for (int dx = 0; dx < dw; ++dx) {
+            float fx = (dx + 0.5f) * scaleX - 0.5f;
+            int   cx = (int)std::round(fx);   // nearest low-res col
+
+            // Guide luma at full-res pixel (dx,dy) — used as reference colour
+            const BYTE* gp = guide + dy * guideStride + dx * 4;
+            // BT.601 luma in [0,1]
+            float gRef = (gp[0] * 0.114f + gp[1] * 0.587f + gp[2] * 0.299f) / 255.f;
+
+            float sum = 0.f, wsum = 0.f;
+            for (int ky = -kR; ky <= kR; ++ky) {
+                int sy = std::max(0, std::min(cy + ky, sh - 1));
+                for (int kx = -kR; kx <= kR; ++kx) {
+                    int sx = std::max(0, std::min(cx + kx, sw - 1));
+
+                    // Guide luma at the low-res sample's corresponding full-res position
+                    int gpx = std::min((int)((sx + 0.5f) / scaleX), gw - 1);
+                    int gpy = std::min((int)((sy + 0.5f) / scaleY), gh - 1);
+                    const BYTE* sp = guide + gpy * guideStride + gpx * 4;
+                    float gSmp = (sp[0] * 0.114f + sp[1] * 0.587f + sp[2] * 0.299f) / 255.f;
+
+                    float dc = gRef - gSmp;
+                    float wc = std::exp(-(dc*dc)*inv2sc);
+                    float ws = spat[(ky+kR)*kSz+(kx+kR)];
+                    float w  = ws * wc;
+                    sum  += w * src[sy * sw + sx];
+                    wsum += w;
+                }
+            }
+            dst[dy * dw + dx] = (wsum > 1e-6f) ? sum / wsum : src[cy * sw + cx];
+        }
+    }
+}
+
+// ── BilinearResize ─────────────────────────────────────────────────────────────
 void DepthEstimator::BilinearResize(const float* src, int sw, int sh,
                                      float* dst,       int dw, int dh) {
     for (int dy = 0; dy < dh; ++dy) {
@@ -1815,7 +1912,103 @@ void DepthEstimator::BilinearResize(const float* src, int sw, int sh,
     }
 }
 
-// ── TemporalSmooth ────────────────────────────────────────────────────────────
+// ── JBUResize — Joint Bilateral Upsampling ────────────────────────────────────
+// Upscales a low-res depth map (sw×sh) to full-res (dw×dh) using the full-res
+// RGB guide image to preserve colour edges.
+//
+// For each output pixel p at (x,y):
+//   1. Map (x,y) back to low-res coordinates (u,v).
+//   2. Accumulate contributions from all low-res pixels q within ±kRadius:
+//        weight(p,q) = spatial_gauss(dist(p,q)) × colour_gauss(|Ip − Iq|)
+//      where Ip is the guide luma at (x,y) and Iq is the guide luma at q's
+//      full-res position.
+//   3. Divide: depth(p) = Σ(weight·depth_q) / Σ(weight)
+//
+// Spatial sigma  ≈ half the upscale ratio (keeps blending tight at pixel level)
+// Colour sigma   = 0.10 in [0,1] luma space (edges with ΔL > ~0.10 are sharp)
+// Radius (low-res) = ceil(2 × spatialSigma)  — covers 2σ neighbourhood
+//
+// Complexity: O(dw·dh · (2r+1)² )  where r ≈ 2–4 at typical ratios.
+// For 1920×1080 up from 518×290 (ratio ≈ 3.7×), r=8 at low-res → ~17² ≈ 289
+// operations per output pixel → ~600 MP/s on modern x64 — fast enough for
+// the async depth worker thread.
+void DepthEstimator::JBUResize(const float* src, int sw, int sh,
+                                const BYTE* guide, int gw, int gh, int guideStride,
+                                float* dst, int dw, int dh) {
+    // Pre-compute scale factors
+    const float scaleX = (float)sw / dw;
+    const float scaleY = (float)sh / dh;
+
+    // Spatial sigma in low-res pixels ≈ 1 (we search a small neighbourhood)
+    // Colour sigma in [0,1] normalised luma
+    const float spatialSigma = 1.0f;
+    const float colourSigma  = 0.10f;
+    const float inv2sSq  = 1.0f / (2.0f * spatialSigma * spatialSigma);
+    const float inv2cSq  = 1.0f / (2.0f * colourSigma  * colourSigma);
+    const int   radius   = (int)std::ceil(2.0f * spatialSigma);  // low-res radius
+
+    // Pre-compute guide luma at low-res sample centres (centre of each low-res cell)
+    // using bilinear sampling of the full-res guide, to match the depth sample positions.
+    std::vector<float> guideLR(sw * sh);
+    for (int sy = 0; sy < sh; ++sy) {
+        // low-res centre in full-res coords
+        float fy = (sy + 0.5f) * (float)gh / sh - 0.5f;
+        int gy0 = std::max(0, std::min((int)fy, gh-1));
+        float ty = fy - gy0;
+        int gy1 = std::min(gy0+1, gh-1);
+        for (int sx2 = 0; sx2 < sw; ++sx2) {
+            float fx = (sx2 + 0.5f) * (float)gw / sw - 0.5f;
+            int gx0 = std::max(0, std::min((int)fx, gw-1));
+            float tx = fx - gx0;
+            int gx1 = std::min(gx0+1, gw-1);
+            // BT.601 luma from BGRA: Y = (29B + 150G + 77R) >> 8  → [0,255]
+            auto luma = [&](int gx, int gy) -> float {
+                const BYTE* p = guide + gy * guideStride + gx * 4;
+                return (29*p[0] + 150*p[1] + 77*p[2]) * (1.0f/255.0f/256.0f);
+            };
+            guideLR[sy*sw + sx2] =
+                luma(gx0,gy0)*(1-tx)*(1-ty) + luma(gx1,gy0)*tx*(1-ty) +
+                luma(gx0,gy1)*(1-tx)*ty      + luma(gx1,gy1)*tx*ty;
+        }
+    }
+
+    for (int dy = 0; dy < dh; ++dy) {
+        // Guide luma row pointer
+        const BYTE* gRow = guide + dy * guideStride;
+
+        for (int dx = 0; dx < dw; ++dx) {
+            // Guide luma at this output pixel [0,1]
+            const BYTE* gp = gRow + dx * 4;
+            float guideP = (29*gp[0] + 150*gp[1] + 77*gp[2]) * (1.0f/255.0f/256.0f);
+
+            // Corresponding low-res position (continuous)
+            float lu = (dx + 0.5f) * scaleX - 0.5f;
+            float lv = (dy + 0.5f) * scaleY - 0.5f;
+            int lu0 = (int)std::floor(lu);
+            int lv0 = (int)std::floor(lv);
+
+            float wSum = 0.0f, dSum = 0.0f;
+            for (int ky = lv0 - radius; ky <= lv0 + radius + 1; ++ky) {
+                int ky2 = std::max(0, std::min(ky, sh-1));
+                float dy2 = lv - ky;
+                for (int kx = lu0 - radius; kx <= lu0 + radius + 1; ++kx) {
+                    int kx2 = std::max(0, std::min(kx, sw-1));
+                    float dx2 = lu - kx;
+
+                    float ws = std::exp(-(dx2*dx2 + dy2*dy2) * inv2sSq);
+                    float dc = guideP - guideLR[ky2*sw + kx2];
+                    float wc = std::exp(-dc*dc * inv2cSq);
+                    float w  = ws * wc;
+
+                    wSum += w;
+                    dSum += w * src[ky2*sw + kx2];
+                }
+            }
+            dst[dy*dw + dx] = (wSum > 1e-8f) ? (dSum / wSum) : src[lv0*sw + lu0];
+        }
+    }
+}
+
 // alpha = 0.0 → pass current frame through unchanged (no smoothing)
 // alpha = 0.9 → heavily weighted towards previous frame (strong smoothing)
 // The old code had the alpha convention inverted (0.4 meant 60% old, 40% new).
@@ -1973,6 +2166,7 @@ HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
                                            bool isBGR, bool flipDepth,
                                            float smoothAlpha,
                                            int depthDilate, float depthEdgeThresh,
+                                           bool depthJBU,
                                            DepthResult& result) {
     try {
         std::vector<float> imgTensor;
@@ -2042,6 +2236,7 @@ HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
         // Postprocess depth → [0,1], resample to source resolution
         std::vector<float> depth(srcW * srcH);
         PostprocessDepth(rawDepth, rawW, rawH, srcW, srcH, flipDepth, depth,
+                         depthJBU ? srcData : nullptr, srcStride, depthJBU,
                          depthDilate, depthEdgeThresh);
 
         // Temporal smoothing is redundant when streaming context is active

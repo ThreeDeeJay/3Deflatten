@@ -61,6 +61,7 @@ struct DeflattenConfig {
     int         meshDiv;       // mesh vertex grid divisor: 1=full 2=half(default) 4=quarter
     int         depthDilate;   // foreground edge dilation radius in pixels (0=off, default 4)
     float       depthEdgeThresh; // depth discontinuity threshold for dilation [0,1] (default 0.20)
+    BOOL        depthJBU;      // joint bilateral upscaling using RGB guide (default FALSE)
 };
 
 MIDL_INTERFACE("4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F")
