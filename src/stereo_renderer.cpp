@@ -181,24 +181,14 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
 }
 )HLSL";
 
-// ── Mesh vertex shader ────────────────────────────────────────────────────────
-// Implements triangle-mesh reprojection from a depth map (Shih et al. CVPR 2020 §3).
-//
-// Algorithm:
-//   1. Read depth at this vertex (motion-compensated).
-//   2. Compute the horizontal disparity shift the same way the UV-warp does.
-//   3. Map the shifted UV to NDC in the SBS/TAB output buffer.
-//   4. Cull triangles that span depth discontinuities using SV_CullDistance:
-//      any primitive where at least one vertex has cull < 0 is fully discarded.
-//      This prevents the "rubber-sheet stretching" at silhouette edges that naive
-//      depth warping produces (Figure 1b of Shih et al.).
-//   5. Use (1−depth) as NDC Z so the depth buffer correctly occludes background
-//      (low depth = far = large NDC Z) with foreground (high depth = near = small NDC Z).
-//
-// The UV-warp pass (pass 1) already rendered the full output including infill.
-// The mesh pass (pass 2) runs on top with z-buffering, overwriting where geometry
-// lands and leaving the UV-warp inpaint visible in disoccluded holes.
-// Those holes are the groundwork injection point for a future learned inpainter.
+// ── Mesh vertex shader — simple depth-based disparity warp ────────────────────
+// Each vertex carries its source UV (u,v) which never changes.
+// The VS reads depth at that UV, computes a horizontal disparity shift, and
+// places the vertex at the shifted screen position for the current eye.
+// The PS samples srcTex at the original UV → RGB always exactly matches the mesh.
+// No SV_CullDistance: silhouette edges stretch naturally rather than cutting,
+// so foreground pixels stay attached to their own polygon at all separations.
+// Z-buffering handles self-occlusion where shifted foreground overlaps background.
 static const char* kMeshVSSrc = R"HLSL(
 cbuffer CBStereo : register(b0) {
     float  g_convergence;
@@ -218,61 +208,52 @@ Texture2D<float> g_depthTex : register(t1);
 SamplerState     g_sampler  : register(s0);
 
 struct MeshOut {
-    float4 pos  : SV_Position;
-    float2 uv   : TEXCOORD0;
-    float  cull : SV_CullDistance0;
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
 };
 
 MeshOut MeshVS(float2 uv : TEXCOORD) {
     MeshOut o;
+
+    // Read depth with motion compensation
     float2 depUV = saturate(uv - float2(g_depthOffsetU, g_depthOffsetV));
     float  depth = g_depthTex.SampleLevel(g_sampler, depUV, 0).r;
 
-    // Discontinuity detection: sample all 4 cardinal neighbours.
-    // cull < 0 → entire primitive containing this vertex is discarded.
-    float dR = g_depthTex.SampleLevel(g_sampler, saturate(depUV + float2( g_texelW,      0)), 0).r;
-    float dL = g_depthTex.SampleLevel(g_sampler, saturate(depUV + float2(-g_texelW,      0)), 0).r;
-    float dD = g_depthTex.SampleLevel(g_sampler, saturate(depUV + float2(0,  g_texelH)), 0).r;
-    float dU = g_depthTex.SampleLevel(g_sampler, saturate(depUV + float2(0, -g_texelH)), 0).r;
-    float maxDiff = max(max(abs(depth-dR), abs(depth-dL)), max(abs(depth-dD), abs(depth-dU)));
-    o.cull = g_discThresh - maxDiff;   // positive → keep; negative → cull
-
-    // Same disparity formula as the UV-warp pass for visual consistency.
+    // Horizontal disparity: positive = near (shift outward from screen centre)
     float disparity = g_separation * (depth - g_convergence);
-    // Source pixel at uv.x appears at eyeUV.x in the eye view:
-    //   eyeUV.x = uv.x - eyeSign * disparity
-    // (left eye: foreground shifts right in eye space = smaller eyeUV.x for +eyeSign)
-    float eyeX = uv.x - g_eyeSign * disparity;
-    float eyeY = uv.y;
 
-    // Map eye UV → NDC for the SBS or TAB output image.
+    // Shifted screen X for this eye.
+    // eyeSign +1 = left eye: foreground shifts right (+) relative to background
+    // eyeSign -1 = right eye: foreground shifts left  (-)
+    float eyeX = uv.x + g_eyeSign * disparity;
+
+    // Map (eyeX, uv.y) → NDC in the correct half of the SBS / TAB output.
     float ndcX, ndcY;
     if (g_outputMode == 0) {
-        // SBS: left-eye  pixels occupy NDC x ∈ [−1, 0] (eyeSign > 0)
-        //      right-eye pixels occupy NDC x ∈ [ 0, 1] (eyeSign < 0)
-        ndcX = eyeX + (g_eyeSign > 0.0 ? -1.0 : 0.0);
-        ndcY = 1.0 - 2.0 * eyeY;
+        // SBS: left eye  → NDC x ∈ [-1, 0]  (eyeSign +1)
+        //      right eye → NDC x ∈ [ 0,+1]  (eyeSign -1)
+        float halfOfs = (g_eyeSign > 0.0) ? -1.0 : 0.0;
+        ndcX = eyeX * 1.0 + halfOfs;   // eyeX is already in [0,1] → map to half
+        ndcY = 1.0 - 2.0 * uv.y;
     } else {
-        // TAB: top-eye    pixels occupy NDC y ∈ [ 1, 0] (eyeSign > 0)
-        //      bottom-eye pixels occupy NDC y ∈ [ 0,−1] (eyeSign < 0)
+        // TAB: top eye    → NDC y ∈ [ 1, 0]  (eyeSign +1)
+        //      bottom eye → NDC y ∈ [ 0,-1]  (eyeSign -1)
+        float halfOfs = (g_eyeSign > 0.0) ? 0.0 : -1.0;
         ndcX = 2.0 * eyeX - 1.0;
-        ndcY = (g_eyeSign > 0.0 ? 1.0 : 0.0) - eyeY;
+        ndcY = (1.0 - uv.y) + halfOfs;
     }
 
-    // NDC Z: invert so that high-depth (foreground) wins D3D11 LESS z-test.
-    // depth = 1 (near) → NDC Z = 0 (smallest, wins)
-    // depth = 0 (far)  → NDC Z = 1 (largest, loses)
+    // NDC Z: 1-depth so near (depth=1) → z=0 wins LESS z-test over far (depth=0) → z=1
     o.pos = float4(ndcX, ndcY, 1.0 - depth, 1.0);
-    o.uv  = uv;
+    o.uv  = uv;   // UNCHANGED — PS always samples the original source pixel
     return o;
 }
 )HLSL";
 
-// Mesh PS: simple texture lookup at the original source UV.
-// Because the vertex already placed the geometry at the correct reprojected
-// position, the pixel shader only needs to fetch the source colour.
-// TODO (future pass): detect o.pos has no geometry hit (using a coverage alpha
-// texture written here) and apply learned inpainting to those holes.
+// Mesh PS: sample source colour at the original vertex UV.
+// Since the VS placed the geometry at the correct shifted screen position
+// and uv was not modified, the RGB texture is always perfectly aligned with
+// the mesh geometry regardless of separation or depth value.
 static const char* kMeshPSSrc = R"HLSL(
 Texture2D<float4> g_srcTex  : register(t0);
 SamplerState      g_sampler : register(s0);
@@ -741,91 +722,57 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     D3D11_VIEWPORT vp{0,0,(float)dstW,(float)dstH,0,1};
     m_ctx->RSSetViewports(1,&vp);
 
-    // ── Pass 1: Mesh-based reprojection ──────────────────────────────────────
-    // Render the depth mesh first with LESS depth test + depth write.
-    // Each correctly-placed vertex writes its NDC-Z = (1−depth) so the depth
-    // buffer records which pixels geometry covered.
-    // Disoccluded holes and culled-edge pixels are left at depth=1.0 (cleared).
-    if (m_meshVS && m_meshIL && m_meshVB && m_meshIB && m_dsv && m_dsState) {
-        m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
-        m_ctx->OMSetDepthStencilState(m_dsState.Get(), 0);
-        m_ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), m_dsv.Get());
-        m_ctx->RSSetState(m_meshRaster.Get());
-        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        m_ctx->IASetInputLayout(m_meshIL.Get());
-        UINT mstride = sizeof(float) * 2, moff = 0;
-        m_ctx->IASetVertexBuffers(0, 1, m_meshVB.GetAddressOf(), &mstride, &moff);
-        m_ctx->IASetIndexBuffer(m_meshIB.Get(), DXGI_FORMAT_R32_UINT, 0);
-        m_ctx->VSSetShader(m_meshVS.Get(), nullptr, 0);
-        m_ctx->PSSetShader(m_meshPS.Get(), nullptr, 0);
-        m_ctx->VSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
-        m_ctx->PSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
-        m_ctx->VSSetShaderResources(1, 1, m_depthSRV.GetAddressOf());
-        m_ctx->VSSetSamplers(0, 1, m_sampler.GetAddressOf());
-        m_ctx->PSSetShaderResources(0, 1, m_srcSRV.GetAddressOf());
-        m_ctx->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
+    // ── Clear output to black and depth to 1.0 ───────────────────────────────
+    // Uncovered pixels (disocclusions, frame borders) remain black.
+    // Infill is not implemented in this pass — the mesh stretches at edges
+    // rather than culling, so disocclusion regions are naturally minimised.
+    const float black[4] = {0,0,0,1};
+    m_ctx->ClearRenderTargetView(m_rtv.Get(), black);
+    if (m_dsv) m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 
-        int nIdx = (m_meshW - 1) * (m_meshH - 1) * 6;
+    // ── Mesh pass (single pass, two DrawIndexed calls for left+right eye) ────
+    // The mesh covers the full frame. Each vertex carries its source UV unchanged
+    // so the PS always samples exactly the right RGB pixel regardless of disparity.
+    if (!m_meshVS || !m_meshIL || !m_meshVB || !m_meshIB) {
+        LOG_WARN("Mesh resources missing — no output this frame.");
+        return;
+    }
 
-        // Left / top eye
-        D3D11_MAPPED_SUBRESOURCE mcb{};
-        if (SUCCEEDED(m_ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mcb))) {
-            auto* c = static_cast<CBStereo*>(mcb.pData);
-            *c = cbBase; c->eyeSign = 1.f;
+    m_ctx->OMSetDepthStencilState(m_dsState.Get(), 0);
+    m_ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), m_dsv.Get());
+    m_ctx->RSSetState(m_meshRaster.Get());
+    m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_ctx->IASetInputLayout(m_meshIL.Get());
+    UINT mstride = sizeof(float) * 2, moff = 0;
+    m_ctx->IASetVertexBuffers(0, 1, m_meshVB.GetAddressOf(), &mstride, &moff);
+    m_ctx->IASetIndexBuffer(m_meshIB.Get(), DXGI_FORMAT_R32_UINT, 0);
+    m_ctx->VSSetShader(m_meshVS.Get(), nullptr, 0);
+    m_ctx->PSSetShader(m_meshPS.Get(), nullptr, 0);
+    m_ctx->VSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
+    m_ctx->PSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
+    m_ctx->VSSetShaderResources(1, 1, m_depthSRV.GetAddressOf());
+    m_ctx->VSSetSamplers(0, 1, m_sampler.GetAddressOf());
+    m_ctx->PSSetShaderResources(0, 1, m_srcSRV.GetAddressOf());
+    m_ctx->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
+
+    int nIdx = (m_meshW - 1) * (m_meshH - 1) * 6;
+
+    auto drawEye = [&](float eyeSign) {
+        D3D11_MAPPED_SUBRESOURCE mc{};
+        if (SUCCEEDED(m_ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mc))) {
+            auto* c = static_cast<CBStereo*>(mc.pData);
+            *c = cbBase;
+            c->eyeSign = eyeSign;
             m_ctx->Unmap(m_cb.Get(), 0);
         }
         m_ctx->DrawIndexed((UINT)nIdx, 0, 0);
+    };
 
-        // Right / bottom eye
-        if (SUCCEEDED(m_ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mcb))) {
-            auto* c = static_cast<CBStereo*>(mcb.pData);
-            *c = cbBase; c->eyeSign = -1.f;
-            m_ctx->Unmap(m_cb.Get(), 0);
-        }
-        m_ctx->DrawIndexed((UINT)nIdx, 0, 0);
+    drawEye(+1.f);   // left eye  (SBS: left half;  TAB: top half)
+    drawEye(-1.f);   // right eye (SBS: right half; TAB: bottom half)
 
-        m_ctx->VSSetShaderResources(1, 0, nullptr);
-    }
-
-    // ── Pass 2: UV-warp hole-fill ─────────────────────────────────────────────
-    // Full-screen quad runs with EQUAL depth test against 1.0 — only pixels the
-    // mesh left uncovered (depth still == cleared 1.0) are shaded.
-    // The VS outputs z=w=1 → NDC z=1, matching the cleared value exactly.
-    // This fills disoccluded gaps and border regions with infill colour.
-    // No depth bleeding: the VS no longer uses max(dL,dC,dR) — it reads depth
-    // straight at the eye UV so its colour exactly matches the mesh edge.
-    {
-        bool hasDSV = (m_dsv && m_dsStateHoleFill);
-        if (hasDSV) {
-            m_ctx->OMSetDepthStencilState(m_dsStateHoleFill.Get(), 0);
-            m_ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), m_dsv.Get());
-        } else {
-            m_ctx->OMSetDepthStencilState(nullptr, 0);
-            m_ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), nullptr);
-        }
-        m_ctx->RSSetState(m_raster.Get());
-        UINT stride=sizeof(Vertex), offset=0;
-        m_ctx->IASetInputLayout(m_il.Get());
-        m_ctx->IASetVertexBuffers(0,1,m_vb.GetAddressOf(),&stride,&offset);
-        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-        m_ctx->VSSetShader(m_vs.Get(),nullptr,0);
-        m_ctx->PSSetShader(m_ps.Get(),nullptr,0);
-        m_ctx->PSSetConstantBuffers(0,1,m_cb.GetAddressOf());
-        ID3D11ShaderResourceView* srvs[]={m_srcSRV.Get(),m_depthSRV.Get()};
-        m_ctx->PSSetShaderResources(0,2,srvs);
-        m_ctx->PSSetSamplers(0,1,m_sampler.GetAddressOf());
-        // Restore cbBase (eyeSign=0, unused by warp PS)
-        {
-            D3D11_MAPPED_SUBRESOURCE mc{};
-            if (SUCCEEDED(m_ctx->Map(m_cb.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mc))) {
-                *static_cast<CBStereo*>(mc.pData) = cbBase;
-                m_ctx->Unmap(m_cb.Get(),0);
-            }
-        }
-        m_ctx->Draw(4,0);
-        // Restore depth state
-        m_ctx->OMSetDepthStencilState(nullptr, 0);
-    }
+    m_ctx->VSSetShaderResources(1, 0, nullptr);
+    m_ctx->OMSetDepthStencilState(nullptr, 0);
 
     // ── Triple-buffered staging readback — guaranteed zero Map(READ) stall ───
     // Frame N: CopyResource → staging[N%3]      (async, returns immediately)
