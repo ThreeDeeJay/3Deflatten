@@ -138,7 +138,7 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
             // Blend: confidence-weighted mix of Inner + Outer
             int innerHit;
             float4 inner = SrcSearchFirst(srcUV, innerDir, depth, 32, innerHit);
-            float4 outer = SrcSearchLast (srcUV, outerDir, dC, 32);
+            float4 outer = SrcSearchLast (srcUV, outerDir, depth, 32);
             float conf = (innerHit > 0) ? saturate(1.0 - (float)innerHit / 32.0) : 0.0;
             return lerp(rawSmp, lerp(outer, inner, conf), blend);
 
