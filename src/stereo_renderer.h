@@ -112,7 +112,8 @@ private:
     ComPtr<ID3D11Buffer>            m_meshIB;   // uint32 indices, (meshW-1)*(meshH-1)*6
     ComPtr<ID3D11Texture2D>         m_dsTex;    // depth-stencil for mesh z-test
     ComPtr<ID3D11DepthStencilView>  m_dsv;
-    ComPtr<ID3D11DepthStencilState> m_dsState;  // LESS, depth write enabled
+    ComPtr<ID3D11DepthStencilState> m_dsState;      // LESS, depth write enabled (mesh pass)
+    ComPtr<ID3D11DepthStencilState> m_dsStateHoleFill; // EQUAL, no write (UV-warp hole-fill)
     ComPtr<ID3D11RasterizerState>   m_meshRaster; // no backface cull
     int                             m_meshW = 0, m_meshH = 0;
 };

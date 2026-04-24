@@ -43,7 +43,12 @@ struct VS_IN  { float2 pos : POSITION; float2 uv : TEXCOORD; };
 struct VS_OUT { float4 pos : SV_POSITION; float2 uv : TEXCOORD; };
 
 VS_OUT VS_FullScreen(VS_IN v) {
-    VS_OUT o; o.pos = float4(v.pos, 0, 1); o.uv = v.uv; return o;
+    VS_OUT o;
+    // z = w = 1.0 → NDC depth = 1.0 (farthest).  After the mesh renders with
+    // LESS depth, UV-warp uses EQUAL 1.0 to fill only uncovered holes.
+    o.pos = float4(v.pos, 1, 1);
+    o.uv = v.uv;
+    return o;
 }
 
 // Depth UV: shift eyeUV back to where the pixel was when the depth was computed.
@@ -96,20 +101,14 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
     }
     float eyeSign = isLeft ? 1.0 : -1.0;
 
-    // Motion-compensated depth UV: shift back to where this pixel was in the
-    // depth-estimation frame.  When no motion is accumulated, depUV == eyeUV.
     float2 depUV = DepthUV(eyeUV);
-
-    float dC = g_depthTex.SampleLevel(g_sampler, depUV, 0).r;
-    float dL = g_depthTex.SampleLevel(g_sampler, DepthUV(eyeUV + float2(-g_texelW * 3.0, 0)), 0).r;
-    float dR = g_depthTex.SampleLevel(g_sampler, DepthUV(eyeUV + float2(+g_texelW * 3.0, 0)), 0).r;
-    float depth = max(dC, max(dL, dR));
+    float depth  = g_depthTex.SampleLevel(g_sampler, depUV, 0).r;
 
     float  disparity = g_separation * (depth - g_convergence);
     float2 srcUV     = saturate(eyeUV + float2(eyeSign * disparity, 0.0));
 
     float sampledDepth = g_depthTex.SampleLevel(g_sampler, DepthUV(srcUV), 0).r;
-    float depthJump    = sampledDepth - dC;
+    float depthJump    = sampledDepth - depth;
 
     [branch]
     if (depthJump > 0.10) {
@@ -125,20 +124,20 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
             // Inner: hidden background behind near edge (+eyeSign through fg)
             // Fallback = outermost visible bg (not rawSample) for wide gaps
             int hitStep;
-            float4 inner = SrcSearchFirst(srcUV, innerDir, dC, 32, hitStep);
-            if (hitStep == 0) inner = SrcSearchLast(srcUV, outerDir, dC, 32);
+            float4 inner = SrcSearchFirst(srcUV, innerDir, depth, 32, hitStep);
+            if (hitStep == 0) inner = SrcSearchLast(srcUV, outerDir, depth, 32);
             return lerp(rawSmp, inner, blend);
 
         } else if (g_infillMode == 1) {
             // Outer: extend visible background from gap's outer edge
             // -eyeSign from srcUV; LAST match = outermost visible bg
-            float4 outer = SrcSearchLast(srcUV, outerDir, dC, 32);
+            float4 outer = SrcSearchLast(srcUV, outerDir, depth, 32);
             return lerp(rawSmp, outer, blend);
 
         } else if (g_infillMode == 2) {
             // Blend: confidence-weighted mix of Inner + Outer
             int innerHit;
-            float4 inner = SrcSearchFirst(srcUV, innerDir, dC, 32, innerHit);
+            float4 inner = SrcSearchFirst(srcUV, innerDir, depth, 32, innerHit);
             float4 outer = SrcSearchLast (srcUV, outerDir, dC, 32);
             float conf = (innerHit > 0) ? saturate(1.0 - (float)innerHit / 32.0) : 0.0;
             return lerp(rawSmp, lerp(outer, inner, conf), blend);
@@ -148,7 +147,7 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
             // = texture edge-clamp in the warp direction, same effect as
             //   SuperDepth3D "Offset Based" / VM0 Normal infill.
             int hitStep;
-            float4 edge = SrcSearchFirst(srcUV, outerDir, dC, 32, hitStep);
+            float4 edge = SrcSearchFirst(srcUV, outerDir, depth, 32, hitStep);
             return lerp(rawSmp, edge, blend);
 
         } else {
@@ -164,13 +163,13 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
                 float2 pOut = srcUV + outerDir * sf;
                 if (pIn.x > 0.0 && pIn.x < 1.0) {
                     float dIn = g_depthTex.SampleLevel(g_sampler, pIn, 0).r;
-                    float wIn = exp(-sf * 0.12) * max(0.0, 1.0 - abs(dIn - dC) * 10.0);
+                    float wIn = exp(-sf * 0.12) * max(0.0, 1.0 - abs(dIn - depth) * 10.0);
                     fillColor += wIn * g_srcTex.SampleLevel(g_sampler, pIn, 0);
                     totalWeight += wIn;
                 }
                 if (pOut.x > 0.0 && pOut.x < 1.0) {
                     float dOut = g_depthTex.SampleLevel(g_sampler, pOut, 0).r;
-                    float wOut = exp(-sf * 0.12) * max(0.0, 1.0 - abs(dOut - dC) * 10.0);
+                    float wOut = exp(-sf * 0.12) * max(0.0, 1.0 - abs(dOut - depth) * 10.0);
                     fillColor += wOut * g_srcTex.SampleLevel(g_sampler, pOut, 0);
                     totalWeight += wOut;
                 }
@@ -481,6 +480,16 @@ HRESULT StereoRenderer::CreateShaders() {
         m_dev->CreateDepthStencilState(&dsd, &m_dsState);
     }
 
+    // Hole-fill DS state: EQUAL test, no write — UV-warp only draws pixels the
+    // mesh left uncovered (depth == 1.0, the cleared value).
+    {
+        D3D11_DEPTH_STENCIL_DESC dsd{};
+        dsd.DepthEnable    = TRUE;
+        dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        dsd.DepthFunc      = D3D11_COMPARISON_EQUAL;
+        m_dev->CreateDepthStencilState(&dsd, &m_dsStateHoleFill);
+    }
+
     // Mesh rasterizer: no backface culling (triangle winding varies with depth)
     {
         D3D11_RASTERIZER_DESC mrd{};
@@ -731,31 +740,15 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
 
     D3D11_VIEWPORT vp{0,0,(float)dstW,(float)dstH,0,1};
     m_ctx->RSSetViewports(1,&vp);
-    m_ctx->RSSetState(m_raster.Get());
-    m_ctx->OMSetRenderTargets(1,m_rtv.GetAddressOf(),nullptr);
 
-    UINT stride=sizeof(Vertex), offset=0;
-    m_ctx->IASetInputLayout(m_il.Get());
-    m_ctx->IASetVertexBuffers(0,1,m_vb.GetAddressOf(),&stride,&offset);
-    m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    m_ctx->VSSetShader(m_vs.Get(),nullptr,0);
-    m_ctx->PSSetShader(m_ps.Get(),nullptr,0);
-    m_ctx->PSSetConstantBuffers(0,1,m_cb.GetAddressOf());
-    ID3D11ShaderResourceView* srvs[]={m_srcSRV.Get(),m_depthSRV.Get()};
-    m_ctx->PSSetShaderResources(0,2,srvs);
-    m_ctx->PSSetSamplers(0,1,m_sampler.GetAddressOf());
-    m_ctx->Draw(4,0);
-
-    // ── Pass 2: Mesh-based reprojection (Shih et al. §3) ─────────────────────
-    // Draws a triangle mesh over the UV-warp background, with:
-    //   • SV_CullDistance cutting edges at depth discontinuities (no stretching)
-    //   • Z-buffer for correct foreground/background occlusion
-    // Disoccluded holes reveal the UV-warp infill (groundwork for future inpainter).
+    // ── Pass 1: Mesh-based reprojection ──────────────────────────────────────
+    // Render the depth mesh first with LESS depth test + depth write.
+    // Each correctly-placed vertex writes its NDC-Z = (1−depth) so the depth
+    // buffer records which pixels geometry covered.
+    // Disoccluded holes and culled-edge pixels are left at depth=1.0 (cleared).
     if (m_meshVS && m_meshIL && m_meshVB && m_meshIB && m_dsv && m_dsState) {
-        // Clear only the depth buffer — keep the UV-warp colour as background
         m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
         m_ctx->OMSetDepthStencilState(m_dsState.Get(), 0);
-        // Keep m_rtTex as colour RTV; add DSV for z-testing
         m_ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), m_dsv.Get());
         m_ctx->RSSetState(m_meshRaster.Get());
         m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -767,10 +760,8 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
         m_ctx->PSSetShader(m_meshPS.Get(), nullptr, 0);
         m_ctx->VSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
         m_ctx->PSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
-        // Bind depth texture to VS slot 1 (for position computation)
         m_ctx->VSSetShaderResources(1, 1, m_depthSRV.GetAddressOf());
         m_ctx->VSSetSamplers(0, 1, m_sampler.GetAddressOf());
-        // PS reads source colour from t0 (already bound from warp pass)
         m_ctx->PSSetShaderResources(0, 1, m_srcSRV.GetAddressOf());
         m_ctx->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
 
@@ -780,8 +771,7 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
         D3D11_MAPPED_SUBRESOURCE mcb{};
         if (SUCCEEDED(m_ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mcb))) {
             auto* c = static_cast<CBStereo*>(mcb.pData);
-            *c = cbBase;
-            c->eyeSign = 1.f;
+            *c = cbBase; c->eyeSign = 1.f;
             m_ctx->Unmap(m_cb.Get(), 0);
         }
         m_ctx->DrawIndexed((UINT)nIdx, 0, 0);
@@ -789,15 +779,52 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
         // Right / bottom eye
         if (SUCCEEDED(m_ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mcb))) {
             auto* c = static_cast<CBStereo*>(mcb.pData);
-            *c = cbBase;
-            c->eyeSign = -1.f;
+            *c = cbBase; c->eyeSign = -1.f;
             m_ctx->Unmap(m_cb.Get(), 0);
         }
         m_ctx->DrawIndexed((UINT)nIdx, 0, 0);
 
-        // Restore state for subsequent frames
-        m_ctx->OMSetDepthStencilState(nullptr, 0);
         m_ctx->VSSetShaderResources(1, 0, nullptr);
+    }
+
+    // ── Pass 2: UV-warp hole-fill ─────────────────────────────────────────────
+    // Full-screen quad runs with EQUAL depth test against 1.0 — only pixels the
+    // mesh left uncovered (depth still == cleared 1.0) are shaded.
+    // The VS outputs z=w=1 → NDC z=1, matching the cleared value exactly.
+    // This fills disoccluded gaps and border regions with infill colour.
+    // No depth bleeding: the VS no longer uses max(dL,dC,dR) — it reads depth
+    // straight at the eye UV so its colour exactly matches the mesh edge.
+    {
+        bool hasDSV = (m_dsv && m_dsStateHoleFill);
+        if (hasDSV) {
+            m_ctx->OMSetDepthStencilState(m_dsStateHoleFill.Get(), 0);
+            m_ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), m_dsv.Get());
+        } else {
+            m_ctx->OMSetDepthStencilState(nullptr, 0);
+            m_ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), nullptr);
+        }
+        m_ctx->RSSetState(m_raster.Get());
+        UINT stride=sizeof(Vertex), offset=0;
+        m_ctx->IASetInputLayout(m_il.Get());
+        m_ctx->IASetVertexBuffers(0,1,m_vb.GetAddressOf(),&stride,&offset);
+        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        m_ctx->VSSetShader(m_vs.Get(),nullptr,0);
+        m_ctx->PSSetShader(m_ps.Get(),nullptr,0);
+        m_ctx->PSSetConstantBuffers(0,1,m_cb.GetAddressOf());
+        ID3D11ShaderResourceView* srvs[]={m_srcSRV.Get(),m_depthSRV.Get()};
+        m_ctx->PSSetShaderResources(0,2,srvs);
+        m_ctx->PSSetSamplers(0,1,m_sampler.GetAddressOf());
+        // Restore cbBase (eyeSign=0, unused by warp PS)
+        {
+            D3D11_MAPPED_SUBRESOURCE mc{};
+            if (SUCCEEDED(m_ctx->Map(m_cb.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mc))) {
+                *static_cast<CBStereo*>(mc.pData) = cbBase;
+                m_ctx->Unmap(m_cb.Get(),0);
+            }
+        }
+        m_ctx->Draw(4,0);
+        // Restore depth state
+        m_ctx->OMSetDepthStencilState(nullptr, 0);
     }
 
     // ── Triple-buffered staging readback — guaranteed zero Map(READ) stall ───
