@@ -430,10 +430,13 @@ void C3DeflattenFilter::DepthWorkerThread() {
             m_cachedDepth = std::move(result.data);
             m_cachedW     = result.width;
             m_cachedH     = result.height;
-            m_cachedSlot  = slot;   // which ring slot this depth was computed from
+            m_cachedSlot  = slot;
             m_cacheReady  = true;
             m_lastInferMs = (double)ms;
             LOG_DBG("Depth worker: inference done in ", ms, " ms");
+        } else if (hr == E_PENDING) {
+            // TRT engine build just finished — no depth this frame, next will produce it.
+            LOG_INFO("Depth worker: TRT engine build complete; depth begins next frame.");
         } else {
             LOG_WARN("Depth worker: inference failed hr=", HRStr(hr));
         }

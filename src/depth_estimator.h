@@ -158,6 +158,7 @@ private:
 #ifdef ORT_ENABLE_TRTRTX
     HRESULT LoadTrtRtxNative(const std::wstring& onnxPath, std::wstring& outInfo,
                               InferenceRuntime runtime, int depthMaxDim);
+    HRESULT FinishTrtBuild();   // deferred engine compilation, called on worker thread
     HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH, int srcStride,
                             bool isBGR, bool flipDepth, float smoothAlpha,
                             int depthDilate, float depthEdgeThresh, bool depthJBU,

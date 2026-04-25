@@ -332,6 +332,20 @@ struct DepthEstimator::TrtRtxSession {
     HMODULE hInfer  = nullptr;
     HMODULE hParser = nullptr;
 
+    // ── Deferred engine build ─────────────────────────────────────────────────
+    // When no cached engine exists, LoadTrtRtxNative returns immediately after
+    // parsing the ONNX, storing the pending builder objects here.
+    // FinishBuild() is called on the first EstimateTrtRtx call — on the depth
+    // worker thread — so the potentially-minutes-long compilation never blocks
+    // the DirectShow graph thread (which would freeze the host application).
+    bool needsBuild = false;
+    TrtBuilderPtr   pendingBuilder;
+    TrtNetworkPtr   pendingNetwork;
+    TrtConfigPtr    pendingConfig;
+    // Factory fn pointers are stored so FinishBuild can call createInferRuntime
+    using FnMkRuntime = nvinfer1::IRuntime* (*)(void*, int32_t);
+    FnMkRuntime fnMkRuntime = nullptr;
+
     ~TrtRtxSession() { Destroy(); }
     void Destroy() {
         context.reset();
@@ -484,20 +498,24 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
 
     // ── Build engine from ONNX if no valid cache ──────────────────────────────
     if (!engineLoaded) {
-        LOG_INFO("TRT-RTX: building FP16 engine from ONNX (may take 1-5 min)...");
-        LOG_INFO("  ONNX: ", std::string(onnxPath.begin(), onnxPath.end()));
-        LOG_INFO("  Cache will be saved to: ", sess->enginePath);
+        // ── Deferred build path ────────────────────────────────────────────────
+        // Engine compilation can take 1-10 minutes for large models.
+        // We do NOT call buildSerializedNetwork here — that would block the
+        // DirectShow graph thread and freeze the host application.
+        // Instead: parse the ONNX, build the optimisation profile, store the
+        // pending builder/network/config in the session, and set needsBuild=true.
+        // FinishTrtBuild() is called on the first EstimateTrtRtx from the depth
+        // worker thread; during the build the worker returns E_PENDING so the
+        // filter outputs flat depth (no hang, no freeze).
 
         TrtBuilderPtr builder(fnMkBuilder(&sess->logger, NV_TENSORRT_VERSION));
         if (!builder) { LOG_ERR("TRT: createInferBuilder returned null."); return E_FAIL; }
         LOG_INFO("TRT-RTX: builder created.");
 
-        // kEXPLICIT_BATCH = 0 (from reference code)
         TrtNetworkPtr network(builder->createNetworkV2(0U));
         if (!network) { LOG_ERR("TRT-RTX: createNetworkV2 returned null."); return E_FAIL; }
         LOG_INFO("TRT-RTX: network created.");
 
-        // Parse ONNX
         TrtParserPtr parser(fnMkParser(network.get(), &sess->logger, NV_ONNX_PARSER_VERSION));
         if (!parser) { LOG_ERR("TRT: createParser returned null."); return E_FAIL; }
         LOG_INFO("TRT-RTX: parser created. Parsing ONNX...");
@@ -513,7 +531,6 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         LOG_INFO("TRT-RTX: ONNX parsed OK.  Inputs=", network->getNbInputs(),
                  " Outputs=", network->getNbOutputs());
 
-        // Log network I/O
         for (int i = 0; i < network->getNbInputs(); ++i) {
             auto* t = network->getInput(i);
             auto  d = t->getDimensions();
@@ -521,26 +538,18 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
             for (int k = 0; k < d.nbDims; ++k) ds += std::to_string(d.d[k]) + " ";
             LOG_INFO("  Input[", i, "]: '", t->getName(), "' dims=[", ds, "]");
         }
-        for (int i = 0; i < network->getNbOutputs(); ++i) {
-            auto* t = network->getOutput(i);
-            LOG_INFO("  Output[", i, "]: '", t->getName(), "'");
-        }
+        for (int i = 0; i < network->getNbOutputs(); ++i)
+            LOG_INFO("  Output[", i, "]: '", network->getOutput(i)->getName(), "'");
 
-        // Builder config
         TrtConfigPtr cfg(builder->createBuilderConfig());
         if (!cfg) { LOG_ERR("TRT-RTX: createBuilderConfig returned null."); return E_FAIL; }
 
-        // FP16 — always enable; TRT-RTX and TRT 10.x on RTX hardware always support it.
-        // platformHasFastFp16() was removed in TRT-RTX SDK (always true for RTX targets).
         cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
-        LOG_INFO("TRT-RTX: FP16 enabled.");
+        // 8 GB workspace — VideoDepthAnything-small needs ~4.75 GB activation
+        cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)8 << 30);
+        LOG_INFO("TRT-RTX: FP16 enabled, workspace=8GB.");
 
-        // Workspace — use setMemoryPoolLimit (TRT 10.x and TRT-RTX 1.4+ API).
-        // setMaxWorkspaceSize was removed in TRT 10; TRT-RTX follows TRT 10 API.
-        cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)2 << 30);
-        LOG_INFO("TRT-RTX: workspace=2GB.");
-
-        // Optimization profile — supports both 4D [B,C,H,W] and 5D [B,F,C,H,W] inputs.
+        // Build optimization profile (same logic as before, updates sess dims/F)
         if (network->getNbInputs() > 0) {
             auto* inp = network->getInput(0);
             auto  dims = inp->getDimensions();
@@ -548,46 +557,39 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
             for (int k = 0; k < dims.nbDims; ++k)
                 if (dims.d[k] < 0) { hasDynamic = true; break; }
 
-            auto makeProfile = [&](nvinfer1::IOptimizationProfile* profile) {
+            auto makeDims5 = [](int b, int f, int c, int h, int w) {
+                nvinfer1::Dims d{}; d.nbDims = 5;
+                d.d[0]=b; d.d[1]=f; d.d[2]=c; d.d[3]=h; d.d[4]=w;
+                return d;
+            };
+
+            auto buildProfile = [&](nvinfer1::IOptimizationProfile* profile) {
                 if (dims.nbDims == 5) {
-                    // Video model: [batch, frames, C, H, W]
-                    // Extract frame count from dim[1]; use 1 if fully dynamic.
                     int F = (dims.d[1] > 0) ? (int)dims.d[1] : 1;
                     sess->nbVideoFrames = F;
-                    // Spatial dims are at [3],[4]; use fixed 518×518 if specified.
                     int spatialH = (dims.d[3] > 0) ? (int)dims.d[3] : optH;
                     int spatialW = (dims.d[4] > 0) ? (int)dims.d[4] : optW;
-
-                    auto makeDims5 = [](int b, int f, int c, int h, int w) {
-                        nvinfer1::Dims d{}; d.nbDims = 5;
-                        d.d[0]=b; d.d[1]=f; d.d[2]=c; d.d[3]=h; d.d[4]=w;
-                        return d;
-                    };
-                    // For fixed spatial (d[3],d[4] > 0), clamp profile to those exact dims.
                     int minH = (dims.d[3] > 0) ? spatialH : base;
                     int minW = (dims.d[4] > 0) ? spatialW : base;
                     int maxH = (dims.d[3] > 0) ? spatialH : dmd;
                     int maxW = (dims.d[4] > 0) ? spatialW : dmd;
                     profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMIN,
-                        makeDims5(1, F, 3, minH, minW));
+                        makeDims5(1,F,3,minH,minW));
                     profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kOPT,
-                        makeDims5(1, F, 3, spatialH, spatialW));
+                        makeDims5(1,F,3,spatialH,spatialW));
                     profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMAX,
-                        makeDims5(1, F, 3, maxH, maxW));
-                    // Update sess model dims to fixed spatial if known
-                    sess->modelH = spatialH;
-                    sess->modelW = spatialW;
+                        makeDims5(1,F,3,maxH,maxW));
+                    sess->modelH = spatialH; sess->modelW = spatialW;
                     LOG_INFO("TRT: 5D video profile F=", F,
                              " spatial=", spatialW, "×", spatialH,
                              " (min=", minW, "×", minH, " max=", maxW, "×", maxH, ")");
                 } else {
-                    // Standard 4D model: [B, C, H, W]
                     profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMIN,
-                        nvinfer1::Dims4{1, 3, base, base});
+                        nvinfer1::Dims4{1,3,base,base});
                     profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kOPT,
-                        nvinfer1::Dims4{1, 3, optH, optW});
+                        nvinfer1::Dims4{1,3,optH,optW});
                     profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMAX,
-                        nvinfer1::Dims4{1, 3, dmd, dmd});
+                        nvinfer1::Dims4{1,3,dmd,dmd});
                     LOG_INFO("TRT: 4D profile min=14×14 opt=", optW, "×", optH,
                              " max=", dmd, "×", dmd);
                 }
@@ -595,56 +597,45 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
 
             if (hasDynamic) {
                 auto* profile = builder->createOptimizationProfile();
-                makeProfile(profile);
+                buildProfile(profile);
                 cfg->addOptimizationProfile(profile);
             } else {
-                // Fixed-shape: override sess dims from network dims directly
                 if (dims.nbDims == 5 && dims.d[3] > 0 && dims.d[4] > 0) {
                     sess->nbVideoFrames = (int)dims.d[1];
-                    sess->modelH = (int)dims.d[3];
-                    sess->modelW = (int)dims.d[4];
-                    LOG_INFO("TRT: fixed 5D engine: F=", sess->nbVideoFrames,
+                    sess->modelH = (int)dims.d[3]; sess->modelW = (int)dims.d[4];
+                    LOG_INFO("TRT: fixed 5D: F=", sess->nbVideoFrames,
                              " ", sess->modelW, "×", sess->modelH);
                 } else if (dims.nbDims == 4 && dims.d[2] > 0 && dims.d[3] > 0) {
-                    sess->modelH = (int)dims.d[2];
-                    sess->modelW = (int)dims.d[3];
-                    LOG_INFO("TRT: fixed 4D engine: ", sess->modelW, "×", sess->modelH);
+                    sess->modelH = (int)dims.d[2]; sess->modelW = (int)dims.d[3];
+                    LOG_INFO("TRT: fixed 4D: ", sess->modelW, "×", sess->modelH);
                 }
             }
         }
 
-        // Serialize network → engine blob
-        LOG_INFO("TRT-RTX: buildSerializedNetwork starting...");
-        TrtHostMemPtr serialized(builder->buildSerializedNetwork(*network, *cfg));
-        if (!serialized) {
-            LOG_ERR("TRT-RTX: buildSerializedNetwork returned null.");
-            LOG_ERR("  Check above [TRT] WARNING/ERROR lines for the root cause.");
-            return E_FAIL;
-        }
-        LOG_INFO("TRT-RTX: engine serialized OK (", serialized->size()/1024/1024, " MB).");
-
-        // Save to disk
-        {
-            std::ofstream f(sess->enginePath, std::ios::binary);
-            if (f) {
-                f.write(static_cast<const char*>(serialized->data()), serialized->size());
-                LOG_INFO("TRT-RTX: engine cached at: ", sess->enginePath);
-            } else {
-                LOG_WARN("TRT-RTX: could not write engine cache (path writable?)");
-            }
-        }
-
-        // Deserialize for use
-        sess->runtime.reset(fnMkRuntime(&sess->logger, NV_TENSORRT_VERSION));
-        if (!sess->runtime) { LOG_ERR("TRT: createInferRuntime returned null (post-build)."); return E_FAIL; }
-        sess->engine.reset(sess->runtime->deserializeCudaEngine(
-            serialized->data(), serialized->size()));
-        if (!sess->engine) { LOG_ERR("TRT-RTX: deserializeCudaEngine (after build) failed."); return E_FAIL; }
-        LOG_INFO("TRT-RTX: engine ready.");
+        // Store pending objects; FinishTrtBuild() will call buildSerializedNetwork
+        // on the depth worker thread.
+        sess->pendingBuilder  = std::move(builder);
+        sess->pendingNetwork  = std::move(network);
+        sess->pendingConfig   = std::move(cfg);
+        sess->fnMkRuntime     = fnMkRuntime;
+        sess->needsBuild      = true;
+        LOG_INFO("TRT: engine build deferred to worker thread (may take several minutes).");
+        LOG_INFO("  Flat depth will be shown during compilation.");
     }
 
-    // ── Create execution context ──────────────────────────────────────────────
-    sess->context.reset(sess->engine->createExecutionContext());
+    // ── Create execution context (skip if build is deferred) ─────────────────
+    if (sess->needsBuild) {
+        // Move the session into m_trtRtx now; FinishTrtBuild() will complete setup.
+        m_trtRtx     = std::move(sess);
+        m_dynamicInput = true;   // assume dynamic until FinishTrtBuild resolves
+        m_modelInputW  = m_trtRtx->modelW;
+        m_modelInputH  = m_trtRtx->modelH;
+        outInfo = (runtime == InferenceRuntime::TensorRTRtx)
+            ? L"TensorRT-RTX (building engine…)"
+            : L"TensorRT (building engine…)";
+        LOG_INFO("TRT: session ready (engine build pending on worker thread).");
+        return S_OK;
+    }
     if (!sess->context) { LOG_ERR("TRT-RTX: createExecutionContext failed."); return E_FAIL; }
     LOG_INFO("TRT-RTX: execution context created.");
 
@@ -866,7 +857,165 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     return S_OK;
 }
 
-// ── EstimateTrtRtx ────────────────────────────────────────────────────────────
+// ── FinishTrtBuild ────────────────────────────────────────────────────────────
+// Called on the depth worker thread on the first EstimateTrtRtx call when
+// needsBuild==true.  Runs buildSerializedNetwork (slow), saves cache, creates
+// context, allocates buffers, builds bindings — everything that was deferred
+// from LoadTrtRtxNative to avoid blocking the DirectShow graph thread.
+HRESULT DepthEstimator::FinishTrtBuild() {
+    auto& s = *m_trtRtx;
+    LOG_INFO("TRT: starting deferred engine build on worker thread...");
+    LOG_INFO("  This may take several minutes. Flat depth shown during compilation.");
+
+    // buildSerializedNetwork — the slow step
+    TrtHostMemPtr serialized(
+        s.pendingBuilder->buildSerializedNetwork(*s.pendingNetwork, *s.pendingConfig));
+    // Release pending objects regardless of outcome
+    s.pendingNetwork.reset();
+    s.pendingConfig.reset();
+    s.pendingBuilder.reset();
+
+    if (!serialized) {
+        LOG_ERR("TRT: buildSerializedNetwork returned null.");
+        LOG_ERR("  Check above [TRT] WARNING/ERROR lines for the root cause.");
+        s.needsBuild = false;
+        return E_FAIL;
+    }
+    LOG_INFO("TRT: engine serialized OK (", serialized->size()/1024/1024, " MB).");
+
+    // Save to disk
+    {
+        std::ofstream f(s.enginePath, std::ios::binary);
+        if (f) {
+            f.write(static_cast<const char*>(serialized->data()), serialized->size());
+            LOG_INFO("TRT: engine cached at: ", s.enginePath);
+        } else {
+            LOG_WARN("TRT: could not write engine cache.");
+        }
+    }
+
+    // Deserialize
+    s.runtime.reset(s.fnMkRuntime(&s.logger, NV_TENSORRT_VERSION));
+    if (!s.runtime) { LOG_ERR("TRT: createInferRuntime failed."); return E_FAIL; }
+    s.engine.reset(s.runtime->deserializeCudaEngine(serialized->data(), serialized->size()));
+    if (!s.engine) { LOG_ERR("TRT: deserializeCudaEngine failed."); return E_FAIL; }
+    LOG_INFO("TRT: engine ready.");
+
+    // ── Everything below mirrors the normal post-load path ────────────────────
+    s.context.reset(s.engine->createExecutionContext());
+    if (!s.context) { LOG_ERR("TRT: createExecutionContext failed."); return E_FAIL; }
+
+    // Re-detect dims from the real engine (may differ from parse-time dims)
+    bool engineIsDynamic = false;
+    {
+        int nb = s.engine->getNbIOTensors();
+        for (int i = 0; i < nb; ++i) {
+            const char* name = s.engine->getIOTensorName(i);
+            auto mode = s.engine->getTensorIOMode(name);
+            bool isInput = (mode == nvinfer1::TensorIOMode::kINPUT);
+
+            LOG_INFO("TRT: tensor[", i, "] '", name, "' ", isInput ? "INPUT" : "OUTPUT");
+
+            if (isInput && s.inputIdx < 0) {
+                s.inputName = name; s.inputIdx = i;
+                auto esh = s.engine->getTensorShape(name);
+                bool hasDyn = false;
+                for (int k = 0; k < esh.nbDims; ++k) if (esh.d[k]<0){hasDyn=true;break;}
+                engineIsDynamic = hasDyn;
+                if (esh.nbDims == 5) {
+                    int F = (esh.d[1]>0)?(int)esh.d[1]:s.nbVideoFrames;
+                    s.nbVideoFrames = F;
+                    if (!hasDyn && esh.d[3]>0 && esh.d[4]>0) {
+                        s.modelH=(int)esh.d[3]; s.modelW=(int)esh.d[4];
+                    }
+                } else if (!hasDyn && esh.nbDims==4 && esh.d[2]>0 && esh.d[3]>0) {
+                    s.modelH=(int)esh.d[2]; s.modelW=(int)esh.d[3];
+                }
+            }
+            if (mode == nvinfer1::TensorIOMode::kOUTPUT) {
+                if (s.outputIdx < 0) {
+                    if (std::strcmp(name,"depth")==0 || s.outputIdx<0)
+                        { s.outputName=name; s.outputIdx=i; }
+                }
+            }
+        }
+        if (s.outputIdx<0 && s.engine->getNbIOTensors()>1)
+        { // fallback: first output
+          const char* nm=s.engine->getIOTensorName(s.inputIdx==0?1:0);
+          s.outputName=nm; s.outputIdx=(s.inputIdx==0?1:0);
+        }
+        s.nbBindings = s.engine->getNbIOTensors();
+
+        // setInputShape
+        if (!s.inputName.empty() && engineIsDynamic) {
+            int F = (s.nbVideoFrames>0)?s.nbVideoFrames:1;
+            bool ok = false;
+            if (F>1) {
+                nvinfer1::Dims d{}; d.nbDims=5;
+                d.d[0]=1;d.d[1]=F;d.d[2]=3;d.d[3]=s.modelH;d.d[4]=s.modelW;
+                ok=s.context->setInputShape(s.inputName.c_str(),d);
+            } else {
+                ok=s.context->setInputShape(s.inputName.c_str(),
+                    nvinfer1::Dims4{1,3,s.modelH,s.modelW});
+            }
+            if (!ok) LOG_WARN("TRT: setInputShape failed in FinishTrtBuild.");
+        }
+    }
+
+    // Determine buffer sizes
+    int dmd = (s.depthMaxDim>0)?s.depthMaxDim:1022;
+    int F   = (s.nbVideoFrames>0)?s.nbVideoFrames:1;
+    if (engineIsDynamic) {
+        s.inputBytes  = sizeof(float)*3*(size_t)dmd*dmd*(size_t)F;
+        s.outputBytes = sizeof(float)*1*(size_t)dmd*dmd*(size_t)F;
+    } else {
+        s.inputBytes  = sizeof(float)*3*(size_t)s.modelH*s.modelW*(size_t)F;
+        s.outputBytes = sizeof(float)*1*(size_t)s.modelH*s.modelW*(size_t)F;
+    }
+    LOG_INFO("TRT: buffer in=", s.inputBytes/1024, " KB out=", s.outputBytes/1024, " KB");
+
+    cudaError_t cerr;
+    cerr=cudaMalloc(reinterpret_cast<void**>(&s.d_input), s.inputBytes);
+    if(cerr){LOG_ERR("cudaMalloc(input) failed(",cerr,")");return E_FAIL;}
+    cerr=cudaMalloc(reinterpret_cast<void**>(&s.d_output),s.outputBytes);
+    if(cerr){LOG_ERR("cudaMalloc(output) failed(",cerr,")");return E_FAIL;}
+    cerr=cudaMallocHost(reinterpret_cast<void**>(&s.h_output),s.outputBytes);
+    if(cerr){LOG_ERR("cudaMallocHost failed(",cerr,")");return E_FAIL;}
+
+    // Dummy buffer
+    size_t dummyBytes=16;
+    for(int i=0;i<s.nbBindings;++i){
+        if(i==s.inputIdx||i==s.outputIdx) continue;
+        const char* nm=s.engine->getIOTensorName(i);
+        auto sh=s.engine->getTensorShape(nm);
+        size_t elems=1;
+        for(int k=0;k<sh.nbDims;++k) elems*=(sh.d[k]>0?(size_t)sh.d[k]:(size_t)dmd);
+        size_t needed=elems*sizeof(float);
+        if(needed>dummyBytes) dummyBytes=needed;
+    }
+    cudaMalloc(&s.d_dummy, dummyBytes);
+
+    s.bindings.assign((size_t)s.nbBindings, s.d_dummy);
+    if(s.inputIdx >=0&&s.inputIdx <s.nbBindings) s.bindings[s.inputIdx ]=s.d_input;
+    if(s.outputIdx>=0&&s.outputIdx<s.nbBindings) s.bindings[s.outputIdx]=s.d_output;
+
+    // Frame ring for video models
+    if(F>1){
+        size_t fe=(size_t)3*s.modelH*s.modelW;
+        s.frameRing.assign(F,std::vector<float>(fe,0.5f));
+        s.frameRingPos=0; s.frameRingFull=false;
+    }
+
+    m_dynamicInput = engineIsDynamic;
+    m_modelInputW  = s.modelW;
+    m_modelInputH  = s.modelH;
+
+    s.needsBuild = false;
+    LOG_INFO("TRT: FinishTrtBuild complete — depth inference active.");
+    return S_OK;
+}
+
+
 HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          int srcStride, bool isBGR, bool flipDepth,
                                          float smoothAlpha, int depthDilate,
@@ -874,7 +1023,13 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          DepthResult& result) {
     auto& s = *m_trtRtx;
 
-    // Preprocess current frame → [3,mh,mw] CHW float tensor
+    // On first call after a deferred build, compile the engine now (worker thread).
+    // Return E_PENDING so the filter uses flat depth for this frame — no hang.
+    if (s.needsBuild) {
+        HRESULT hr = FinishTrtBuild();
+        if (FAILED(hr)) return hr;   // build failed — propagate error
+        return E_PENDING;            // success but no depth this frame yet
+    }
     std::vector<float> inputTensor;
     int mw, mh;
     PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR, inputTensor, mw, mh);
