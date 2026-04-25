@@ -294,6 +294,17 @@ struct DepthEstimator::TrtRtxSession {
     int inputIdx  = -1;
     int outputIdx = -1;
 
+    // Video model support: [B, F, C, H, W]  (nbVideoFrames > 0)
+    // nbVideoFrames = number of temporal frames the model expects.
+    // 0 means standard 4D model [B, C, H, W].
+    int nbVideoFrames = 0;
+    // Ring buffer of preprocessed CHW frame tensors (float32, already normalised).
+    // Kept in host memory; concatenated into d_input before each inference.
+    // Size = nbVideoFrames; oldest slot overwritten in round-robin order.
+    std::vector<std::vector<float>> frameRing;
+    int frameRingPos  = 0;     // next slot to write
+    bool frameRingFull = false; // becomes true once all slots have been written once
+
     // CUDA resources
     cudaStream_t stream   = nullptr;
     float*       d_input  = nullptr;   // device [1,3,H,W]
@@ -439,12 +450,11 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     sess->modelH = optH;
     // Buffers are allocated at MAX profile size (dmd×dmd) so any dynamic input
     // within the profile range fits without reallocation.
+    // For 5D video models, inputBufSz is scaled by nbVideoFrames (set during build).
     size_t maxElems    = (size_t)dmd * dmd;
-    size_t inputBufSz  = sizeof(float) * 3 * maxElems;
+    size_t inputBufSz  = sizeof(float) * 3 * maxElems;   // updated after build
     size_t outputBufSz = sizeof(float) * 1 * maxElems;
-    LOG_INFO("TRT: target OPT=", optW, "×", optH,
-             " MAX=", dmd, "×", dmd,
-             " input_buf=", inputBufSz/1024, " KB");
+    LOG_INFO("TRT: target OPT=", optW, "×", optH, " MAX=", dmd, "×", dmd);
     bool engineLoaded = false;
     if (std::filesystem::exists(sess->enginePath)) {
         LOG_INFO("TRT-RTX: loading cached engine: ", sess->enginePath);
@@ -530,7 +540,7 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)2 << 30);
         LOG_INFO("TRT-RTX: workspace=2GB.");
 
-        // Optimization profile uses pre-computed optW/optH/dmd/base from above.
+        // Optimization profile — supports both 4D [B,C,H,W] and 5D [B,F,C,H,W] inputs.
         if (network->getNbInputs() > 0) {
             auto* inp = network->getInput(0);
             auto  dims = inp->getDimensions();
@@ -538,21 +548,68 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
             for (int k = 0; k < dims.nbDims; ++k)
                 if (dims.d[k] < 0) { hasDynamic = true; break; }
 
+            auto makeProfile = [&](nvinfer1::IOptimizationProfile* profile) {
+                if (dims.nbDims == 5) {
+                    // Video model: [batch, frames, C, H, W]
+                    // Extract frame count from dim[1]; use 1 if fully dynamic.
+                    int F = (dims.d[1] > 0) ? (int)dims.d[1] : 1;
+                    sess->nbVideoFrames = F;
+                    // Spatial dims are at [3],[4]; use fixed 518×518 if specified.
+                    int spatialH = (dims.d[3] > 0) ? (int)dims.d[3] : optH;
+                    int spatialW = (dims.d[4] > 0) ? (int)dims.d[4] : optW;
+
+                    auto makeDims5 = [](int b, int f, int c, int h, int w) {
+                        nvinfer1::Dims d{}; d.nbDims = 5;
+                        d.d[0]=b; d.d[1]=f; d.d[2]=c; d.d[3]=h; d.d[4]=w;
+                        return d;
+                    };
+                    // For fixed spatial (d[3],d[4] > 0), clamp profile to those exact dims.
+                    int minH = (dims.d[3] > 0) ? spatialH : base;
+                    int minW = (dims.d[4] > 0) ? spatialW : base;
+                    int maxH = (dims.d[3] > 0) ? spatialH : dmd;
+                    int maxW = (dims.d[4] > 0) ? spatialW : dmd;
+                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMIN,
+                        makeDims5(1, F, 3, minH, minW));
+                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kOPT,
+                        makeDims5(1, F, 3, spatialH, spatialW));
+                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMAX,
+                        makeDims5(1, F, 3, maxH, maxW));
+                    // Update sess model dims to fixed spatial if known
+                    sess->modelH = spatialH;
+                    sess->modelW = spatialW;
+                    LOG_INFO("TRT: 5D video profile F=", F,
+                             " spatial=", spatialW, "×", spatialH,
+                             " (min=", minW, "×", minH, " max=", maxW, "×", maxH, ")");
+                } else {
+                    // Standard 4D model: [B, C, H, W]
+                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMIN,
+                        nvinfer1::Dims4{1, 3, base, base});
+                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kOPT,
+                        nvinfer1::Dims4{1, 3, optH, optW});
+                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMAX,
+                        nvinfer1::Dims4{1, 3, dmd, dmd});
+                    LOG_INFO("TRT: 4D profile min=14×14 opt=", optW, "×", optH,
+                             " max=", dmd, "×", dmd);
+                }
+            };
+
             if (hasDynamic) {
                 auto* profile = builder->createOptimizationProfile();
-                profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMIN,
-                    nvinfer1::Dims4{1, 3, base, base});
-                profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kOPT,
-                    nvinfer1::Dims4{1, 3, optH, optW});
-                profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMAX,
-                    nvinfer1::Dims4{1, 3, dmd,  dmd});
+                makeProfile(profile);
                 cfg->addOptimizationProfile(profile);
-                LOG_INFO("TRT: profile min=14×14 opt=", optW, "×", optH,
-                         " max=", dmd, "×", dmd);
-            } else if (dims.nbDims == 4 && dims.d[2] > 0 && dims.d[3] > 0) {
-                // Fixed-shape: override with actual network dims
-                sess->modelW = (int)dims.d[3];
-                sess->modelH = (int)dims.d[2];
+            } else {
+                // Fixed-shape: override sess dims from network dims directly
+                if (dims.nbDims == 5 && dims.d[3] > 0 && dims.d[4] > 0) {
+                    sess->nbVideoFrames = (int)dims.d[1];
+                    sess->modelH = (int)dims.d[3];
+                    sess->modelW = (int)dims.d[4];
+                    LOG_INFO("TRT: fixed 5D engine: F=", sess->nbVideoFrames,
+                             " ", sess->modelW, "×", sess->modelH);
+                } else if (dims.nbDims == 4 && dims.d[2] > 0 && dims.d[3] > 0) {
+                    sess->modelH = (int)dims.d[2];
+                    sess->modelW = (int)dims.d[3];
+                    LOG_INFO("TRT: fixed 4D engine: ", sess->modelW, "×", sess->modelH);
+                }
             }
         }
 
@@ -623,13 +680,27 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
                     if (engineShape.d[k] < 0) { hasDyn = true; break; }
                 engineIsDynamic = hasDyn;
 
-                if (!hasDyn && engineShape.nbDims == 4) {
+                if (engineShape.nbDims == 5) {
+                    // 5D video engine: [B, F, C, H, W]
+                    int F = (engineShape.d[1] > 0) ? (int)engineShape.d[1] : 1;
+                    sess->nbVideoFrames = F;
+                    if (!hasDyn && engineShape.d[3] > 0 && engineShape.d[4] > 0) {
+                        sess->modelH = (int)engineShape.d[3];
+                        sess->modelW = (int)engineShape.d[4];
+                        LOG_INFO("TRT: fixed 5D engine input: 1×", F, "×3×",
+                                 sess->modelH, "×", sess->modelW);
+                    } else {
+                        LOG_INFO("TRT: dynamic 5D engine input — F=", F,
+                                 " OPT: 1×", F, "×3×",
+                                 sess->modelH, "×", sess->modelW);
+                    }
+                } else if (!hasDyn && engineShape.nbDims == 4) {
                     sess->modelH = (int)engineShape.d[2];
                     sess->modelW = (int)engineShape.d[3];
-                    LOG_INFO("TRT: fixed-shape engine input: 1×3×",
+                    LOG_INFO("TRT: fixed 4D engine input: 1×3×",
                              sess->modelH, "×", sess->modelW);
                 } else {
-                    LOG_INFO("TRT: dynamic engine input — OPT: 1×3×",
+                    LOG_INFO("TRT: dynamic 4D engine input — OPT: 1×3×",
                              sess->modelH, "×", sess->modelW);
                 }
             }
@@ -661,18 +732,28 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         // it called with mismatched dims — TRT uses the compiled-in shape.
         if (!sess->inputName.empty()) {
             if (engineIsDynamic) {
-                nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
-                bool ok = sess->context->setInputShape(sess->inputName.c_str(), d);
+                int F = (sess->nbVideoFrames > 0) ? sess->nbVideoFrames : 1;
+                bool ok = false;
+                if (F > 1) {
+                    // 5D: [1, F, 3, H, W]
+                    nvinfer1::Dims d{}; d.nbDims = 5;
+                    d.d[0]=1; d.d[1]=F; d.d[2]=3;
+                    d.d[3]=sess->modelH; d.d[4]=sess->modelW;
+                    ok = sess->context->setInputShape(sess->inputName.c_str(), d);
+                    LOG_INFO("TRT: context input shape: 1×", F, "×3×",
+                             sess->modelH, "×", sess->modelW);
+                } else {
+                    nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
+                    ok = sess->context->setInputShape(sess->inputName.c_str(), d);
+                    LOG_INFO("TRT: context input shape: 1×3×",
+                             sess->modelH, "×", sess->modelW);
+                }
                 if (!ok) {
-                    LOG_ERR("TRT: setInputShape(", sess->modelH, "×", sess->modelW,
-                            ") failed — check depthMaxDim vs engine profile.");
+                    LOG_ERR("TRT: setInputShape failed — check depthMaxDim vs engine profile.");
                     return E_FAIL;
                 }
-                LOG_INFO("TRT: context input shape set: 1×3×",
-                         sess->modelH, "×", sess->modelW);
             } else {
-                LOG_INFO("TRT: fixed-shape — skipping setInputShape; engine dims: 1×3×",
-                         sess->modelH, "×", sess->modelW);
+                LOG_INFO("TRT: fixed-shape — skipping setInputShape.");
             }
         }
     }
@@ -687,19 +768,32 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     LOG_INFO("TRT-RTX: model ", engineIsDynamic ? "DYNAMIC" : "FIXED",
              " dims: ", sess->modelW, "×", sess->modelH);
 
+    // ── Scale input buffer for video models (5D: [B,F,C,H,W]) ─────────────────
+    {
+        int F = (sess->nbVideoFrames > 0) ? sess->nbVideoFrames : 1;
+        if (F > 1) {
+            inputBufSz  *= (size_t)F;
+            outputBufSz *= (size_t)F;   // output is also [B,F,H,W]
+            LOG_INFO("TRT: video model F=", F, " — input_buf=", inputBufSz/1024, " KB");
+        } else {
+            LOG_INFO("TRT: input_buf=", inputBufSz/1024, " KB");
+        }
+    }
+
     // ── Allocate device/host memory ───────────────────────────────────────────
     // Dynamic: allocate at dmd×dmd MAX so any frame within the profile fits.
     // Fixed:   allocate exactly at the engine's fixed dims.
     if (engineIsDynamic) {
-        sess->inputBytes  = inputBufSz;   // dmd×dmd×3ch×4B
-        sess->outputBytes = outputBufSz;  // dmd×dmd×1ch×4B
+        sess->inputBytes  = inputBufSz;
+        sess->outputBytes = outputBufSz;
         LOG_INFO("TRT-RTX: dynamic — buffer MAX=", dmd, "×", dmd,
                  " input=", sess->inputBytes/1024, " KB");
     } else {
-        sess->inputBytes  = sizeof(float) * 3 * sess->modelH * sess->modelW;
-        sess->outputBytes = sizeof(float) * 1 * sess->modelH * sess->modelW;
+        int F = (sess->nbVideoFrames > 0) ? sess->nbVideoFrames : 1;
+        sess->inputBytes  = sizeof(float) * (size_t)F * 3 * sess->modelH * sess->modelW;
+        sess->outputBytes = sizeof(float) * (size_t)F * 1 * sess->modelH * sess->modelW;
         LOG_INFO("TRT-RTX: fixed — buffer=", sess->modelW, "×", sess->modelH,
-                 " input=", sess->inputBytes/1024, " KB");
+                 " F=", F, " input=", sess->inputBytes/1024, " KB");
     }
     cerr = cudaMalloc(reinterpret_cast<void**>(&sess->d_input),  sess->inputBytes);
     if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMalloc(input) failed (", cerr, ")"); return E_FAIL; }
@@ -745,6 +839,15 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
              "  in=", sess->inputIdx, " out=", sess->outputIdx,
              "  dummy slots=", sess->nbBindings - 2);
 
+    // Init video frame ring buffer
+    if (sess->nbVideoFrames > 1) {
+        int F = sess->nbVideoFrames;
+        size_t frameElems = (size_t)3 * sess->modelH * sess->modelW;
+        sess->frameRing.assign(F, std::vector<float>(frameElems, 0.5f));
+        LOG_INFO("TRT: video frame ring initialised: F=", F,
+                 " each=", frameElems * sizeof(float) / 1024, " KB");
+    }
+
     m_trtRtx     = std::move(sess);
     m_inputName  = m_trtRtx->inputName;
     m_outputName = m_trtRtx->outputName;
@@ -771,63 +874,103 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          DepthResult& result) {
     auto& s = *m_trtRtx;
 
+    // Preprocess current frame → [3,mh,mw] CHW float tensor
     std::vector<float> inputTensor;
     int mw, mh;
     PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR, inputTensor, mw, mh);
+    size_t frameElems = (size_t)3 * mw * mh;
 
-    size_t uploadBytes = inputTensor.size() * sizeof(float);
-    if (uploadBytes > s.inputBytes) {
-        LOG_ERR("TRT-RTX: input tensor (", uploadBytes, ") exceeds allocated buffer (",
-                s.inputBytes, "). Re-run Reload to rebuild the engine with larger profile.");
-        return E_FAIL;
-    }
+    auto postprocess = [&](const float* raw, int rw, int rh) -> HRESULT {
+        std::vector<float> out(srcW * srcH);
+        PostprocessDepth(raw, rw, rh, srcW, srcH, flipDepth, out,
+                         depthJBU ? srcData : nullptr, srcStride, depthJBU,
+                         depthDilate, depthEdgeThresh);
+        if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
+            TemporalSmooth(out, smoothAlpha);
+        result.data = std::move(out);
+        result.width = srcW; result.height = srcH;
+        return S_OK;
+    };
 
-    // For dynamic engines: update context shape if dims differ frame-to-frame.
-    // For fixed-shape engines: shape is baked in — never call setInputShape.
-    if (m_dynamicInput && (mw != s.modelW || mh != s.modelH)) {
-        nvinfer1::Dims4 d{1, 3, mh, mw};
-        if (!s.context->setInputShape(s.inputName.c_str(), d)) {
-            LOG_ERR("TRT-RTX: setInputShape(", mh, "×", mw, ") failed per-frame.");
+    if (s.nbVideoFrames > 1) {
+        // ── 5D video model: [1, F, 3, H, W] ──────────────────────────────────
+        int F = s.nbVideoFrames;
+
+        // Resize ring if needed (shape change or first call)
+        if ((int)s.frameRing.size() != F ||
+            (!s.frameRing.empty() && s.frameRing[0].size() != frameElems)) {
+            s.frameRing.assign(F, std::vector<float>(frameElems, 0.5f));
+            s.frameRingPos  = 0;
+            s.frameRingFull = false;
+        }
+        s.frameRing[s.frameRingPos] = inputTensor;
+        s.frameRingPos = (s.frameRingPos + 1) % F;
+        if (!s.frameRingFull && s.frameRingPos == 0) s.frameRingFull = true;
+
+        // Assemble [1,F,3,H,W] in chronological order (oldest→newest)
+        std::vector<float> videoInput((size_t)F * frameElems);
+        for (int fi = 0; fi < F; ++fi) {
+            int slot = (s.frameRingPos + fi) % F;
+            std::memcpy(videoInput.data() + (size_t)fi * frameElems,
+                        s.frameRing[slot].data(), frameElems * sizeof(float));
+        }
+
+        // Update context shape for dynamic video engines
+        if (m_dynamicInput && (mw != s.modelW || mh != s.modelH)) {
+            nvinfer1::Dims d{}; d.nbDims = 5;
+            d.d[0]=1; d.d[1]=F; d.d[2]=3; d.d[3]=mh; d.d[4]=mw;
+            if (!s.context->setInputShape(s.inputName.c_str(), d))
+                LOG_WARN("TRT: 5D setInputShape failed.");
+            else { s.modelW = mw; s.modelH = mh; }
+        }
+
+        size_t uploadBytes = videoInput.size() * sizeof(float);
+        if (uploadBytes > s.inputBytes) {
+            LOG_ERR("TRT-RTX: video input (", uploadBytes, ") > buffer (", s.inputBytes, ")");
             return E_FAIL;
         }
-        s.modelW = mw; s.modelH = mh;
+        cudaError_t cerr = cudaMemcpyAsync(s.d_input, videoInput.data(), uploadBytes,
+                                            cudaMemcpyHostToDevice, s.stream);
+        if (cerr != cudaSuccess) return E_FAIL;
+        if (!s.context->executeV2(s.bindings.data())) {
+            LOG_ERR("TRT-RTX: executeV2 (video) failed."); return E_FAIL;
+        }
+        // Output: [1, F, H, W] — download all, then point at last frame
+        size_t outFrameElems = (size_t)mw * mh;
+        size_t downloadBytes = sizeof(float) * (size_t)F * outFrameElems;
+        cerr = cudaMemcpy(s.h_output, s.d_output, downloadBytes, cudaMemcpyDeviceToHost);
+        if (cerr != cudaSuccess) return E_FAIL;
+        // Use last temporal frame (most temporally aligned to current input)
+        const float* lastFrame = s.h_output + (size_t)(F - 1) * outFrameElems;
+        return postprocess(lastFrame, mw, mh);
+
+    } else {
+        // ── 4D standard model: [1, 3, H, W] ──────────────────────────────────
+        if (m_dynamicInput && (mw != s.modelW || mh != s.modelH)) {
+            nvinfer1::Dims4 d{1, 3, mh, mw};
+            if (!s.context->setInputShape(s.inputName.c_str(), d)) {
+                LOG_ERR("TRT-RTX: setInputShape(", mh, "×", mw, ") failed per-frame.");
+                return E_FAIL;
+            }
+            s.modelW = mw; s.modelH = mh;
+        }
+
+        size_t uploadBytes = inputTensor.size() * sizeof(float);
+        if (uploadBytes > s.inputBytes) {
+            LOG_ERR("TRT-RTX: input (", uploadBytes, ") > buffer (", s.inputBytes, ")");
+            return E_FAIL;
+        }
+        cudaError_t cerr = cudaMemcpyAsync(s.d_input, inputTensor.data(), uploadBytes,
+                                            cudaMemcpyHostToDevice, s.stream);
+        if (cerr != cudaSuccess) return E_FAIL;
+        if (!s.context->executeV2(s.bindings.data())) {
+            LOG_ERR("TRT-RTX: executeV2 failed."); return E_FAIL;
+        }
+        size_t downloadBytes = sizeof(float) * mw * mh;
+        cerr = cudaMemcpy(s.h_output, s.d_output, downloadBytes, cudaMemcpyDeviceToHost);
+        if (cerr != cudaSuccess) return E_FAIL;
+        return postprocess(s.h_output, mw, mh);
     }
-
-    cudaError_t cerr = cudaMemcpyAsync(
-        s.d_input, inputTensor.data(), uploadBytes,
-        cudaMemcpyHostToDevice, s.stream);
-    if (cerr != cudaSuccess) {
-        LOG_ERR("TRT-RTX: cudaMemcpyAsync(HtoD) failed (", cerr, ")");
-        return E_FAIL;
-    }
-
-    // Use the pre-built bindings vector (input→d_input, output→d_output,
-    // all other outputs→d_dummy). TRT10 requires every output to be non-null.
-    if (!s.context->executeV2(s.bindings.data())) {
-        LOG_ERR("TRT-RTX: executeV2 failed.");
-        return E_FAIL;
-    }
-
-    size_t downloadBytes = sizeof(float) * mw * mh;
-    cerr = cudaMemcpy(s.h_output, s.d_output, downloadBytes, cudaMemcpyDeviceToHost);
-    if (cerr != cudaSuccess) {
-        LOG_ERR("TRT-RTX: cudaMemcpy(DtoH) failed (", cerr, ")");
-        return E_FAIL;
-    }
-
-    // Postprocess: same pipeline as ORT path; pass srcData as JBU guide
-    std::vector<float> out(srcW * srcH);
-    PostprocessDepth(s.h_output, mw, mh, srcW, srcH, flipDepth, out,
-                     depthJBU ? srcData : nullptr, srcStride, depthJBU,
-                     depthDilate, depthEdgeThresh);
-
-    if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
-        TemporalSmooth(out, smoothAlpha);
-
-    result.data   = std::move(out);
-    result.width  = srcW;
-    result.height = srcH;
-    return S_OK;
 }
 
 #endif // ORT_ENABLE_TRTRTX
@@ -1812,6 +1955,81 @@ void DepthEstimator::PostprocessDepth(const float* raw,
 
     if (depthDilate > 0)
         DilateDepth(depth, dstW, dstH, depthDilate, depthEdgeThresh);
+}
+
+// ── JBUResize ─────────────────────────────────────────────────────────────────
+// Joint Bilateral Upsampling (Kopf et al. 2007).
+// Upscales a low-res depth map (sw×sh) to full-res (dw×dh) using a full-res
+// RGB guide image to preserve colour-aligned edges.
+//
+// For each output pixel p:
+//   depth[p] = Σ_q  w_s(p,q) · w_c(p,q) · src[q]  /  Σ weights
+//   w_s = spatial Gaussian  exp(-dist²  / 2σ_s²)
+//   w_c = colour  Gaussian  exp(-Δcol² / 2σ_c²)
+//
+// σ_s ≈ 1.0 low-res pixels (kernel radius 2 → covers ±2 low-res samples)
+// σ_c ≈ 0.1 (colour range [0,1]; edges ≥ 0.2 luma contrast get sharp cutoff)
+//
+// Performance: O(W·H·kernel²) — at 1920×1080 with kernel=5×5 ≈ 50M mpy/frame.
+// Acceptable for background thread; ~8 ms on a modern CPU core.
+void DepthEstimator::JBUResize(const float* src, int sw, int sh,
+                                const BYTE* guide, int gw, int gh, int guideStride,
+                                float* dst, int dw, int dh) {
+    // Lookup tables for spatial and colour Gaussians
+    // Spatial: σ_s = 1.0 low-res px; kernel radius = 2 → 5×5 samples
+    const int   kR   = 2;
+    const float sig_s = 1.0f;
+    const float sig_c = 0.1f;
+    const float inv2ss = 0.5f / (sig_s * sig_s);
+    const float inv2sc = 0.5f / (sig_c * sig_c);
+
+    // Pre-compute spatial weights for the (2kR+1)×(2kR+1) kernel
+    const int kSz = 2 * kR + 1;
+    float spat[kSz * kSz];
+    for (int ky = -kR; ky <= kR; ++ky)
+        for (int kx = -kR; kx <= kR; ++kx)
+            spat[(ky+kR)*kSz+(kx+kR)] = std::exp(-((float)(kx*kx+ky*ky))*inv2ss);
+
+    // Scale factors: output pixel (dx,dy) → low-res position (fx,fy)
+    float scaleX = (float)sw / dw;
+    float scaleY = (float)sh / dh;
+
+    for (int dy = 0; dy < dh; ++dy) {
+        float fy = (dy + 0.5f) * scaleY - 0.5f;
+        int   cy = (int)std::round(fy);   // nearest low-res row
+
+        for (int dx = 0; dx < dw; ++dx) {
+            float fx = (dx + 0.5f) * scaleX - 0.5f;
+            int   cx = (int)std::round(fx);   // nearest low-res col
+
+            // Guide luma at full-res pixel (dx,dy) — used as reference colour
+            const BYTE* gp = guide + dy * guideStride + dx * 4;
+            // BT.601 luma in [0,1]
+            float gRef = (gp[0] * 0.114f + gp[1] * 0.587f + gp[2] * 0.299f) / 255.f;
+
+            float sum = 0.f, wsum = 0.f;
+            for (int ky = -kR; ky <= kR; ++ky) {
+                int sy = std::max(0, std::min(cy + ky, sh - 1));
+                for (int kx = -kR; kx <= kR; ++kx) {
+                    int sx = std::max(0, std::min(cx + kx, sw - 1));
+
+                    // Guide luma at the low-res sample's corresponding full-res position
+                    int gpx = std::min((int)((sx + 0.5f) / scaleX), gw - 1);
+                    int gpy = std::min((int)((sy + 0.5f) / scaleY), gh - 1);
+                    const BYTE* sp = guide + gpy * guideStride + gpx * 4;
+                    float gSmp = (sp[0] * 0.114f + sp[1] * 0.587f + sp[2] * 0.299f) / 255.f;
+
+                    float dc = gRef - gSmp;
+                    float wc = std::exp(-(dc*dc)*inv2sc);
+                    float ws = spat[(ky+kR)*kSz+(kx+kR)];
+                    float w  = ws * wc;
+                    sum  += w * src[sy * sw + sx];
+                    wsum += w;
+                }
+            }
+            dst[dy * dw + dx] = (wsum > 1e-6f) ? sum / wsum : src[cy * sw + cx];
+        }
+    }
 }
 
 // ── BilinearResize ─────────────────────────────────────────────────────────────
