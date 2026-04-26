@@ -342,9 +342,16 @@ struct DepthEstimator::TrtRtxSession {
     TrtBuilderPtr   pendingBuilder;
     TrtNetworkPtr   pendingNetwork;
     TrtConfigPtr    pendingConfig;
-    // Factory fn pointers are stored so FinishBuild can call createInferRuntime
+    // Factory fn pointers + ONNX path stored for FP32 retry in FinishTrtBuild.
+    // After a failed FP16 build the network/config objects are internally corrupted,
+    // so the retry must re-parse from the original ONNX file.
     using FnMkRuntime = nvinfer1::IRuntime* (*)(void*, int32_t);
+    using FnMkBuilder = nvinfer1::IBuilder* (*)(void*, int32_t);
+    using FnMkParser  = nvonnxparser::IParser* (*)(void*, void*, int32_t);
     FnMkRuntime fnMkRuntime = nullptr;
+    FnMkBuilder fnMkBuilder = nullptr;
+    FnMkParser  fnMkParser  = nullptr;
+    std::string pendingOnnxPath;   // UTF-8 path used by re-parse
 
     ~TrtRtxSession() { Destroy(); }
     void Destroy() {
@@ -618,6 +625,9 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         sess->pendingNetwork  = std::move(network);
         sess->pendingConfig   = std::move(cfg);
         sess->fnMkRuntime     = fnMkRuntime;
+        sess->fnMkBuilder     = fnMkBuilder;
+        sess->fnMkParser      = fnMkParser;
+        sess->pendingOnnxPath = std::string(onnxPath.begin(), onnxPath.end());
         sess->needsBuild      = true;
         LOG_INFO("TRT: engine build deferred to worker thread (may take several minutes).");
         LOG_INFO("  Flat depth will be shown during compilation.");
@@ -867,30 +877,85 @@ HRESULT DepthEstimator::FinishTrtBuild() {
     LOG_INFO("TRT: starting deferred engine build on worker thread...");
     LOG_INFO("  This may take several minutes. Flat depth shown during compilation.");
 
-    // Attempt FP16 first; if the shape analyser fails (common on SM75 with
-    // attention-heavy models like VideoDepthAnything), clear the flag and retry
-    // in FP32.  FP32 is always safe but ~2× slower.
+    // Attempt FP16 first.
     TrtHostMemPtr serialized(
         s.pendingBuilder->buildSerializedNetwork(*s.pendingNetwork, *s.pendingConfig));
 
     if (!serialized) {
-        LOG_WARN("TRT: FP16 build failed (shape analyser error on SM75?).");
-        LOG_INFO("TRT: retrying in FP32 — slower but always correct.");
+        LOG_WARN("TRT: FP16 build failed (graphShapeAnalyzer assertion — known TRT 10 bug).");
+        LOG_INFO("TRT: retrying in FP32 with a fresh parse (network may be corrupted after failed build).");
 
-        // Clear FP16 flag in config
-        s.pendingConfig->clearFlag(nvinfer1::BuilderFlag::kFP16);
-        // Update engine cache path to _fp32 variant so it doesn't collide
-        {
-            auto& ep = s.enginePath;
-            auto pos = ep.rfind("_fp16.bin");
-            if (pos != std::string::npos) ep.replace(pos, 9, "_fp32.bin");
+        // CRITICAL: after a failed buildSerializedNetwork the INetworkDefinition and
+        // IBuilderConfig are internally corrupted — reusing them causes the same crash.
+        // We must destroy all three objects and re-parse the ONNX from scratch.
+        s.pendingNetwork.reset();
+        s.pendingConfig.reset();
+        s.pendingBuilder.reset();
+
+        // Rebuild from scratch in FP32
+        TrtBuilderPtr builder2(s.fnMkBuilder(&s.logger, NV_TENSORRT_VERSION));
+        if (!builder2) { LOG_ERR("TRT: FP32 retry — createInferBuilder failed."); s.needsBuild=false; return E_FAIL; }
+        TrtNetworkPtr network2(builder2->createNetworkV2(0U));
+        if (!network2) { LOG_ERR("TRT: FP32 retry — createNetworkV2 failed."); s.needsBuild=false; return E_FAIL; }
+        TrtParserPtr  parser2(s.fnMkParser(network2.get(), &s.logger, NV_ONNX_PARSER_VERSION));
+        if (!parser2)  { LOG_ERR("TRT: FP32 retry — createParser failed."); s.needsBuild=false; return E_FAIL; }
+
+        if (!parser2->parseFromFile(s.pendingOnnxPath.c_str(),
+                static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+            LOG_ERR("TRT: FP32 retry — ONNX parse failed.");
+            s.needsBuild=false; return E_FAIL;
+        }
+        LOG_INFO("TRT: FP32 re-parse OK.");
+
+        TrtConfigPtr cfg2(builder2->createBuilderConfig());
+        if (!cfg2) { LOG_ERR("TRT: FP32 retry — createBuilderConfig failed."); s.needsBuild=false; return E_FAIL; }
+        // FP32 only — do NOT set kFP16
+        cfg2->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)8 << 30);
+
+        // Re-apply the same optimization profile (re-read dims from fresh network)
+        if (network2->getNbInputs() > 0) {
+            auto* inp = network2->getInput(0);
+            auto  dims = inp->getDimensions();
+            bool hasDyn = false;
+            for (int k=0;k<dims.nbDims;++k) if(dims.d[k]<0){hasDyn=true;break;}
+            if (hasDyn) {
+                auto* profile = builder2->createOptimizationProfile();
+                int dmd = (s.depthMaxDim>0)?s.depthMaxDim:1022;
+                int base = 14;
+                if (dims.nbDims == 5) {
+                    int F=(dims.d[1]>0)?(int)dims.d[1]:1;
+                    int sH=(dims.d[3]>0)?(int)dims.d[3]:s.modelH;
+                    int sW=(dims.d[4]>0)?(int)dims.d[4]:s.modelW;
+                    int mnH=(dims.d[3]>0)?sH:base, mnW=(dims.d[4]>0)?sW:base;
+                    int mxH=(dims.d[3]>0)?sH:dmd,  mxW=(dims.d[4]>0)?sW:dmd;
+                    auto d5=[](int b,int f,int c,int h,int w){
+                        nvinfer1::Dims d{}; d.nbDims=5;
+                        d.d[0]=b;d.d[1]=f;d.d[2]=c;d.d[3]=h;d.d[4]=w; return d;};
+                    profile->setDimensions(inp->getName(),nvinfer1::OptProfileSelector::kMIN,d5(1,F,3,mnH,mnW));
+                    profile->setDimensions(inp->getName(),nvinfer1::OptProfileSelector::kOPT,d5(1,F,3,sH,sW));
+                    profile->setDimensions(inp->getName(),nvinfer1::OptProfileSelector::kMAX,d5(1,F,3,mxH,mxW));
+                } else {
+                    float sc=std::min((float)dmd/1920,(float)dmd/1080);
+                    int oW=std::min(dmd,std::max(base,(int)std::round(1920*sc/base)*base));
+                    int oH=std::min(dmd,std::max(base,(int)std::round(1080*sc/base)*base));
+                    profile->setDimensions(inp->getName(),nvinfer1::OptProfileSelector::kMIN,nvinfer1::Dims4{1,3,base,base});
+                    profile->setDimensions(inp->getName(),nvinfer1::OptProfileSelector::kOPT,nvinfer1::Dims4{1,3,oH,oW});
+                    profile->setDimensions(inp->getName(),nvinfer1::OptProfileSelector::kMAX,nvinfer1::Dims4{1,3,dmd,dmd});
+                }
+                cfg2->addOptimizationProfile(profile);
+            }
         }
 
-        serialized.reset(
-            s.pendingBuilder->buildSerializedNetwork(*s.pendingNetwork, *s.pendingConfig));
+        // Update cache path to _fp32 variant
+        {
+            auto pos = s.enginePath.rfind("_fp16.bin");
+            if (pos != std::string::npos) s.enginePath.replace(pos, 9, "_fp32.bin");
+        }
+        LOG_INFO("TRT: FP32 buildSerializedNetwork starting...");
+        serialized.reset(builder2->buildSerializedNetwork(*network2, *cfg2));
     }
 
-    // Release pending objects regardless of outcome
+    // Release all pending objects regardless of outcome
     s.pendingNetwork.reset();
     s.pendingConfig.reset();
     s.pendingBuilder.reset();
