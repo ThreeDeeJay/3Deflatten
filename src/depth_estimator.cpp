@@ -867,16 +867,36 @@ HRESULT DepthEstimator::FinishTrtBuild() {
     LOG_INFO("TRT: starting deferred engine build on worker thread...");
     LOG_INFO("  This may take several minutes. Flat depth shown during compilation.");
 
-    // buildSerializedNetwork — the slow step
+    // Attempt FP16 first; if the shape analyser fails (common on SM75 with
+    // attention-heavy models like VideoDepthAnything), clear the flag and retry
+    // in FP32.  FP32 is always safe but ~2× slower.
     TrtHostMemPtr serialized(
         s.pendingBuilder->buildSerializedNetwork(*s.pendingNetwork, *s.pendingConfig));
+
+    if (!serialized) {
+        LOG_WARN("TRT: FP16 build failed (shape analyser error on SM75?).");
+        LOG_INFO("TRT: retrying in FP32 — slower but always correct.");
+
+        // Clear FP16 flag in config
+        s.pendingConfig->clearFlag(nvinfer1::BuilderFlag::kFP16);
+        // Update engine cache path to _fp32 variant so it doesn't collide
+        {
+            auto& ep = s.enginePath;
+            auto pos = ep.rfind("_fp16.bin");
+            if (pos != std::string::npos) ep.replace(pos, 9, "_fp32.bin");
+        }
+
+        serialized.reset(
+            s.pendingBuilder->buildSerializedNetwork(*s.pendingNetwork, *s.pendingConfig));
+    }
+
     // Release pending objects regardless of outcome
     s.pendingNetwork.reset();
     s.pendingConfig.reset();
     s.pendingBuilder.reset();
 
     if (!serialized) {
-        LOG_ERR("TRT: buildSerializedNetwork returned null.");
+        LOG_ERR("TRT: buildSerializedNetwork returned null (both FP16 and FP32 failed).");
         LOG_ERR("  Check above [TRT] WARNING/ERROR lines for the root cause.");
         s.needsBuild = false;
         return E_FAIL;
