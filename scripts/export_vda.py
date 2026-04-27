@@ -200,7 +200,7 @@ def export(args):
     # Detect if it's natively a video model (has 5D input support)
     native_video = False
     try:
-        probe = torch.zeros(1, args.frames, 3, args.height, args.width, device=device)
+        probe = torch.rand(1, args.frames, 3, args.height, args.width, device=device)
         with torch.no_grad(): base_model(probe)
         native_video = True
         print("[INFO] Model natively accepts 5D [B,F,3,H,W] input.")
@@ -217,7 +217,10 @@ def export(args):
     simplified_path = out_dir / f"{stem}_simplified.onnx"
 
     # ── Export to ONNX ────────────────────────────────────────────────────────
-    dummy = torch.zeros(1, args.frames, 3, args.height, args.width, device=device)
+    # IMPORTANT: use rand, not zeros.  torch.onnx.export with do_constant_folding=True
+    # will fold the entire network to all-zeros if the input is all-zeros, producing
+    # a valid ONNX that always outputs zero depth (completely corrupted).
+    dummy = torch.rand(1, args.frames, 3, args.height, args.width, device=device)
     print(f"[INFO] Exporting ONNX: {onnx_path}")
     print(f"       input shape: [1, {args.frames}, 3, {args.height}, {args.width}]")
 
