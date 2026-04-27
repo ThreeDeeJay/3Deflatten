@@ -505,132 +505,20 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
 
     // ── Build engine from ONNX if no valid cache ──────────────────────────────
     if (!engineLoaded) {
-        // ── Deferred build path ────────────────────────────────────────────────
-        // Engine compilation can take 1-10 minutes for large models.
-        // We do NOT call buildSerializedNetwork here — that would block the
-        // DirectShow graph thread and freeze the host application.
-        // Instead: parse the ONNX, build the optimisation profile, store the
-        // pending builder/network/config in the session, and set needsBuild=true.
-        // FinishTrtBuild() is called on the first EstimateTrtRtx from the depth
-        // worker thread; during the build the worker returns E_PENDING so the
-        // filter outputs flat depth (no hang, no freeze).
-
-        TrtBuilderPtr builder(fnMkBuilder(&sess->logger, NV_TENSORRT_VERSION));
-        if (!builder) { LOG_ERR("TRT: createInferBuilder returned null."); return E_FAIL; }
-        LOG_INFO("TRT-RTX: builder created.");
-
-        TrtNetworkPtr network(builder->createNetworkV2(0U));
-        if (!network) { LOG_ERR("TRT-RTX: createNetworkV2 returned null."); return E_FAIL; }
-        LOG_INFO("TRT-RTX: network created.");
-
-        TrtParserPtr parser(fnMkParser(network.get(), &sess->logger, NV_ONNX_PARSER_VERSION));
-        if (!parser) { LOG_ERR("TRT: createParser returned null."); return E_FAIL; }
-        LOG_INFO("TRT-RTX: parser created. Parsing ONNX...");
-        std::string onnxA(onnxPath.begin(), onnxPath.end());
-        if (!parser->parseFromFile(onnxA.c_str(),
-                static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
-            LOG_ERR("TRT-RTX: ONNX parse failed.");
-            int ne = parser->getNbErrors();
-            for (int i = 0; i < ne; ++i)
-                LOG_ERR("  Parse error[", i, "]: ", parser->getError(i)->desc());
-            return E_FAIL;
-        }
-        LOG_INFO("TRT-RTX: ONNX parsed OK.  Inputs=", network->getNbInputs(),
-                 " Outputs=", network->getNbOutputs());
-
-        for (int i = 0; i < network->getNbInputs(); ++i) {
-            auto* t = network->getInput(i);
-            auto  d = t->getDimensions();
-            std::string ds;
-            for (int k = 0; k < d.nbDims; ++k) ds += std::to_string(d.d[k]) + " ";
-            LOG_INFO("  Input[", i, "]: '", t->getName(), "' dims=[", ds, "]");
-        }
-        for (int i = 0; i < network->getNbOutputs(); ++i)
-            LOG_INFO("  Output[", i, "]: '", network->getOutput(i)->getName(), "'");
-
-        TrtConfigPtr cfg(builder->createBuilderConfig());
-        if (!cfg) { LOG_ERR("TRT-RTX: createBuilderConfig returned null."); return E_FAIL; }
-
-        cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
-        // 8 GB workspace — VideoDepthAnything-small needs ~4.75 GB activation
-        cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)8 << 30);
-        LOG_INFO("TRT-RTX: FP16 enabled, workspace=8GB.");
-
-        // Build optimization profile (same logic as before, updates sess dims/F)
-        if (network->getNbInputs() > 0) {
-            auto* inp = network->getInput(0);
-            auto  dims = inp->getDimensions();
-            bool hasDynamic = false;
-            for (int k = 0; k < dims.nbDims; ++k)
-                if (dims.d[k] < 0) { hasDynamic = true; break; }
-
-            auto makeDims5 = [](int b, int f, int c, int h, int w) {
-                nvinfer1::Dims d{}; d.nbDims = 5;
-                d.d[0]=b; d.d[1]=f; d.d[2]=c; d.d[3]=h; d.d[4]=w;
-                return d;
-            };
-
-            auto buildProfile = [&](nvinfer1::IOptimizationProfile* profile) {
-                if (dims.nbDims == 5) {
-                    int F = (dims.d[1] > 0) ? (int)dims.d[1] : 1;
-                    sess->nbVideoFrames = F;
-                    int spatialH = (dims.d[3] > 0) ? (int)dims.d[3] : optH;
-                    int spatialW = (dims.d[4] > 0) ? (int)dims.d[4] : optW;
-                    int minH = (dims.d[3] > 0) ? spatialH : base;
-                    int minW = (dims.d[4] > 0) ? spatialW : base;
-                    int maxH = (dims.d[3] > 0) ? spatialH : dmd;
-                    int maxW = (dims.d[4] > 0) ? spatialW : dmd;
-                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMIN,
-                        makeDims5(1,F,3,minH,minW));
-                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kOPT,
-                        makeDims5(1,F,3,spatialH,spatialW));
-                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMAX,
-                        makeDims5(1,F,3,maxH,maxW));
-                    sess->modelH = spatialH; sess->modelW = spatialW;
-                    LOG_INFO("TRT: 5D video profile F=", F,
-                             " spatial=", spatialW, "×", spatialH,
-                             " (min=", minW, "×", minH, " max=", maxW, "×", maxH, ")");
-                } else {
-                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMIN,
-                        nvinfer1::Dims4{1,3,base,base});
-                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kOPT,
-                        nvinfer1::Dims4{1,3,optH,optW});
-                    profile->setDimensions(inp->getName(), nvinfer1::OptProfileSelector::kMAX,
-                        nvinfer1::Dims4{1,3,dmd,dmd});
-                    LOG_INFO("TRT: 4D profile min=14×14 opt=", optW, "×", optH,
-                             " max=", dmd, "×", dmd);
-                }
-            };
-
-            if (hasDynamic) {
-                auto* profile = builder->createOptimizationProfile();
-                buildProfile(profile);
-                cfg->addOptimizationProfile(profile);
-            } else {
-                if (dims.nbDims == 5 && dims.d[3] > 0 && dims.d[4] > 0) {
-                    sess->nbVideoFrames = (int)dims.d[1];
-                    sess->modelH = (int)dims.d[3]; sess->modelW = (int)dims.d[4];
-                    LOG_INFO("TRT: fixed 5D: F=", sess->nbVideoFrames,
-                             " ", sess->modelW, "×", sess->modelH);
-                } else if (dims.nbDims == 4 && dims.d[2] > 0 && dims.d[3] > 0) {
-                    sess->modelH = (int)dims.d[2]; sess->modelW = (int)dims.d[3];
-                    LOG_INFO("TRT: fixed 4D: ", sess->modelW, "×", sess->modelH);
-                }
-            }
-        }
-
-        // Store pending objects; FinishTrtBuild() will call buildSerializedNetwork
-        // on the depth worker thread.
-        sess->pendingBuilder  = std::move(builder);
-        sess->pendingNetwork  = std::move(network);
-        sess->pendingConfig   = std::move(cfg);
+        // ── Fully deferred build ──────────────────────────────────────────────
+        // TRT builder/parser objects have thread affinity — creating them on the
+        // DirectShow graph thread and then calling buildSerializedNetwork on the
+        // worker thread causes silent FP16 failures and shape-analyser assertions.
+        // Solution: store only the factory function pointers and ONNX path here.
+        // FinishTrtBuild() on the worker thread creates ALL TRT objects from scratch.
         sess->fnMkRuntime     = fnMkRuntime;
         sess->fnMkBuilder     = fnMkBuilder;
         sess->fnMkParser      = fnMkParser;
         sess->pendingOnnxPath = std::string(onnxPath.begin(), onnxPath.end());
         sess->needsBuild      = true;
-        LOG_INFO("TRT: engine build deferred to worker thread (may take several minutes).");
+        LOG_INFO("TRT: build fully deferred to worker thread (may take several minutes).");
         LOG_INFO("  Flat depth will be shown during compilation.");
+        // sess->modelW/H/nbVideoFrames stay at defaults; FinishTrtBuild resolves them.
     }
 
     // ── Create execution context (skip if build is deferred) ─────────────────
@@ -874,8 +762,246 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
 // from LoadTrtRtxNative to avoid blocking the DirectShow graph thread.
 HRESULT DepthEstimator::FinishTrtBuild() {
     auto& s = *m_trtRtx;
-    LOG_INFO("TRT: starting deferred engine build on worker thread...");
-    LOG_INFO("  This may take several minutes. Flat depth shown during compilation.");
+    LOG_INFO("TRT: starting engine build on worker thread...");
+    LOG_INFO("  Flat depth shown until complete.");
+
+    // All TRT objects must be created on this thread (TRT thread affinity).
+    // This includes builder, network, parser, config — none are passed in.
+    int dmd  = (s.depthMaxDim > 0) ? s.depthMaxDim : 1022;
+    int base = 14;
+    float sc = std::min((float)dmd/1920, (float)dmd/1080);
+    int optW = std::min(dmd, std::max(base, (int)std::round(1920*sc/base)*base));
+    int optH = std::min(dmd, std::max(base, (int)std::round(1080*sc/base)*base));
+
+    // Helper: build one engine attempt (FP16 if tryFP16, else FP32)
+    auto buildEngine = [&](bool tryFP16) -> TrtHostMemPtr {
+        const char* precision = tryFP16 ? "FP16" : "FP32";
+        LOG_INFO("TRT: creating builder (", precision, ") on worker thread...");
+
+        TrtBuilderPtr builder(s.fnMkBuilder(&s.logger, NV_TENSORRT_VERSION));
+        if (!builder) { LOG_ERR("TRT: createInferBuilder returned null."); return {}; }
+
+        TrtNetworkPtr network(builder->createNetworkV2(0U));
+        if (!network) { LOG_ERR("TRT: createNetworkV2 returned null."); return {}; }
+
+        TrtParserPtr parser(s.fnMkParser(network.get(), &s.logger, NV_ONNX_PARSER_VERSION));
+        if (!parser) { LOG_ERR("TRT: createParser returned null."); return {}; }
+
+        LOG_INFO("TRT: parsing ONNX: ", s.pendingOnnxPath);
+        if (!parser->parseFromFile(s.pendingOnnxPath.c_str(),
+                static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+            LOG_ERR("TRT: ONNX parse failed.");
+            int ne = parser->getNbErrors();
+            for (int i = 0; i < ne; ++i)
+                LOG_ERR("  [", i, "]: ", parser->getError(i)->desc());
+            return {};
+        }
+        LOG_INFO("TRT: parsed OK. Inputs=", network->getNbInputs(),
+                 " Outputs=", network->getNbOutputs());
+
+        // Log and extract input dims
+        nvinfer1::Dims inputDims{};
+        std::string inputName;
+        std::string outputName;
+        for (int i = 0; i < network->getNbInputs(); ++i) {
+            auto* t = network->getInput(i);
+            auto  d = t->getDimensions();
+            std::string ds;
+            for (int k = 0; k < d.nbDims; ++k) ds += std::to_string(d.d[k]) + " ";
+            LOG_INFO("  Input[", i, "]: '", t->getName(), "' dims=[", ds, "]");
+            if (i == 0) { inputDims = d; inputName = t->getName(); }
+        }
+        for (int i = 0; i < network->getNbOutputs(); ++i) {
+            auto* t = network->getOutput(i);
+            LOG_INFO("  Output[", i, "]: '", t->getName(), "'");
+            if (i == 0) outputName = t->getName();
+        }
+
+        // Infer nbVideoFrames and spatial dims from this fresh parse
+        int F = 1;
+        if (inputDims.nbDims == 5) {
+            F = (inputDims.d[1] > 0) ? (int)inputDims.d[1] : 1;
+            s.nbVideoFrames = F;
+            if (inputDims.d[3] > 0 && inputDims.d[4] > 0) {
+                s.modelH = (int)inputDims.d[3];
+                s.modelW = (int)inputDims.d[4];
+            }
+        } else if (inputDims.nbDims == 4) {
+            s.nbVideoFrames = 0;
+            if (inputDims.d[2] > 0 && inputDims.d[3] > 0) {
+                s.modelH = (int)inputDims.d[2];
+                s.modelW = (int)inputDims.d[3];
+            }
+        }
+
+        TrtConfigPtr cfg(builder->createBuilderConfig());
+        if (!cfg) { LOG_ERR("TRT: createBuilderConfig returned null."); return {}; }
+
+        if (tryFP16) cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
+        cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)8 << 30);
+        LOG_INFO("TRT: precision=", precision, " workspace=8GB");
+
+        // Optimization profile
+        bool hasDynamic = false;
+        for (int k = 0; k < inputDims.nbDims; ++k)
+            if (inputDims.d[k] < 0) { hasDynamic = true; break; }
+
+        if (hasDynamic) {
+            auto* profile = builder->createOptimizationProfile();
+            if (inputDims.nbDims == 5) {
+                int sH = (inputDims.d[3]>0)?(int)inputDims.d[3]:optH;
+                int sW = (inputDims.d[4]>0)?(int)inputDims.d[4]:optW;
+                int mnH=(inputDims.d[3]>0)?sH:base, mnW=(inputDims.d[4]>0)?sW:base;
+                int mxH=(inputDims.d[3]>0)?sH:dmd,  mxW=(inputDims.d[4]>0)?sW:dmd;
+                auto d5=[](int b,int f,int c,int h,int w){
+                    nvinfer1::Dims d{}; d.nbDims=5;
+                    d.d[0]=b;d.d[1]=f;d.d[2]=c;d.d[3]=h;d.d[4]=w; return d;};
+                profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kMIN,d5(1,F,3,mnH,mnW));
+                profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kOPT,d5(1,F,3,sH,sW));
+                profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kMAX,d5(1,F,3,mxH,mxW));
+                s.modelH=sH; s.modelW=sW;
+                LOG_INFO("TRT: 5D profile F=",F," spatial=",sW,"×",sH);
+            } else {
+                profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kMIN,nvinfer1::Dims4{1,3,base,base});
+                profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kOPT,nvinfer1::Dims4{1,3,optH,optW});
+                profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kMAX,nvinfer1::Dims4{1,3,dmd,dmd});
+                LOG_INFO("TRT: 4D profile opt=",optW,"×",optH," max=",dmd,"×",dmd);
+            }
+            cfg->addOptimizationProfile(profile);
+        }
+
+        LOG_INFO("TRT: buildSerializedNetwork starting (", precision, ")...");
+        TrtHostMemPtr ser(builder->buildSerializedNetwork(*network, *cfg));
+        // builder/network/cfg/parser are destroyed here on scope exit (worker thread)
+        return ser;
+    };
+
+    // ── Attempt FP16, fall back to FP32 with fresh objects ───────────────────
+    TrtHostMemPtr serialized = buildEngine(true);
+    std::string usedPrecision = "fp16";
+    if (!serialized) {
+        LOG_WARN("TRT: FP16 build failed. Retrying in FP32 with fresh TRT objects...");
+        // Update cache path to _fp32 variant
+        auto pos = s.enginePath.rfind("_fp16.bin");
+        if (pos != std::string::npos) s.enginePath.replace(pos, 9, "_fp32.bin");
+        serialized = buildEngine(false);
+        usedPrecision = "fp32";
+    }
+
+    if (!serialized) {
+        LOG_ERR("TRT: buildSerializedNetwork returned null (both FP16 and FP32 failed).");
+        s.needsBuild = false;
+        return E_FAIL;
+    }
+    LOG_INFO("TRT: engine serialized OK (", serialized->size()/1024/1024, " MB, ",
+             usedPrecision, ").");
+
+    // Save to disk
+    {
+        std::ofstream f(s.enginePath, std::ios::binary);
+        if (f) {
+            f.write(static_cast<const char*>(serialized->data()), serialized->size());
+            LOG_INFO("TRT: engine cached at: ", s.enginePath);
+        } else {
+            LOG_WARN("TRT: could not write engine cache.");
+        }
+    }
+
+    // Deserialize (also on worker thread — correct thread affinity)
+    s.runtime.reset(s.fnMkRuntime(&s.logger, NV_TENSORRT_VERSION));
+    if (!s.runtime) { LOG_ERR("TRT: createInferRuntime failed."); return E_FAIL; }
+    s.engine.reset(s.runtime->deserializeCudaEngine(serialized->data(), serialized->size()));
+    if (!s.engine) { LOG_ERR("TRT: deserializeCudaEngine failed."); return E_FAIL; }
+    LOG_INFO("TRT: engine ready.");
+
+    // ── Context, bindings, buffers (all on worker thread) ────────────────────
+    s.context.reset(s.engine->createExecutionContext());
+    if (!s.context) { LOG_ERR("TRT: createExecutionContext failed."); return E_FAIL; }
+
+    bool engineIsDynamic = false;
+    {
+        int nb = s.engine->getNbIOTensors();
+        for (int i = 0; i < nb; ++i) {
+            const char* name = s.engine->getIOTensorName(i);
+            auto mode = s.engine->getTensorIOMode(name);
+            bool isIn = (mode == nvinfer1::TensorIOMode::kINPUT);
+            LOG_INFO("TRT: tensor[", i, "] '", name, "' ", isIn ? "INPUT" : "OUTPUT");
+
+            if (isIn && s.inputIdx < 0) {
+                s.inputName = name; s.inputIdx = i;
+                auto esh = s.engine->getTensorShape(name);
+                for (int k = 0; k < esh.nbDims; ++k) if (esh.d[k]<0){engineIsDynamic=true;break;}
+                if (esh.nbDims == 5) {
+                    s.nbVideoFrames = (esh.d[1]>0)?(int)esh.d[1]:s.nbVideoFrames;
+                    if (!engineIsDynamic && esh.d[3]>0 && esh.d[4]>0)
+                        { s.modelH=(int)esh.d[3]; s.modelW=(int)esh.d[4]; }
+                } else if (!engineIsDynamic && esh.nbDims==4 && esh.d[2]>0 && esh.d[3]>0) {
+                    s.modelH=(int)esh.d[2]; s.modelW=(int)esh.d[3];
+                }
+            }
+            if (mode == nvinfer1::TensorIOMode::kOUTPUT && s.outputIdx < 0) {
+                if (s.outputName.empty() || strcmp(name,"depth")==0)
+                    { s.outputName=name; s.outputIdx=i; }
+            }
+        }
+        s.nbBindings = nb;
+
+        if (!s.inputName.empty() && engineIsDynamic) {
+            int F = (s.nbVideoFrames>0)?s.nbVideoFrames:1;
+            bool ok = (F>1) ?
+                [&]{ nvinfer1::Dims d{}; d.nbDims=5; d.d[0]=1;d.d[1]=F;d.d[2]=3;d.d[3]=s.modelH;d.d[4]=s.modelW;
+                     return s.context->setInputShape(s.inputName.c_str(),d); }()
+                :
+                s.context->setInputShape(s.inputName.c_str(), nvinfer1::Dims4{1,3,s.modelH,s.modelW});
+            if (!ok) LOG_WARN("TRT: setInputShape failed in FinishTrtBuild.");
+        }
+    }
+
+    // Buffer sizes
+    int F = (s.nbVideoFrames>0)?s.nbVideoFrames:1;
+    if (engineIsDynamic) {
+        s.inputBytes  = sizeof(float)*3*(size_t)dmd*dmd*(size_t)F;
+        s.outputBytes = sizeof(float)*1*(size_t)dmd*dmd*(size_t)F;
+    } else {
+        s.inputBytes  = sizeof(float)*3*(size_t)s.modelH*s.modelW*(size_t)F;
+        s.outputBytes = sizeof(float)*1*(size_t)s.modelH*s.modelW*(size_t)F;
+    }
+    LOG_INFO("TRT: buffer in=", s.inputBytes/1024, " KB  out=", s.outputBytes/1024, " KB");
+
+    cudaError_t cerr;
+    cerr=cudaMalloc(reinterpret_cast<void**>(&s.d_input),  s.inputBytes);  if(cerr){LOG_ERR("cudaMalloc(input)=",cerr);  return E_FAIL;}
+    cerr=cudaMalloc(reinterpret_cast<void**>(&s.d_output), s.outputBytes); if(cerr){LOG_ERR("cudaMalloc(output)=",cerr); return E_FAIL;}
+    cerr=cudaMallocHost(reinterpret_cast<void**>(&s.h_output), s.outputBytes); if(cerr){LOG_ERR("cudaMallocHost=",cerr); return E_FAIL;}
+
+    // Dummy buffer for unused outputs
+    size_t dummyBytes = 16;
+    for (int i = 0; i < s.nbBindings; ++i) {
+        if (i==s.inputIdx||i==s.outputIdx) continue;
+        auto sh=s.engine->getTensorShape(s.engine->getIOTensorName(i));
+        size_t elems=1; for(int k=0;k<sh.nbDims;++k) elems*=(sh.d[k]>0?(size_t)sh.d[k]:(size_t)dmd);
+        if (elems*sizeof(float)>dummyBytes) dummyBytes=elems*sizeof(float);
+    }
+    cudaMalloc(&s.d_dummy, dummyBytes);
+
+    s.bindings.assign((size_t)s.nbBindings, s.d_dummy);
+    if (s.inputIdx >=0&&s.inputIdx <s.nbBindings) s.bindings[s.inputIdx ]=s.d_input;
+    if (s.outputIdx>=0&&s.outputIdx<s.nbBindings) s.bindings[s.outputIdx]=s.d_output;
+
+    if (F>1) {
+        size_t fe=(size_t)3*s.modelH*s.modelW;
+        s.frameRing.assign(F, std::vector<float>(fe, 0.5f));
+        s.frameRingPos=0; s.frameRingFull=false;
+    }
+
+    m_dynamicInput = engineIsDynamic;
+    m_modelInputW  = s.modelW;
+    m_modelInputH  = s.modelH;
+
+    s.needsBuild = false;
+    LOG_INFO("TRT: FinishTrtBuild complete (",usedPrecision,") — dims=",
+             s.modelW,"×",s.modelH," F=",F," dynamic=",engineIsDynamic?"yes":"no");
+    return S_OK;
+}
 
     // Attempt FP16 first.
     TrtHostMemPtr serialized(
