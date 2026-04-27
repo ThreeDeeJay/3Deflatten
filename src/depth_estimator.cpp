@@ -503,263 +503,47 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
         }
     }
 
-    // ── Build engine from ONNX if no valid cache ──────────────────────────────
-    if (!engineLoaded) {
-        // ── Fully deferred build ──────────────────────────────────────────────
-        // TRT builder/parser objects have thread affinity — creating them on the
-        // DirectShow graph thread and then calling buildSerializedNetwork on the
-        // worker thread causes silent FP16 failures and shape-analyser assertions.
-        // Solution: store only the factory function pointers and ONNX path here.
-        // FinishTrtBuild() on the worker thread creates ALL TRT objects from scratch.
-        sess->fnMkRuntime     = fnMkRuntime;
-        sess->fnMkBuilder     = fnMkBuilder;
-        sess->fnMkParser      = fnMkParser;
-        sess->pendingOnnxPath = std::string(onnxPath.begin(), onnxPath.end());
-        sess->needsBuild      = true;
+    // ── Defer ALL TRT runtime work to the worker thread ───────────────────────
+    // createInferRuntime / deserializeCudaEngine / createExecutionContext all
+    // require an active CUDA context that has been initialised on the same thread.
+    // On the graph thread no CUDA work has run yet, so the calls fail or produce
+    // broken contexts.  Solution: always set needsBuild=true and let FinishTrtBuild
+    // (which runs on the depth worker thread after cudaStreamCreate) handle both
+    // the cache-load and the fresh-build paths.
+    sess->fnMkRuntime     = fnMkRuntime;
+    sess->fnMkBuilder     = fnMkBuilder;
+    sess->fnMkParser      = fnMkParser;
+    sess->pendingOnnxPath = std::string(onnxPath.begin(), onnxPath.end());
+    sess->needsBuild      = true;
+
+    if (engineLoaded) {
+        // Engine is already deserialised on this thread — but we must NOT call
+        // createExecutionContext here.  Keep the engine object; FinishTrtBuild
+        // will create the context (and bindings/buffers) on the worker thread.
+        // Store the engine in the session so FinishTrtBuild can use it directly
+        // without re-deserialising.
+        // (sess->engine and sess->runtime are already set from the cache-load above)
+        LOG_INFO("TRT: cached engine loaded; deferring context creation to worker thread.");
+    } else {
+        // No cache — full build on worker thread.
+        // Release the partially-created runtime/engine from failed cache load (if any).
+        sess->engine.reset();
+        sess->runtime.reset();
         LOG_INFO("TRT: build fully deferred to worker thread (may take several minutes).");
         LOG_INFO("  Flat depth will be shown during compilation.");
-        // sess->modelW/H/nbVideoFrames stay at defaults; FinishTrtBuild resolves them.
     }
 
-    // ── Create execution context (skip if build is deferred) ─────────────────
-    if (sess->needsBuild) {
-        // Move the session into m_trtRtx now; FinishTrtBuild() will complete setup.
-        m_trtRtx     = std::move(sess);
-        m_dynamicInput = true;   // assume dynamic until FinishTrtBuild resolves
-        m_modelInputW  = m_trtRtx->modelW;
-        m_modelInputH  = m_trtRtx->modelH;
-        outInfo = (runtime == InferenceRuntime::TensorRTRtx)
-            ? L"TensorRT-RTX (building engine…)"
-            : L"TensorRT (building engine…)";
-        LOG_INFO("TRT: session ready (engine build pending on worker thread).");
-        return S_OK;
-    }
-    if (!sess->context) { LOG_ERR("TRT-RTX: createExecutionContext failed."); return E_FAIL; }
-    LOG_INFO("TRT-RTX: execution context created.");
-
-    // ── Query I/O bindings + detect fixed vs dynamic input ────────────────────
-    // Selection rules:
-    //   Input : always Input[0] ("img" for DA models).
-    //   Output: prefer the tensor named "depth"; fall back to the first output.
-    //           All other outputs (sky, depth_conf, pose_enc, …) are ignored —
-    //           never bound, never allocated.  Binding nullptr for them is valid
-    //           only when we don't call setTensorAddress for those names.
-    bool engineIsDynamic = false;
-    {
-        int nb = sess->engine->getNbIOTensors();
-        int firstOutputIdx = -1;
-
-        for (int i = 0; i < nb; ++i) {
-            const char* name = sess->engine->getIOTensorName(i);
-            auto mode = sess->engine->getTensorIOMode(name);
-            bool isInput  = (mode == nvinfer1::TensorIOMode::kINPUT);
-            bool isOutput = (mode == nvinfer1::TensorIOMode::kOUTPUT);
-
-            LOG_INFO("TRT: tensor[", i, "] '", name,
-                     "' ", isInput ? "INPUT" : "OUTPUT");
-
-            // ── Input: take only the first one ───────────────────────────────
-            if (isInput && sess->inputIdx < 0) {
-                sess->inputName = name;
-                sess->inputIdx  = i;
-
-                auto engineShape = sess->engine->getTensorShape(name);
-                bool hasDyn = false;
-                for (int k = 0; k < engineShape.nbDims; ++k)
-                    if (engineShape.d[k] < 0) { hasDyn = true; break; }
-                engineIsDynamic = hasDyn;
-
-                if (engineShape.nbDims == 5) {
-                    // 5D video engine: [B, F, C, H, W]
-                    int F = (engineShape.d[1] > 0) ? (int)engineShape.d[1] : 1;
-                    sess->nbVideoFrames = F;
-                    if (!hasDyn && engineShape.d[3] > 0 && engineShape.d[4] > 0) {
-                        sess->modelH = (int)engineShape.d[3];
-                        sess->modelW = (int)engineShape.d[4];
-                        LOG_INFO("TRT: fixed 5D engine input: 1×", F, "×3×",
-                                 sess->modelH, "×", sess->modelW);
-                    } else {
-                        LOG_INFO("TRT: dynamic 5D engine input — F=", F,
-                                 " OPT: 1×", F, "×3×",
-                                 sess->modelH, "×", sess->modelW);
-                    }
-                } else if (!hasDyn && engineShape.nbDims == 4) {
-                    sess->modelH = (int)engineShape.d[2];
-                    sess->modelW = (int)engineShape.d[3];
-                    LOG_INFO("TRT: fixed 4D engine input: 1×3×",
-                             sess->modelH, "×", sess->modelW);
-                } else {
-                    LOG_INFO("TRT: dynamic 4D engine input — OPT: 1×3×",
-                             sess->modelH, "×", sess->modelW);
-                }
-            }
-
-            // ── Output: prefer "depth"; record first output as fallback ──────
-            if (isOutput) {
-                if (firstOutputIdx < 0) firstOutputIdx = i;
-                // Exact match wins; keep the first match only
-                if (sess->outputIdx < 0 && std::strcmp(name, "depth") == 0) {
-                    sess->outputName = name;
-                    sess->outputIdx  = i;
-                    LOG_INFO("TRT: selected output 'depth' at idx=", i);
-                }
-            }
-        }
-
-        // Fall back to first output if "depth" not found by name
-        if (sess->outputIdx < 0 && firstOutputIdx >= 0) {
-            const char* name = sess->engine->getIOTensorName(firstOutputIdx);
-            sess->outputName = name;
-            sess->outputIdx  = firstOutputIdx;
-            LOG_INFO("TRT: 'depth' not found by name — using first output '",
-                     name, "' at idx=", firstOutputIdx);
-        }
-
-        sess->nbBindings = nb;
-
-        // setInputShape: dynamic engines only; fixed-shape engines must not have
-        // it called with mismatched dims — TRT uses the compiled-in shape.
-        if (!sess->inputName.empty()) {
-            if (engineIsDynamic) {
-                int F = (sess->nbVideoFrames > 0) ? sess->nbVideoFrames : 1;
-                bool ok = false;
-                if (F > 1) {
-                    // 5D: [1, F, 3, H, W]
-                    nvinfer1::Dims d{}; d.nbDims = 5;
-                    d.d[0]=1; d.d[1]=F; d.d[2]=3;
-                    d.d[3]=sess->modelH; d.d[4]=sess->modelW;
-                    ok = sess->context->setInputShape(sess->inputName.c_str(), d);
-                    LOG_INFO("TRT: context input shape: 1×", F, "×3×",
-                             sess->modelH, "×", sess->modelW);
-                } else {
-                    nvinfer1::Dims4 d{1, 3, sess->modelH, sess->modelW};
-                    ok = sess->context->setInputShape(sess->inputName.c_str(), d);
-                    LOG_INFO("TRT: context input shape: 1×3×",
-                             sess->modelH, "×", sess->modelW);
-                }
-                if (!ok) {
-                    LOG_ERR("TRT: setInputShape failed — check depthMaxDim vs engine profile.");
-                    return E_FAIL;
-                }
-            } else {
-                LOG_INFO("TRT: fixed-shape — skipping setInputShape.");
-            }
-        }
-    }
-
-    if (sess->inputIdx < 0 || sess->outputIdx < 0) {
-        LOG_ERR("TRT-RTX: could not identify input/output bindings. "
-                "nbIOTensors=", sess->nbBindings);
-        return E_FAIL;
-    }
-    LOG_INFO("TRT-RTX: input='", sess->inputName, "' idx=", sess->inputIdx,
-             "  output='", sess->outputName, "' idx=", sess->outputIdx);
-    LOG_INFO("TRT-RTX: model ", engineIsDynamic ? "DYNAMIC" : "FIXED",
-             " dims: ", sess->modelW, "×", sess->modelH);
-
-    // ── Scale input buffer for video models (5D: [B,F,C,H,W]) ─────────────────
-    {
-        int F = (sess->nbVideoFrames > 0) ? sess->nbVideoFrames : 1;
-        if (F > 1) {
-            inputBufSz  *= (size_t)F;
-            outputBufSz *= (size_t)F;   // output is also [B,F,H,W]
-            LOG_INFO("TRT: video model F=", F, " — input_buf=", inputBufSz/1024, " KB");
-        } else {
-            LOG_INFO("TRT: input_buf=", inputBufSz/1024, " KB");
-        }
-    }
-
-    // ── Allocate device/host memory ───────────────────────────────────────────
-    // Dynamic: allocate at dmd×dmd MAX so any frame within the profile fits.
-    // Fixed:   allocate exactly at the engine's fixed dims.
-    if (engineIsDynamic) {
-        sess->inputBytes  = inputBufSz;
-        sess->outputBytes = outputBufSz;
-        LOG_INFO("TRT-RTX: dynamic — buffer MAX=", dmd, "×", dmd,
-                 " input=", sess->inputBytes/1024, " KB");
-    } else {
-        int F = (sess->nbVideoFrames > 0) ? sess->nbVideoFrames : 1;
-        sess->inputBytes  = sizeof(float) * (size_t)F * 3 * sess->modelH * sess->modelW;
-        sess->outputBytes = sizeof(float) * (size_t)F * 1 * sess->modelH * sess->modelW;
-        LOG_INFO("TRT-RTX: fixed — buffer=", sess->modelW, "×", sess->modelH,
-                 " F=", F, " input=", sess->inputBytes/1024, " KB");
-    }
-    cerr = cudaMalloc(reinterpret_cast<void**>(&sess->d_input),  sess->inputBytes);
-    if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMalloc(input) failed (", cerr, ")"); return E_FAIL; }
-    cerr = cudaMalloc(reinterpret_cast<void**>(&sess->d_output), sess->outputBytes);
-    if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMalloc(output) failed (", cerr, ")"); return E_FAIL; }
-    cerr = cudaMallocHost(reinterpret_cast<void**>(&sess->h_output), sess->outputBytes);
-    if (cerr != cudaSuccess) { LOG_ERR("TRT-RTX: cudaMallocHost failed (", cerr, ")"); return E_FAIL; }
-
-    // Allocate dummy buffer for unused output tensors (sky, depth_conf, pose_enc …).
-    // TRT10 requires a non-null device address for every output tensor.
-    // IMPORTANT: each unused output may be full-resolution (e.g. sky: 1×1×280×504),
-    // so the dummy buffer must be large enough to hold the largest unused output —
-    // otherwise TRT writes past the buffer and corrupts adjacent allocations.
-    {
-        size_t dummyBytes = 16;  // minimum; will be grown to fit all unused outputs
-        for (int i = 0; i < sess->nbBindings; ++i) {
-            if (i == sess->inputIdx || i == sess->outputIdx) continue;
-            const char* name = sess->engine->getIOTensorName(i);
-            auto shape = sess->engine->getTensorShape(name);
-            size_t elems = 1;
-            for (int k = 0; k < shape.nbDims; ++k)
-                elems *= (shape.d[k] > 0 ? (size_t)shape.d[k] : (size_t)dmd);
-            size_t needed = elems * sizeof(float);
-            if (needed > dummyBytes) dummyBytes = needed;
-            LOG_INFO("TRT: unused output '", name, "' needs ", needed/1024, " KB dummy");
-        }
-        cerr = cudaMalloc(&sess->d_dummy, dummyBytes);
-        if (cerr != cudaSuccess) {
-            LOG_ERR("TRT-RTX: cudaMalloc(dummy, ", dummyBytes, ") failed (", cerr, ")");
-            return E_FAIL;
-        }
-        LOG_INFO("TRT-RTX: dummy buffer allocated: ", dummyBytes/1024, " KB");
-    }
-
-    // Pre-build the bindings array used by executeV2 every frame.
-    // This avoids rebuilding it per inference call.
-    sess->bindings.assign((size_t)sess->nbBindings, sess->d_dummy);
-    if (sess->inputIdx  >= 0 && sess->inputIdx  < sess->nbBindings)
-        sess->bindings[sess->inputIdx]  = sess->d_input;
-    if (sess->outputIdx >= 0 && sess->outputIdx < sess->nbBindings)
-        sess->bindings[sess->outputIdx] = sess->d_output;
-    LOG_INFO("TRT-RTX: bindings array built  nbBindings=", sess->nbBindings,
-             "  in=", sess->inputIdx, " out=", sess->outputIdx,
-             "  dummy slots=", sess->nbBindings - 2);
-
-    // Init video frame ring buffer
-    if (sess->nbVideoFrames > 1) {
-        int F = sess->nbVideoFrames;
-        size_t frameElems = (size_t)3 * sess->modelH * sess->modelW;
-        sess->frameRing.assign(F, std::vector<float>(frameElems, 0.5f));
-        LOG_INFO("TRT: video frame ring initialised: F=", F,
-                 " each=", frameElems * sizeof(float) / 1024, " KB");
-    }
-
+    // Always move session now; FinishTrtBuild completes setup on worker thread.
     m_trtRtx     = std::move(sess);
-    m_inputName  = m_trtRtx->inputName;
-    m_outputName = m_trtRtx->outputName;
-    // For dynamic engines: PreprocessFrame scales to optW/optH (same as DML path).
-    // For fixed engines:   PreprocessFrame uses the exact engine dims (no scaling).
-    m_dynamicInput = engineIsDynamic;
+    m_dynamicInput = true;   // refined by FinishTrtBuild
     m_modelInputW  = m_trtRtx->modelW;
     m_modelInputH  = m_trtRtx->modelH;
     outInfo = (runtime == InferenceRuntime::TensorRTRtx)
-        ? L"TensorRT-RTX native (FP16)"
-        : L"TensorRT native (FP16)";
-    LOG_INFO("Native TRT session ready  runtime=",
-             runtime == InferenceRuntime::TensorRTRtx ? "TRT-RTX" : "TensorRT",
-             "  dynamic=", engineIsDynamic ? "yes" : "no",
-             "  dims=", m_modelInputW, "×", m_modelInputH);
+        ? L"TensorRT-RTX (initialising…)"
+        : L"TensorRT (initialising…)";
+    LOG_INFO("TRT: session ready; context/bindings set up on worker thread.");
     return S_OK;
 }
-
-// ── FinishTrtBuild ────────────────────────────────────────────────────────────
-// Called on the depth worker thread on the first EstimateTrtRtx call when
-// needsBuild==true.  Runs buildSerializedNetwork (slow), saves cache, creates
-// context, allocates buffers, builds bindings — everything that was deferred
-// from LoadTrtRtxNative to avoid blocking the DirectShow graph thread.
 HRESULT DepthEstimator::FinishTrtBuild() {
     auto& s = *m_trtRtx;
     LOG_INFO("TRT: starting engine build on worker thread...");
@@ -877,42 +661,46 @@ HRESULT DepthEstimator::FinishTrtBuild() {
     };
 
     // ── Attempt FP16, fall back to FP32 with fresh objects ───────────────────
-    TrtHostMemPtr serialized = buildEngine(true);
-    std::string usedPrecision = "fp16";
-    if (!serialized) {
-        LOG_WARN("TRT: FP16 build failed. Retrying in FP32 with fresh TRT objects...");
-        // Update cache path to _fp32 variant
-        auto pos = s.enginePath.rfind("_fp16.bin");
-        if (pos != std::string::npos) s.enginePath.replace(pos, 9, "_fp32.bin");
-        serialized = buildEngine(false);
-        usedPrecision = "fp32";
-    }
-
-    if (!serialized) {
-        LOG_ERR("TRT: buildSerializedNetwork returned null (both FP16 and FP32 failed).");
-        s.needsBuild = false;
-        return E_FAIL;
-    }
-    LOG_INFO("TRT: engine serialized OK (", serialized->size()/1024/1024, " MB, ",
-             usedPrecision, ").");
-
-    // Save to disk
-    {
-        std::ofstream f(s.enginePath, std::ios::binary);
-        if (f) {
-            f.write(static_cast<const char*>(serialized->data()), serialized->size());
-            LOG_INFO("TRT: engine cached at: ", s.enginePath);
-        } else {
-            LOG_WARN("TRT: could not write engine cache.");
+    // Skip if engine was already deserialised from cache (needsBuild=true but engine!=null).
+    TrtHostMemPtr serialized;
+    std::string usedPrecision = "cached";
+    if (!s.engine) {
+        serialized = buildEngine(true);
+        usedPrecision = "fp16";
+        if (!serialized) {
+            LOG_WARN("TRT: FP16 build failed. Retrying in FP32 with fresh TRT objects...");
+            auto pos = s.enginePath.rfind("_fp16.bin");
+            if (pos != std::string::npos) s.enginePath.replace(pos, 9, "_fp32.bin");
+            serialized = buildEngine(false);
+            usedPrecision = "fp32";
         }
+        if (!serialized) {
+            LOG_ERR("TRT: buildSerializedNetwork returned null (both FP16 and FP32 failed).");
+            s.needsBuild = false;
+            return E_FAIL;
+        }
+        LOG_INFO("TRT: engine serialized OK (", serialized->size()/1024/1024, " MB, ",
+                 usedPrecision, ").");
+        // Save to disk
+        {
+            std::ofstream f(s.enginePath, std::ios::binary);
+            if (f) {
+                f.write(static_cast<const char*>(serialized->data()), serialized->size());
+                LOG_INFO("TRT: engine cached at: ", s.enginePath);
+            } else {
+                LOG_WARN("TRT: could not write engine cache.");
+            }
+        }
+        // Deserialise on worker thread (CUDA context now active)
+        s.runtime.reset(s.fnMkRuntime(&s.logger, NV_TENSORRT_VERSION));
+        if (!s.runtime) { LOG_ERR("TRT: createInferRuntime failed."); return E_FAIL; }
+        s.engine.reset(s.runtime->deserializeCudaEngine(serialized->data(), serialized->size()));
+        if (!s.engine) { LOG_ERR("TRT: deserializeCudaEngine failed."); return E_FAIL; }
+        LOG_INFO("TRT: engine ready.");
+    } else {
+        LOG_INFO("TRT: engine already loaded from cache; creating context on worker thread.");
+        usedPrecision = "cached";
     }
-
-    // Deserialize (also on worker thread — correct thread affinity)
-    s.runtime.reset(s.fnMkRuntime(&s.logger, NV_TENSORRT_VERSION));
-    if (!s.runtime) { LOG_ERR("TRT: createInferRuntime failed."); return E_FAIL; }
-    s.engine.reset(s.runtime->deserializeCudaEngine(serialized->data(), serialized->size()));
-    if (!s.engine) { LOG_ERR("TRT: deserializeCudaEngine failed."); return E_FAIL; }
-    LOG_INFO("TRT: engine ready.");
 
     // ── Context, bindings, buffers (all on worker thread) ────────────────────
     s.context.reset(s.engine->createExecutionContext());
