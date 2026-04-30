@@ -457,7 +457,7 @@ HRESULT StereoRenderer::CreateShaders() {
         D3D11_DEPTH_STENCIL_DESC dsd{};
         dsd.DepthEnable    = TRUE;
         dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-        dsd.DepthFunc      = D3D11_COMPARISON_LESS;
+        dsd.DepthFunc      = D3D11_COMPARISON_LESS_EQUAL;
         m_dev->CreateDepthStencilState(&dsd, &m_dsState);
     }
 
