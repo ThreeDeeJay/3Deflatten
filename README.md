@@ -231,3 +231,24 @@ IMediaSample (input)
 - **Depth Anything V2** model weights — Apache 2.0 license. See <https://github.com/DepthAnything/Depth-Anything-V2>
 - **ONNX Runtime** — MIT License. See <https://github.com/microsoft/onnxruntime>
 - **DirectX** — Microsoft proprietary (redistributable)
+
+
+## Citation
+
+```bibtex
+@article{depth_anything_v2,
+  title={Depth Anything V2},
+  author={Yang, Lihe and Kang, Bingyi and Huang, Zilong and Zhao, Zhen and Xu, Xiaogang and Feng, Jiashi and Zhao, Hengshuang},
+  journal={arXiv:2406.09414},
+  year={2024}
+}
+```
+
+```bibtex
+@article{depthanything3,
+  title={Depth Anything 3: Recovering the visual space from any views},
+  author={Haotong Lin and Sili Chen and Jun Hao Liew and Donny Y. Chen and Zhenyu Li and Guang Shi and Jiashi Feng and Bingyi Kang},
+  journal={arXiv preprint arXiv:2511.10647},
+  year={2025}
+}
+```
