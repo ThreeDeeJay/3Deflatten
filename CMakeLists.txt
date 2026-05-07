@@ -497,7 +497,15 @@ set(HEADERS
     src/guids.h src/ideflatten.h src/filter.h
     src/depth_estimator.h src/stereo_renderer.h
     src/logger.h src/prop_page.h src/resource.h
+    src/jbu_cuda.h
 )
+
+# Unified backend compiles the CUDA JBU kernel directly into the .ax
+if(ORT_BACKEND STREQUAL "Unified")
+    enable_language(CUDA)
+    list(APPEND SOURCES src/jbu_cuda.cu)
+    message(STATUS "CUDA JBU: jbu_cuda.cu added to Unified build")
+endif()
 
 add_library(3Deflatten SHARED ${SOURCES} ${HEADERS})
 
@@ -526,6 +534,13 @@ set_target_properties(3Deflatten PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE "${AX_OUTPUT_DIR}"
     LIBRARY_OUTPUT_DIRECTORY_DEBUG   "${AX_OUTPUT_DIR}"
 )
+
+# SM75=Turing(RTX20xx) SM86=Ampere(RTX30xx) SM89=Ada(RTX40xx)
+if(ORT_BACKEND STREQUAL "Unified")
+    set_target_properties(3Deflatten PROPERTIES
+        CUDA_ARCHITECTURES "75;86;89"
+    )
+endif()
 
 target_include_directories(3Deflatten PRIVATE
     src

@@ -252,6 +252,7 @@ HRESULT DepthEstimator::Load(const std::wstring& modelPath,
 #include <NvOnnxParser.h>
 #pragma warning(pop)
 #include <cuda_runtime.h>
+#include "jbu_cuda.h"
 #include <fstream>
 
 // ── RAII wrappers around TRT objects ─────────────────────────────────────────
@@ -309,7 +310,11 @@ struct DepthEstimator::TrtRtxSession {
     cudaStream_t stream   = nullptr;
     float*       d_input  = nullptr;   // device [1,3,H,W]
     float*       d_output = nullptr;   // device [1,1,H,W]
-    float*       h_output = nullptr;   // pinned host readback
+    float*       h_output    = nullptr;   // pinned host readback
+    // CUDA JBU full-res buffers (lazy-allocated on first JBU call)
+    float*       d_depthHR   = nullptr;
+    uint8_t*     d_guideBGRA = nullptr;
+    int          jbuHrW = 0, jbuHrH = 0;
 
     size_t inputBytes  = 0;
     size_t outputBytes = 0;
@@ -361,7 +366,9 @@ struct DepthEstimator::TrtRtxSession {
         if (stream)  { cudaStreamDestroy(stream);  stream  = nullptr; }
         if (d_input)  { cudaFree(d_input);   d_input  = nullptr; }
         if (d_output) { cudaFree(d_output);  d_output = nullptr; }
-        if (d_dummy)  { cudaFree(d_dummy);   d_dummy  = nullptr; }
+        if (d_dummy)  { cudaFree(d_dummy);   d_dummy  = nullptr;
+        if (d_depthHR)   { cudaFree(d_depthHR);   d_depthHR   = nullptr; }
+        if (d_guideBGRA) { cudaFree(d_guideBGRA); d_guideBGRA = nullptr; } }
         if (h_output) { cudaFreeHost(h_output); h_output = nullptr; }
         // Free DLL handles last — TRT objects above must be destroyed first
         if (hParser) { FreeLibrary(hParser); hParser = nullptr; }
@@ -822,6 +829,66 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         return S_OK;
     };
 
+    // On-GPU JBU: when depthJBU is enabled, run JBU directly on d_output
+    // (already on device) before downloading. Avoids the expensive CPU path.
+    // Lazy-allocate d_depthHR (full-res) and d_guideBGRA (source frame on GPU).
+    auto runGpuJBU = [&](float* d_lr, int lrW, int lrH) -> HRESULT {
+        if (!depthJBU) return E_NOTIMPL;   // caller falls back to CPU path
+
+        // Lazy-allocate / reallocate when output size changes
+        if (s.jbuHrW != srcW || s.jbuHrH != srcH) {
+            cudaFree(s.d_depthHR);   s.d_depthHR   = nullptr;
+            cudaFree(s.d_guideBGRA); s.d_guideBGRA = nullptr;
+            cudaError_t e1 = cudaMalloc(reinterpret_cast<void**>(&s.d_depthHR),
+                                        (size_t)srcW * srcH * sizeof(float));
+            cudaError_t e2 = cudaMalloc(reinterpret_cast<void**>(&s.d_guideBGRA),
+                                        (size_t)srcH * srcStride);
+            if (e1 || e2) {
+                LOG_ERR("CUDA JBU: buffer alloc failed (", e1, ",", e2, ")");
+                cudaFree(s.d_depthHR);   s.d_depthHR   = nullptr;
+                cudaFree(s.d_guideBGRA); s.d_guideBGRA = nullptr;
+                s.jbuHrW = s.jbuHrH = 0;
+                return E_OUTOFMEMORY;
+            }
+            s.jbuHrW = srcW; s.jbuHrH = srcH;
+        }
+
+        // Upload guide BGRA to device
+        cudaError_t cerr = cudaMemcpyAsync(s.d_guideBGRA, srcData,
+                                            (size_t)srcH * srcStride,
+                                            cudaMemcpyHostToDevice, s.stream);
+        if (cerr) return E_FAIL;
+
+        // Run CUDA JBU kernel: d_lr[lrH×lrW] → d_depthHR[srcH×srcW]
+        int rc = jbu_cuda(d_lr, lrW, lrH,
+                          s.d_guideBGRA, srcW, srcH, srcStride,
+                          s.d_depthHR,
+                          1.0f,  // spatial sigma (low-res pixels)
+                          0.10f, // colour sigma  ([0,1] luma)
+                          2,     // radius        (covers 2σ, 5×5 window)
+                          s.stream);
+        if (rc) {
+            LOG_ERR("CUDA JBU kernel failed (cudaError=", rc, ")");
+            return E_FAIL;
+        }
+
+        // Download full-res result
+        cerr = cudaMemcpy(s.h_output, s.d_depthHR,
+                          (size_t)srcW * srcH * sizeof(float),
+                          cudaMemcpyDeviceToHost);
+        if (cerr) return E_FAIL;
+
+        // PostprocessDepth at full-res: normalise + flip + dilate, NO JBU (already done)
+        std::vector<float> out(srcW * srcH);
+        PostprocessDepth(s.h_output, srcW, srcH, srcW, srcH, flipDepth, out,
+                         nullptr, 0, /*depthJBU=*/false,
+                         depthDilate, depthEdgeThresh);
+        if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
+            TemporalSmooth(out, smoothAlpha);
+        result.data = std::move(out); result.width = srcW; result.height = srcH;
+        return S_OK;
+    };
+
     if (s.nbVideoFrames > 1) {
         // ── 5D video model: [1, F, 3, H, W] ──────────────────────────────────
         int F = s.nbVideoFrames;
@@ -865,12 +932,17 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         if (!s.context->executeV2(s.bindings.data())) {
             LOG_ERR("TRT-RTX: executeV2 (video) failed."); return E_FAIL;
         }
-        // Output: [1, F, H, W] — download all, then point at last frame
+
         size_t outFrameElems = (size_t)mw * mh;
+        // Point at last temporal frame in device buffer
+        float* d_last = s.d_output + (size_t)(F - 1) * outFrameElems;
+        if (depthJBU && SUCCEEDED(runGpuJBU(d_last, mw, mh)))
+            return S_OK;
+
+        // CPU fallback: download and postprocess
         size_t downloadBytes = sizeof(float) * (size_t)F * outFrameElems;
         cerr = cudaMemcpy(s.h_output, s.d_output, downloadBytes, cudaMemcpyDeviceToHost);
         if (cerr != cudaSuccess) return E_FAIL;
-        // Use last temporal frame (most temporally aligned to current input)
         const float* lastFrame = s.h_output + (size_t)(F - 1) * outFrameElems;
         return postprocess(lastFrame, mw, mh);
 
@@ -896,17 +968,18 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         if (!s.context->executeV2(s.bindings.data())) {
             LOG_ERR("TRT-RTX: executeV2 failed."); return E_FAIL;
         }
+
+        // GPU JBU on d_output directly (no download yet)
+        if (depthJBU && SUCCEEDED(runGpuJBU(s.d_output, mw, mh)))
+            return S_OK;
+
+        // CPU fallback
         size_t downloadBytes = sizeof(float) * mw * mh;
         cerr = cudaMemcpy(s.h_output, s.d_output, downloadBytes, cudaMemcpyDeviceToHost);
         if (cerr != cudaSuccess) return E_FAIL;
         return postprocess(s.h_output, mw, mh);
     }
 }
-
-#endif // ORT_ENABLE_TRTRTX
-
-
-
 // ── BuildSessionOptions ───────────────────────────────────────────────────────
 
 // Returns the directory that contains this DLL (.ax file).
