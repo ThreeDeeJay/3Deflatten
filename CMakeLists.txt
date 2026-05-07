@@ -8,7 +8,7 @@ include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED TRUE)
 set(FETCHCONTENT_USES_GIT FALSE)
 
-# ── Platform ──────────────────────────────────────────────────────────────────
+# ── Platform ─────────────────────────────────────────────────────────────────
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(ARCH_SUFFIX "x64")
     set(ORT_ARCH   "x64")
