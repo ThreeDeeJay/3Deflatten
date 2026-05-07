@@ -500,11 +500,16 @@ set(HEADERS
     src/jbu_cuda.h
 )
 
-# Unified backend compiles the CUDA JBU kernel directly into the .ax
+# Unified backend compiles the CUDA JBU kernel into a separate OBJECT library
+# to avoid exceeding MSVC/MSBuild's 1024-char command-line limit for nvcc
+# (which would happen if we added jbu_cuda.cu directly to the main target with
+# all of its ORT/TRT/baseclasses include paths).
 if(ORT_BACKEND STREQUAL "Unified")
     enable_language(CUDA)
-    list(APPEND SOURCES src/jbu_cuda.cu)
-    message(STATUS "CUDA JBU: jbu_cuda.cu added to Unified build")
+    add_library(jbu_cuda_obj OBJECT src/jbu_cuda.cu)
+    set_target_properties(jbu_cuda_obj PROPERTIES CUDA_ARCHITECTURES "75;86;89")
+    target_include_directories(jbu_cuda_obj PRIVATE src)
+    message(STATUS "CUDA JBU: jbu_cuda_obj OBJECT library added (SM 75/86/89)")
 endif()
 
 add_library(3Deflatten SHARED ${SOURCES} ${HEADERS})
@@ -584,6 +589,9 @@ target_link_libraries(3Deflatten PRIVATE
 if(ORT_BACKEND STREQUAL "Unified")
     if(TARGET CUDA::cudart)
         target_link_libraries(3Deflatten PRIVATE CUDA::cudart)
+    endif()
+    if(TARGET jbu_cuda_obj)
+        target_link_libraries(3Deflatten PRIVATE $<TARGET_OBJECTS:jbu_cuda_obj>)
     endif()
 endif()
 
