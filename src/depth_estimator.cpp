@@ -839,59 +839,96 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     // (already on device) before downloading. Avoids the expensive CPU path.
     // Lazy-allocate d_depthHR (full-res) and d_guideBGRA (source frame on GPU).
     auto runGpuJBU = [&](float* d_lr, int lrW, int lrH) -> HRESULT {
-        if (!depthJBU) return E_NOTIMPL;   // caller falls back to CPU path
+        if (!depthJBU) return E_NOTIMPL;
 
-        // Lazy-allocate / reallocate when output size changes
-        if (s.jbuHrW != srcW || s.jbuHrH != srcH) {
+        // (Re)allocate all three JBU device buffers when any dimension changes.
+        // Grouping them avoids partial-allocation states.
+        if (s.jbuHrW != srcW || s.jbuHrH != srcH ||
+            s.glrW   != lrW  || s.glrH   != lrH) {
+
             cudaFree(s.d_depthHR);   s.d_depthHR   = nullptr;
             cudaFree(s.d_guideBGRA); s.d_guideBGRA = nullptr;
+            cudaFree(s.d_guideLR);   s.d_guideLR   = nullptr;
+
             cudaError_t e1 = cudaMalloc(reinterpret_cast<void**>(&s.d_depthHR),
-                                        (size_t)srcW * srcH * sizeof(float));
+                                         (size_t)srcW * srcH * sizeof(float));
             cudaError_t e2 = cudaMalloc(reinterpret_cast<void**>(&s.d_guideBGRA),
-                                        (size_t)srcH * srcStride);
-            if (e1 || e2) {
-                LOG_ERR("CUDA JBU: buffer alloc failed (", e1, ",", e2, ")");
+                                         (size_t)srcH * srcStride);
+            cudaError_t e3 = cudaMalloc(reinterpret_cast<void**>(&s.d_guideLR),
+                                         (size_t)lrW * lrH * sizeof(float));
+            if (e1 || e2 || e3) {
+                LOG_ERR("CUDA JBU: buffer alloc failed (e1=", e1,
+                        " e2=", e2, " e3=", e3, ")");
                 cudaFree(s.d_depthHR);   s.d_depthHR   = nullptr;
                 cudaFree(s.d_guideBGRA); s.d_guideBGRA = nullptr;
-                s.jbuHrW = s.jbuHrH = 0;
+                cudaFree(s.d_guideLR);   s.d_guideLR   = nullptr;
+                s.jbuHrW = s.jbuHrH = s.glrW = s.glrH = 0;
                 return E_OUTOFMEMORY;
             }
             s.jbuHrW = srcW; s.jbuHrH = srcH;
+            s.glrW   = lrW;  s.glrH   = lrH;
         }
 
-        // Upload guide BGRA to device
+        // Clear any sticky CUDA error that executeV2's async operations may have
+        // left in the context. Without this, the first CUDA API call in jbu_cuda
+        // returns that error instead of doing real work.
+        cudaGetLastError();
+
+        // Upload guide frame (BGRA, pageable host memory) onto s.stream.
+        // All subsequent JBU kernel launches are on the same stream, so the
+        // upload is guaranteed visible to k_guide_lr by CUDA stream ordering.
         cudaError_t cerr = cudaMemcpyAsync(s.d_guideBGRA, srcData,
                                             (size_t)srcH * srcStride,
                                             cudaMemcpyHostToDevice, s.stream);
-        if (cerr) return E_FAIL;
+        if (cerr != cudaSuccess) {
+            LOG_ERR("CUDA JBU: guide upload failed (", cerr, ")");
+            return E_FAIL;
+        }
 
-        // Run CUDA JBU kernel: d_lr[lrH×lrW] → d_depthHR[srcH×srcW]
+        // Launch k_guide_lr + k_jbu on s.stream using the pre-allocated glr buffer.
+        // No internal cudaMalloc/cudaFree — eliminates the cudaErrorInvalidValue=1.
         int rc = jbu_cuda(d_lr, lrW, lrH,
                           s.d_guideBGRA, srcW, srcH, srcStride,
                           s.d_depthHR,
-                          1.0f,  // spatial sigma (low-res pixels)
-                          0.10f, // colour sigma  ([0,1] luma)
-                          2,     // radius        (covers 2σ, 5×5 window)
+                          1.0f,   // spatial sigma  (low-res pixels)
+                          0.10f,  // colour sigma   ([0,1] luma)
+                          2,      // radius         (covers 2 σ)
+                          s.d_guideLR,
                           s.stream);
         if (rc) {
             LOG_ERR("CUDA JBU kernel failed (cudaError=", rc, ")");
             return E_FAIL;
         }
 
-        // Download full-res result
+        // Explicit stream sync before CPU readback.
+        // cudaMemcpy (below) is synchronous but doesn't flush async kernel errors;
+        // syncing first ensures any kernel error surfaces as a real cudaError code.
+        cerr = cudaStreamSynchronize(s.stream);
+        if (cerr != cudaSuccess) {
+            LOG_ERR("CUDA JBU: stream sync failed (", cerr, ")");
+            return E_FAIL;
+        }
+
+        // Download full-res depth result
         cerr = cudaMemcpy(s.h_output, s.d_depthHR,
                           (size_t)srcW * srcH * sizeof(float),
                           cudaMemcpyDeviceToHost);
-        if (cerr) return E_FAIL;
+        if (cerr != cudaSuccess) {
+            LOG_ERR("CUDA JBU: readback failed (", cerr, ")");
+            return E_FAIL;
+        }
 
-        // PostprocessDepth at full-res: normalise + flip + dilate, NO JBU (already done)
+        // Postprocess at full-res (normalise + flip + dilate).
+        // depthJBU=false: the bilateral upsample is already done on the GPU above.
         std::vector<float> out(srcW * srcH);
         PostprocessDepth(s.h_output, srcW, srcH, srcW, srcH, flipDepth, out,
                          nullptr, 0, /*depthJBU=*/false,
                          depthDilate, depthEdgeThresh);
         if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
             TemporalSmooth(out, smoothAlpha);
-        result.data = std::move(out); result.width = srcW; result.height = srcH;
+        result.data  = std::move(out);
+        result.width  = srcW;
+        result.height = srcH;
         return S_OK;
     };
 
