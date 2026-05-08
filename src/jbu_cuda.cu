@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // jbu_cuda.cu — CUDA Joint Bilateral Upsampling
+//
+// Change from original: the low-res guide luma buffer (glr) is now supplied
+// by the caller (pre-allocated in TrtRtxSession) instead of being allocated
+// here per call.  The old per-call cudaMalloc caused cudaError=1 whenever
+// a sticky error existed in the CUDA context from a preceding executeV2()
+// async launch, which silently fell through to the 1 FPS CPU fallback.
 #include <cuda_runtime.h>
 #include "jbu_cuda.h"
 
@@ -57,10 +63,12 @@ __global__ void k_jbu(
     dhr[oy*hrW + ox] = (wS > 1e-8f) ? dS/wS : dlr[nr];
 }
 
+// guide_lr_dev: pre-allocated device buffer (lrW*lrH floats), owned by caller.
+// No cudaMalloc/cudaFree here — that was the root cause of cudaError=1.
 int jbu_cuda(const float* dlr, int lrW, int lrH,
              const unsigned char* g, int hrW, int hrH, int hrS,
              float* dhr, float ss, float sc, int radius,
-             float* glr,     // pre-allocated device buffer, lrW*lrH floats
+             float* glr,    // caller-allocated device buffer, lrW*lrH floats
              void*  stream)
 {
     cudaStream_t st = (cudaStream_t)stream;

@@ -484,7 +484,6 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     // Buffers are allocated at MAX profile size (dmd×dmd) so any dynamic input
     // within the profile range fits without reallocation.
     // For 5D video models, inputBufSz is scaled by nbVideoFrames (set during build).
-    size_t maxElems    = (size_t)dmd * dmd;
     LOG_INFO("TRT: target OPT=", optW, "×", optH, " MAX=", dmd, "×", dmd);
     bool engineLoaded = false;
     if (std::filesystem::exists(sess->enginePath)) {
