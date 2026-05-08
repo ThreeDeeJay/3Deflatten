@@ -311,10 +311,14 @@ struct DepthEstimator::TrtRtxSession {
     float*       d_input  = nullptr;   // device [1,3,H,W]
     float*       d_output = nullptr;   // device [1,1,H,W]
     float*       h_output    = nullptr;   // pinned host readback
-    // CUDA JBU full-res buffers (lazy-allocated on first JBU call)
-    float*       d_depthHR   = nullptr;
-    uint8_t*     d_guideBGRA = nullptr;
-    int          jbuHrW = 0, jbuHrH = 0;
+    // ── CUDA JBU persistent buffers ───────────────────────────────────────────
+    // Allocated once on first JBU call, reallocated only on resolution change.
+    // Eliminates the per-frame cudaMalloc/cudaFree that caused cudaError=1.
+    float*    d_depthHR   = nullptr;  // device: full-res depth output  (srcW*srcH)
+    uint8_t*  d_guideBGRA = nullptr;  // device: guide frame BGRA upload (srcH*srcStride)
+    float*    d_guideLR   = nullptr;  // device: guide downsampled to model res (lrW*lrH)
+    int       jbuHrW = 0, jbuHrH = 0;
+    int       glrW   = 0, glrH   = 0;
 
     size_t inputBytes  = 0;
     size_t outputBytes = 0;
@@ -363,14 +367,15 @@ struct DepthEstimator::TrtRtxSession {
         context.reset();
         engine.reset();
         runtime.reset();
-        if (stream)  { cudaStreamDestroy(stream);  stream  = nullptr; }
-        if (d_input)  { cudaFree(d_input);   d_input  = nullptr; }
-        if (d_output) { cudaFree(d_output);  d_output = nullptr; }
-        if (d_dummy)  { cudaFree(d_dummy);   d_dummy  = nullptr;
-        if (d_depthHR)   { cudaFree(d_depthHR);   d_depthHR   = nullptr; }
-        if (d_guideBGRA) { cudaFree(d_guideBGRA); d_guideBGRA = nullptr; } }
-        if (h_output) { cudaFreeHost(h_output); h_output = nullptr; }
-        // Free DLL handles last — TRT objects above must be destroyed first
+        if (stream)      { cudaStreamDestroy(stream);    stream      = nullptr; }
+        if (d_input)     { cudaFree(d_input);            d_input     = nullptr; }
+        if (d_output)    { cudaFree(d_output);           d_output    = nullptr; }
+        if (d_dummy)     { cudaFree(d_dummy);            d_dummy     = nullptr; }
+        // Fixed: these were incorrectly nested inside the d_dummy if-block
+        if (d_depthHR)   { cudaFree(d_depthHR);         d_depthHR   = nullptr; }
+        if (d_guideBGRA) { cudaFree(d_guideBGRA);        d_guideBGRA = nullptr; }
+        if (d_guideLR)   { cudaFree(d_guideLR);          d_guideLR   = nullptr; }
+        if (h_output)    { cudaFreeHost(h_output);       h_output    = nullptr; }
         if (hParser) { FreeLibrary(hParser); hParser = nullptr; }
         if (hInfer)  { FreeLibrary(hInfer);  hInfer  = nullptr; }
     }
