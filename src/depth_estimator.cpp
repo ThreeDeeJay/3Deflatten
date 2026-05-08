@@ -480,8 +480,6 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     // within the profile range fits without reallocation.
     // For 5D video models, inputBufSz is scaled by nbVideoFrames (set during build).
     size_t maxElems    = (size_t)dmd * dmd;
-    size_t inputBufSz  = sizeof(float) * 3 * maxElems;   // updated after build
-    size_t outputBufSz = sizeof(float) * 1 * maxElems;
     LOG_INFO("TRT: target OPT=", optW, "×", optH, " MAX=", dmd, "×", dmd);
     bool engineLoaded = false;
     if (std::filesystem::exists(sess->enginePath)) {
@@ -2439,3 +2437,4 @@ void DepthEstimator::ResetStreamingContext() {
         LOG_INFO("DA3-Streaming window reset (seek/stop)");
     }
 }
+#endif // ORT_ENABLE_TRTRTX (LoadTrtRtxNative + FinishTrtBuild + EstimateTrtRtx)
