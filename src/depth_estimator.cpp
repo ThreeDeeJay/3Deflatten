@@ -12,7 +12,7 @@
 constexpr float DepthEstimator::MEAN[3];
 constexpr float DepthEstimator::STD[3];
 
-// ── DA3-Streaming sentinel ────────────────────────────────────────────────────
+// ── DA3-Streaming sentinel ───────────────────────────────────────────────────
 constexpr wchar_t DepthEstimator::STREAMING_SENTINEL[];
 
 // ── Helper: locate default model ─────────────────────────────────────────────
