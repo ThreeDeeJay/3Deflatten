@@ -820,10 +820,13 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR, inputTensor, mw, mh);
     size_t frameElems = (size_t)3 * mw * mh;
 
+    // postprocess: normalise → bilinear-resize to srcW×srcH → flip → dilate.
+    // JBU is intentionally excluded here — GPU JBU (runGpuJBU) handles it entirely
+    // on-device. Keeping CPU JBU out of this path prevents the ~1 FPS fallback.
     auto postprocess = [&](const float* raw, int rw, int rh) -> HRESULT {
         std::vector<float> out(srcW * srcH);
         PostprocessDepth(raw, rw, rh, srcW, srcH, flipDepth, out,
-                         depthJBU ? srcData : nullptr, srcStride, depthJBU,
+                         nullptr, 0, /*depthJBU=*/false,
                          depthDilate, depthEdgeThresh);
         if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
             TemporalSmooth(out, smoothAlpha);
