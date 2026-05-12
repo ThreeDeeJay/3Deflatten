@@ -6,9 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED TRUE)
+set(FETCHCONTENT_FULLY_DISCONNECTED TRUE)
 set(FETCHCONTENT_USES_GIT FALSE)
 
-# ── Platform ─────────────────────────────────────────────────────────────────
+# ── Platform ───────────────────────────────────────────────────────────────────
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(ARCH_SUFFIX "x64")
     set(ORT_ARCH   "x64")
@@ -119,7 +120,7 @@ macro(ort_resolve_nuget_paths SOURCE_VAR ARCH_RID)
     set(_ORT_SRC "${${SOURCE_VAR}}")
     set(ORT_INC "${_ORT_SRC}/build/native/include")
 
-    # ── Import lib ────────────────────────────────────────────────────────────
+    # ── Import lib ─────────────────────────────────────────────────────────────
     # Microsoft.ML.OnnxRuntime.DirectML (and the plain CPU NuGet) ship the
     # import lib at:  runtimes/win-<arch>/native/onnxruntime.lib
     # NOT under build/native/lib/ (that path does not exist in these packages).
@@ -481,7 +482,7 @@ else()
     set(SHADER_OUTPUTS "")
 endif()
 
-# ── Filter DLL ────────────────────────────────────────────────────────────────
+# ── Filter DLL ──────────────────────────────────────────────────────────────────
 set(SOURCES
     src/dllmain.cpp
     src/filter.cpp
@@ -595,7 +596,7 @@ if(ORT_BACKEND STREQUAL "Unified")
     endif()
 endif()
 
-# ── Delay-load ORT ───────────────────────────────────────────────────────────
+# ── Delay-load ORT ─────────────────────────────────────────────────────────────
 # With delay-loading, onnxruntime.dll is NOT resolved at .ax load time; it is
 # resolved on first call.  This lets DllInit (dllmain.cpp) call
 # AddDllDirectory() first, which is what allows the filter to work as a
@@ -614,7 +615,7 @@ set_target_properties(3Deflatten PROPERTIES
     LINK_FLAGS "/DEF:\"${CMAKE_SOURCE_DIR}/src/3Deflatten.def\" /DELAYLOAD:onnxruntime.dll /ignore:4070 /ignore:4199"
 )
 
-# ── Copy runtime DLLs next to the .ax ─────────────────────────────────────────
+# ── Copy runtime DLLs next to the .ax ────────────────────────────────────────────
 add_custom_command(TARGET 3Deflatten POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${AX_OUTPUT_DIR}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORT_DLL}" "${AX_OUTPUT_DIR}/onnxruntime.dll"
@@ -630,7 +631,7 @@ foreach(extra_dll ${ORT_EXTRA_DLLS})
     endif()
 endforeach()
 
-# ── RC compiler flags ─────────────────────────────────────────────────────────
+# ── RC compiler flags ────────────────────────────────────────────────────────────
 set_source_files_properties(src/3Deflatten.rc PROPERTIES
     COMPILE_FLAGS "/I \"${WINSDK_INC_DIR}/um\" /I \"${CMAKE_SOURCE_DIR}/src\""
 )
