@@ -5,8 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
-set(FETCHCONTENT_UPDATES_DISCONNECTED TRUE)
-set(FETCHCONTENT_FULLY_DISCONNECTED TRUE)
+set(FETCHCONTENT_UPDATES_DISCONNECTED FALSE)
 set(FETCHCONTENT_USES_GIT FALSE)
 
 # ── Platform ───────────────────────────────────────────────────────────────────
