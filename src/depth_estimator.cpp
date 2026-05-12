@@ -909,18 +909,15 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         }
 
         // Download full-res depth result
-        cerr = cudaMemcpy(s.h_output, s.d_depthHR,
+        std::vector<float> out(srcW * srcH);
+        cerr = cudaMemcpy(out.data(), s.d_depthHR,
                           (size_t)srcW * srcH * sizeof(float),
                           cudaMemcpyDeviceToHost);
         if (cerr != cudaSuccess) {
             LOG_ERR("CUDA JBU: readback failed (", cerr, ")");
             return E_FAIL;
         }
-
-        // Postprocess at full-res (normalise + flip + dilate).
-        // depthJBU=false: the bilateral upsample is already done on the GPU above.
-        std::vector<float> out(srcW * srcH);
-        PostprocessDepth(s.h_output, srcW, srcH, srcW, srcH, flipDepth, out,
+        PostprocessDepth(out.data(), srcW, srcH, srcW, srcH, flipDepth, out,
                          nullptr, 0, /*depthJBU=*/false,
                          depthDilate, depthEdgeThresh);
         if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
