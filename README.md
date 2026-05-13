@@ -236,6 +236,15 @@ IMediaSample (input)
 ## Citation
 
 ```bibtex
+@article{video_depth_anything,
+  title={Video Depth Anything: Consistent Depth Estimation for Super-Long Videos},
+  author={Chen, Sili and Guo, Hengkai and Zhu, Shengnan and Zhang, Feihu and Huang, Zilong and Feng, Jiashi and Kang, Bingyi},
+  journal={arXiv:2501.12375},
+  year={2025}
+}
+```
+
+```bibtex
 @article{depth_anything_v2,
   title={Depth Anything V2},
   author={Yang, Lihe and Kang, Bingyi and Huang, Zilong and Zhao, Zhen and Xu, Xiaogang and Feng, Jiashi and Zhao, Hengshuang},
