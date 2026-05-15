@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// jbu_cuda.cu — CUDA Joint Bilateral Upsampling
-//
-// Change from original: the low-res guide luma buffer (glr) is now supplied
-// by the caller (pre-allocated in TrtRtxSession) instead of being allocated
-// here per call.  The old per-call cudaMalloc caused cudaError=1 whenever
-// a sticky error existed in the CUDA context from a preceding executeV2()
-// async launch, which silently fell through to the 1 FPS CPU fallback.
+// jbu_cuda.cu — CUDA Joint Bilateral Upsampling + separable max-dilation
 #include <cuda_runtime.h>
 #include "jbu_cuda.h"
 
-// Pass 1: downsample guide BGRA to low-res luma [0,1] at model-grid centres
+// ── JBU ──────────────────────────────────────────────────────────────────────
+
 __global__ void k_guide_lr(
     const unsigned char* __restrict__ g, int hrW, int hrH, int hrS,
     float* __restrict__ glr, int lrW, int lrH)
@@ -30,7 +25,6 @@ __global__ void k_guide_lr(
                    + L(x0,y1)*(1-tx)*   ty   + L(x1,y1)*tx*   ty;
 }
 
-// Pass 2: bilateral upsample — one thread per output pixel
 __global__ void k_jbu(
     const float* __restrict__ dlr, const float* __restrict__ glr,
     const unsigned char* __restrict__ g, int hrW, int hrH, int hrS,
@@ -63,13 +57,10 @@ __global__ void k_jbu(
     dhr[oy*hrW + ox] = (wS > 1e-8f) ? dS/wS : dlr[nr];
 }
 
-// guide_lr_dev: pre-allocated device buffer (lrW*lrH floats), owned by caller.
-// No cudaMalloc/cudaFree here — that was the root cause of cudaError=1.
 int jbu_cuda(const float* dlr, int lrW, int lrH,
              const unsigned char* g, int hrW, int hrH, int hrS,
              float* dhr, float ss, float sc, int radius,
-             float* glr,    // caller-allocated device buffer, lrW*lrH floats
-             void*  stream)
+             float* glr, void* stream)
 {
     cudaStream_t st = (cudaStream_t)stream;
     dim3 b(16, 16);
@@ -78,6 +69,63 @@ int jbu_cuda(const float* dlr, int lrW, int lrH,
     float i2ss = 1.f/(2.f*ss*ss), i2cs = 1.f/(2.f*sc*sc);
     k_jbu<<<dim3((hrW+15)/16,(hrH+15)/16), b, 0, st>>>(
         dlr, glr, g, hrW, hrH, hrS, lrW, lrH, dhr, i2ss, i2cs, radius);
-    // Caller owns sync + error handling
+    return (int)cudaGetLastError();
+}
+
+// ── Separable max-dilation ────────────────────────────────────────────────────
+// Two-pass (H then V): one thread per output pixel.
+// Mirrors the CPU DilateDepth logic exactly:
+//   only accept a neighbour value if it is both larger than the current best
+//   AND exceeds the center value by at least edgeThresh — prevents flat-region
+//   bleeding while expanding bright (near) edges into dark (far) halo pixels.
+
+__global__ void k_dilate_h(const float* __restrict__ in,
+                             float*       __restrict__ out,
+                             int w, int h, int radius, float edgeThresh)
+{
+    int x = blockIdx.x*blockDim.x + threadIdx.x;
+    int y = blockIdx.y;
+    if (x >= w || y >= h) return;
+    float center = in[y*w + x];
+    float best   = center;
+    int x0 = max(0, x - radius);
+    int x1 = min(w-1, x + radius);
+    for (int xi = x0; xi <= x1; ++xi) {
+        float v = in[y*w + xi];
+        if (v > best && (v - center) >= edgeThresh) best = v;
+    }
+    out[y*w + x] = best;
+}
+
+__global__ void k_dilate_v(const float* __restrict__ in,
+                             float*       __restrict__ out,
+                             int w, int h, int radius, float edgeThresh)
+{
+    int x = blockIdx.x*blockDim.x + threadIdx.x;
+    int y = blockIdx.y;
+    if (x >= w || y >= h) return;
+    float center = in[y*w + x];
+    float best   = center;
+    int y0 = max(0, y - radius);
+    int y1 = min(h-1, y + radius);
+    for (int yi = y0; yi <= y1; ++yi) {
+        float v = in[yi*w + x];
+        if (v > best && (v - center) >= edgeThresh) best = v;
+    }
+    out[y*w + x] = best;
+}
+
+// src → (H-pass) → tmp → (V-pass) → dst
+// dst may equal src (in-place via tmp scratch); tmp must differ from both.
+int gpu_dilate(const float* src, float* tmp, float* dst,
+               int w, int h, int radius, float edgeThresh,
+               void* stream)
+{
+    cudaStream_t st = (cudaStream_t)stream;
+    // Use 256 threads/block horizontally; one block-row per Y
+    dim3 block(256);
+    dim3 grid((w + 255) / 256, h);
+    k_dilate_h<<<grid, block, 0, st>>>(src, tmp, w, h, radius, edgeThresh);
+    k_dilate_v<<<grid, block, 0, st>>>(tmp, dst, w, h, radius, edgeThresh);
     return (int)cudaGetLastError();
 }

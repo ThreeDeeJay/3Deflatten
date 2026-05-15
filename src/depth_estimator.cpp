@@ -283,99 +283,112 @@ __declspec(noinline) static std::wstring GetDllDir();
 // ── TrtRtxSession ─────────────────────────────────────────────────────────────
 // Holds all TRT and CUDA state for one loaded model.
 struct DepthEstimator::TrtRtxSession {
-    TrtRtxLogger      logger;
-    TrtRuntimePtr     runtime;
-    TrtEnginePtr      engine;
-    TrtContextPtr     context;
+    TrtRtxLogger  logger;
+    TrtRuntimePtr runtime;
+    TrtEnginePtr  engine;
+    TrtContextPtr context;
 
-    // Model I/O dimensions (determined from engine after load)
     int modelW = 518, modelH = 518;
-    int depthMaxDim = 0;   // passed from DeflattenConfig; 0 = auto (1022)
-    int nbBindings = 0;
-    int inputIdx  = -1;
-    int outputIdx = -1;
+    int depthMaxDim = 0;
+    int nbBindings  = 0;
+    int inputIdx    = -1;
+    int outputIdx   = -1;
 
-    // Video model support: [B, F, C, H, W]  (nbVideoFrames > 0)
-    // nbVideoFrames = number of temporal frames the model expects.
-    // 0 means standard 4D model [B, C, H, W].
-    int nbVideoFrames = 0;
-    // Ring buffer of preprocessed CHW frame tensors (float32, already normalised).
-    // Kept in host memory; concatenated into d_input before each inference.
-    // Size = nbVideoFrames; oldest slot overwritten in round-robin order.
+    // Video model support: [B, F, C, H, W]
+    int  nbVideoFrames = 0;
     std::vector<std::vector<float>> frameRing;
-    int frameRingPos  = 0;     // next slot to write
-    bool frameRingFull = false; // becomes true once all slots have been written once
+    int  frameRingPos  = 0;
+    bool frameRingFull = false;
 
-    // CUDA resources
-    cudaStream_t stream   = nullptr;
-    float*       d_input  = nullptr;   // device [1,3,H,W]
-    float*       d_output = nullptr;   // device [1,1,H,W]
-    float*       h_output    = nullptr;   // pinned host readback
-    // ── CUDA JBU persistent buffers ───────────────────────────────────────────
-    // Allocated once on first JBU call, reallocated only on resolution change.
-    // Eliminates the per-frame cudaMalloc/cudaFree that caused cudaError=1.
-    float*    d_depthHR   = nullptr;  // device: full-res depth output  (srcW*srcH)
-    uint8_t*  d_guideBGRA = nullptr;  // device: guide frame BGRA upload (srcH*srcStride)
-    float*    d_guideLR   = nullptr;  // device: guide downsampled to model res (lrW*lrH)
-    int       jbuHrW = 0, jbuHrH = 0;
-    int       glrW   = 0, glrH   = 0;
+    // ── Double-buffered async pipeline ────────────────────────────────────────
+    // writeBuf = pipeIdx & 1  : slot receiving the current frame's GPU work.
+    // readBuf  = writeBuf ^ 1 : slot whose GPU work was submitted last call;
+    //                           we wait for its events and return its result.
+    // First call: submit writeBuf, set pipeReady=true, return E_PENDING.
+    // Subsequent calls: submit writeBuf, wait for readBuf, return readBuf data.
+    static constexpr int NBUF = 2;
 
+    // CUDA streams
+    cudaStream_t inferStream = nullptr;  // TRT inference (enqueueV3)
+    cudaStream_t jbuStream   = nullptr;  // JBU kernels + async readback
+
+    // Cross-stream synchronisation events (cudaEventDisableTiming for speed)
+    cudaEvent_t inferDone[NBUF] = {};   // inference done  → jbuStream may start
+    cudaEvent_t jbuDone[NBUF]   = {};   // JBU+readback done → CPU may read
+
+    // Per-slot device buffers
+    float*   d_input[NBUF]     = {};   // model input  [1,(F,)3,H,W]
+    float*   d_output[NBUF]    = {};   // model output [1,(F,)1,H,W]
+    void*    d_dummy            = nullptr; // shared dummy for unused TRT tensors
+
+    // Per-slot pinned host readback
+    float*   h_output[NBUF]    = {};   // model-res readback (non-JBU path)
+    float*   h_jbuOut[NBUF]    = {};   // full-res readback  (JBU path, lazy-alloc)
+
+    // Per-slot JBU device buffers (lazy-allocated on first JBU call per slot)
+    float*   d_depthHR[NBUF]   = {};   // JBU full-res output
+    uint8_t* d_guideBGRA[NBUF] = {};   // guide frame BGRA on device
+    float*   d_guideLR[NBUF]   = {};   // guide downsampled to model res
+    float*   d_dilateTmp[NBUF] = {};   // scratch for GPU separable dilate
+
+    // Per-slot JBU dimension tracking (detect resolution changes)
+    int jbuHrW[NBUF] = {}, jbuHrH[NBUF] = {};
+    int glrW[NBUF]   = {}, glrH[NBUF]   = {};
+
+    // Per-slot frame metadata — needed in the collect phase to postprocess
+    // the previous frame's readback correctly.
+    int bufMW[NBUF]     = {}, bufMH[NBUF]     = {}; // model output dims
+    int bufSrcW[NBUF]   = {}, bufSrcH[NBUF]   = {}; // source video dims
+    int bufStride[NBUF] = {};                         // source stride
+    bool bufJBU[NBUF]   = {};                         // was JBU used for this slot?
+
+    // Pipeline state
+    int  pipeIdx   = 0;     // monotonically increasing frame counter
+    bool pipeReady = false; // becomes true after first frame is submitted
+
+    // Buffer byte sizes (set in FinishTrtBuild; sized for worst-case dynamic shape)
     size_t inputBytes  = 0;
     size_t outputBytes = 0;
 
     std::string inputName, outputName;
     std::string enginePath;
 
-    // Pre-built bindings vector: one entry per IO tensor.
-    // Entries for inputIdx → d_input, outputIdx → d_output,
-    // all other outputs → d_dummy (a valid non-null device pointer).
-    // TRT10 requires every output tensor to have a non-null address.
-    std::vector<void*> bindings;
-    void*  d_dummy = nullptr;   // single shared dummy device buffer for unused outputs
-
-    // DLL handles for dynamically loaded factory functions.
-    // Kept alive for the lifetime of the session; freed in Destroy().
-    // Static linking against nvinfer_10.lib / nvonnxparser_10.lib is intentionally
-    // avoided: TRT-RTX 1.4 and standard TRT 10.x may use different export names
-    // in their .lib files even though the DLLs share the same API surface.
-    HMODULE hInfer  = nullptr;
-    HMODULE hParser = nullptr;
-
-    // ── Deferred engine build ─────────────────────────────────────────────────
-    // When no cached engine exists, LoadTrtRtxNative returns immediately after
-    // parsing the ONNX, storing the pending builder objects here.
-    // FinishBuild() is called on the first EstimateTrtRtx call — on the depth
-    // worker thread — so the potentially-minutes-long compilation never blocks
-    // the DirectShow graph thread (which would freeze the host application).
+    // Deferred build state (populated by LoadTrtRtxNative)
     bool needsBuild = false;
-    TrtBuilderPtr   pendingBuilder;
-    TrtNetworkPtr   pendingNetwork;
-    TrtConfigPtr    pendingConfig;
-    // Factory fn pointers + ONNX path stored for FP32 retry in FinishTrtBuild.
-    // After a failed FP16 build the network/config objects are internally corrupted,
-    // so the retry must re-parse from the original ONNX file.
+    TrtBuilderPtr  pendingBuilder;
+    TrtNetworkPtr  pendingNetwork;
+    TrtConfigPtr   pendingConfig;
     using FnMkRuntime = nvinfer1::IRuntime* (*)(void*, int32_t);
     using FnMkBuilder = nvinfer1::IBuilder* (*)(void*, int32_t);
     using FnMkParser  = nvonnxparser::IParser* (*)(void*, void*, int32_t);
     FnMkRuntime fnMkRuntime = nullptr;
     FnMkBuilder fnMkBuilder = nullptr;
     FnMkParser  fnMkParser  = nullptr;
-    std::string pendingOnnxPath;   // UTF-8 path used by re-parse
+    std::string pendingOnnxPath;
+
+    HMODULE hInfer  = nullptr;
+    HMODULE hParser = nullptr;
 
     ~TrtRtxSession() { Destroy(); }
     void Destroy() {
         context.reset();
         engine.reset();
         runtime.reset();
-        if (stream)      { cudaStreamDestroy(stream);    stream      = nullptr; }
-        if (d_input)     { cudaFree(d_input);            d_input     = nullptr; }
-        if (d_output)    { cudaFree(d_output);           d_output    = nullptr; }
-        if (d_dummy)     { cudaFree(d_dummy);            d_dummy     = nullptr; }
-        // Fixed: these were incorrectly nested inside the d_dummy if-block
-        if (d_depthHR)   { cudaFree(d_depthHR);         d_depthHR   = nullptr; }
-        if (d_guideBGRA) { cudaFree(d_guideBGRA);        d_guideBGRA = nullptr; }
-        if (d_guideLR)   { cudaFree(d_guideLR);          d_guideLR   = nullptr; }
-        if (h_output)    { cudaFreeHost(h_output);       h_output    = nullptr; }
+        for (int i = 0; i < NBUF; ++i) {
+            if (inferDone[i])    { cudaEventDestroy(inferDone[i]);   inferDone[i]   = nullptr; }
+            if (jbuDone[i])      { cudaEventDestroy(jbuDone[i]);     jbuDone[i]     = nullptr; }
+            if (d_input[i])      { cudaFree(d_input[i]);             d_input[i]     = nullptr; }
+            if (d_output[i])     { cudaFree(d_output[i]);            d_output[i]    = nullptr; }
+            if (h_output[i])     { cudaFreeHost(h_output[i]);        h_output[i]    = nullptr; }
+            if (h_jbuOut[i])     { cudaFreeHost(h_jbuOut[i]);        h_jbuOut[i]    = nullptr; }
+            if (d_depthHR[i])    { cudaFree(d_depthHR[i]);           d_depthHR[i]   = nullptr; }
+            if (d_guideBGRA[i])  { cudaFree(d_guideBGRA[i]);         d_guideBGRA[i] = nullptr; }
+            if (d_guideLR[i])    { cudaFree(d_guideLR[i]);           d_guideLR[i]   = nullptr; }
+            if (d_dilateTmp[i])  { cudaFree(d_dilateTmp[i]);         d_dilateTmp[i] = nullptr; }
+        }
+        if (d_dummy)     { cudaFree(d_dummy);              d_dummy     = nullptr; }
+        if (jbuStream)   { cudaStreamDestroy(jbuStream);   jbuStream   = nullptr; }
+        if (inferStream) { cudaStreamDestroy(inferStream);  inferStream = nullptr; }
         if (hParser) { FreeLibrary(hParser); hParser = nullptr; }
         if (hInfer)  { FreeLibrary(hInfer);  hInfer  = nullptr; }
     }
@@ -414,11 +427,7 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
     sess->enginePath = TrtRtxEnginePath(onnxPath, sm);
 
     // ── CUDA stream ───────────────────────────────────────────────────────────
-    cerr = cudaStreamCreate(&sess->stream);
-    if (cerr != cudaSuccess) {
-        LOG_ERR("TRT-RTX: cudaStreamCreate failed (", cerr, ")");
-        return E_FAIL;
-    }
+    // CUDA streams created in FinishTrtBuild on the worker thread.
 
     // ── Dynamically load TRT factory functions ────────────────────────────────
     // We resolve createInferBuilder_INTERNAL, createInferRuntime_INTERNAL, and
@@ -555,11 +564,9 @@ HRESULT DepthEstimator::LoadTrtRtxNative(const std::wstring& onnxPath,
 }
 HRESULT DepthEstimator::FinishTrtBuild() {
     auto& s = *m_trtRtx;
-    LOG_INFO("TRT: starting engine build on worker thread...");
+    LOG_INFO("TRT: starting engine build/init on worker thread...");
     LOG_INFO("  Flat depth shown until complete.");
 
-    // All TRT objects must be created on this thread (TRT thread affinity).
-    // This includes builder, network, parser, config — none are passed in.
     int dmd  = (s.depthMaxDim > 0) ? s.depthMaxDim : 1022;
     int base = 14;
     float sc = std::min((float)dmd/1920, (float)dmd/1080);
@@ -592,10 +599,8 @@ HRESULT DepthEstimator::FinishTrtBuild() {
         LOG_INFO("TRT: parsed OK. Inputs=", network->getNbInputs(),
                  " Outputs=", network->getNbOutputs());
 
-        // Log and extract input dims
         nvinfer1::Dims inputDims{};
-        std::string inputName;
-        std::string outputName;
+        std::string inputName, outputName;
         for (int i = 0; i < network->getNbInputs(); ++i) {
             auto* t = network->getInput(i);
             auto  d = t->getDimensions();
@@ -610,7 +615,6 @@ HRESULT DepthEstimator::FinishTrtBuild() {
             if (i == 0) outputName = t->getName();
         }
 
-        // Infer nbVideoFrames and spatial dims from this fresh parse
         int F = 1;
         if (inputDims.nbDims == 5) {
             F = (inputDims.d[1] > 0) ? (int)inputDims.d[1] : 1;
@@ -634,7 +638,6 @@ HRESULT DepthEstimator::FinishTrtBuild() {
         cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)8 << 30);
         LOG_INFO("TRT: precision=", precision, " workspace=8GB");
 
-        // Optimization profile
         bool hasDynamic = false;
         for (int k = 0; k < inputDims.nbDims; ++k)
             if (inputDims.d[k] < 0) { hasDynamic = true; break; }
@@ -653,31 +656,29 @@ HRESULT DepthEstimator::FinishTrtBuild() {
                 profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kOPT,d5(1,F,3,sH,sW));
                 profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kMAX,d5(1,F,3,mxH,mxW));
                 s.modelH=sH; s.modelW=sW;
-                LOG_INFO("TRT: 5D profile F=",F," spatial=",sW,"×",sH);
+                LOG_INFO("TRT: 5D profile F=",F," spatial=",sW,"x",sH);
             } else {
                 profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kMIN,nvinfer1::Dims4{1,3,base,base});
                 profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kOPT,nvinfer1::Dims4{1,3,optH,optW});
                 profile->setDimensions(inputName.c_str(),nvinfer1::OptProfileSelector::kMAX,nvinfer1::Dims4{1,3,dmd,dmd});
-                LOG_INFO("TRT: 4D profile opt=",optW,"×",optH," max=",dmd,"×",dmd);
+                LOG_INFO("TRT: 4D profile opt=",optW,"x",optH," max=",dmd,"x",dmd);
             }
             cfg->addOptimizationProfile(profile);
         }
 
         LOG_INFO("TRT: buildSerializedNetwork starting (", precision, ")...");
         TrtHostMemPtr ser(builder->buildSerializedNetwork(*network, *cfg));
-        // builder/network/cfg/parser are destroyed here on scope exit (worker thread)
         return ser;
     };
 
-    // ── Attempt FP16, fall back to FP32 with fresh objects ───────────────────
-    // Skip if engine was already deserialised from cache (needsBuild=true but engine!=null).
+    // ── Attempt FP16, fall back to FP32 ──────────────────────────────────────
     TrtHostMemPtr serialized;
     std::string usedPrecision = "cached";
     if (!s.engine) {
         serialized = buildEngine(true);
         usedPrecision = "fp16";
         if (!serialized) {
-            LOG_WARN("TRT: FP16 build failed. Retrying in FP32 with fresh TRT objects...");
+            LOG_WARN("TRT: FP16 build failed. Retrying in FP32...");
             auto pos = s.enginePath.rfind("_fp16.bin");
             if (pos != std::string::npos) s.enginePath.replace(pos, 9, "_fp32.bin");
             serialized = buildEngine(false);
@@ -690,7 +691,6 @@ HRESULT DepthEstimator::FinishTrtBuild() {
         }
         LOG_INFO("TRT: engine serialized OK (", serialized->size()/1024/1024, " MB, ",
                  usedPrecision, ").");
-        // Save to disk
         {
             std::ofstream f(s.enginePath, std::ios::binary);
             if (f) {
@@ -700,7 +700,6 @@ HRESULT DepthEstimator::FinishTrtBuild() {
                 LOG_WARN("TRT: could not write engine cache.");
             }
         }
-        // Deserialise on worker thread (CUDA context now active)
         s.runtime.reset(s.fnMkRuntime(&s.logger, NV_TENSORRT_VERSION));
         if (!s.runtime) { LOG_ERR("TRT: createInferRuntime failed."); return E_FAIL; }
         s.engine.reset(s.runtime->deserializeCudaEngine(serialized->data(), serialized->size()));
@@ -711,10 +710,11 @@ HRESULT DepthEstimator::FinishTrtBuild() {
         usedPrecision = "cached";
     }
 
-    // ── Context, bindings, buffers (all on worker thread) ────────────────────
+    // ── Context ───────────────────────────────────────────────────────────────
     s.context.reset(s.engine->createExecutionContext());
     if (!s.context) { LOG_ERR("TRT: createExecutionContext failed."); return E_FAIL; }
 
+    // ── Enumerate I/O tensors ─────────────────────────────────────────────────
     bool engineIsDynamic = false;
     {
         int nb = s.engine->getNbIOTensors();
@@ -750,11 +750,11 @@ HRESULT DepthEstimator::FinishTrtBuild() {
                      return s.context->setInputShape(s.inputName.c_str(),d); }()
                 :
                 s.context->setInputShape(s.inputName.c_str(), nvinfer1::Dims4{1,3,s.modelH,s.modelW});
-            if (!ok) LOG_WARN("TRT: setInputShape failed in FinishTrtBuild.");
+            if (!ok) LOG_WARN("TRT: initial setInputShape failed in FinishTrtBuild.");
         }
     }
 
-    // Buffer sizes
+    // ── Buffer sizes ──────────────────────────────────────────────────────────
     int F = (s.nbVideoFrames>0)?s.nbVideoFrames:1;
     if (engineIsDynamic) {
         s.inputBytes  = sizeof(float)*3*(size_t)dmd*dmd*(size_t)F;
@@ -763,31 +763,50 @@ HRESULT DepthEstimator::FinishTrtBuild() {
         s.inputBytes  = sizeof(float)*3*(size_t)s.modelH*s.modelW*(size_t)F;
         s.outputBytes = sizeof(float)*1*(size_t)s.modelH*s.modelW*(size_t)F;
     }
-    LOG_INFO("TRT: buffer in=", s.inputBytes/1024, " KB  out=", s.outputBytes/1024, " KB");
+    LOG_INFO("TRT: buffer in=", s.inputBytes/1024, " KB  out=", s.outputBytes/1024,
+             " KB  (x", TrtRtxSession::NBUF, " double-buffered)");
 
+    // ── CUDA streams + events ─────────────────────────────────────────────────
     cudaError_t cerr;
-    cerr=cudaMalloc(reinterpret_cast<void**>(&s.d_input),  s.inputBytes);  if(cerr){LOG_ERR("cudaMalloc(input)=",cerr);  return E_FAIL;}
-    cerr=cudaMalloc(reinterpret_cast<void**>(&s.d_output), s.outputBytes); if(cerr){LOG_ERR("cudaMalloc(output)=",cerr); return E_FAIL;}
-    cerr=cudaMallocHost(reinterpret_cast<void**>(&s.h_output), s.outputBytes); if(cerr){LOG_ERR("cudaMallocHost=",cerr); return E_FAIL;}
+    cerr = cudaStreamCreate(&s.inferStream);
+    if (cerr) { LOG_ERR("cudaStreamCreate(inferStream)=", cerr); return E_FAIL; }
+    cerr = cudaStreamCreate(&s.jbuStream);
+    if (cerr) { LOG_ERR("cudaStreamCreate(jbuStream)=", cerr); return E_FAIL; }
+    for (int i = 0; i < TrtRtxSession::NBUF; ++i) {
+        cerr = cudaEventCreateWithFlags(&s.inferDone[i], cudaEventDisableTiming);
+        if (cerr) { LOG_ERR("cudaEventCreate(inferDone[", i, "])=", cerr); return E_FAIL; }
+        cerr = cudaEventCreateWithFlags(&s.jbuDone[i], cudaEventDisableTiming);
+        if (cerr) { LOG_ERR("cudaEventCreate(jbuDone[", i, "])=", cerr); return E_FAIL; }
+    }
 
-    // Dummy buffer for unused outputs
+    // ── Double-buffered device + host memory ──────────────────────────────────
+    for (int i = 0; i < TrtRtxSession::NBUF; ++i) {
+        cerr = cudaMalloc(reinterpret_cast<void**>(&s.d_input[i]),  s.inputBytes);
+        if (cerr) { LOG_ERR("cudaMalloc(d_input[", i, "])=", cerr); return E_FAIL; }
+        cerr = cudaMalloc(reinterpret_cast<void**>(&s.d_output[i]), s.outputBytes);
+        if (cerr) { LOG_ERR("cudaMalloc(d_output[", i, "])=", cerr); return E_FAIL; }
+        cerr = cudaMallocHost(reinterpret_cast<void**>(&s.h_output[i]), s.outputBytes);
+        if (cerr) { LOG_ERR("cudaMallocHost(h_output[", i, "])=", cerr); return E_FAIL; }
+        // h_jbuOut: lazy-allocated in EstimateTrtRtx when srcW/srcH are known
+    }
+
+    // ── Shared dummy buffer for unused TRT output tensors ─────────────────────
     size_t dummyBytes = 16;
     for (int i = 0; i < s.nbBindings; ++i) {
-        if (i==s.inputIdx||i==s.outputIdx) continue;
-        auto sh=s.engine->getTensorShape(s.engine->getIOTensorName(i));
-        size_t elems=1; for(int k=0;k<sh.nbDims;++k) elems*=(sh.d[k]>0?(size_t)sh.d[k]:(size_t)dmd);
-        if (elems*sizeof(float)>dummyBytes) dummyBytes=elems*sizeof(float);
+        auto sh = s.engine->getTensorShape(s.engine->getIOTensorName(i));
+        size_t elems = 1;
+        for (int k = 0; k < sh.nbDims; ++k)
+            elems *= (sh.d[k] > 0 ? (size_t)sh.d[k] : (size_t)dmd);
+        if (elems * sizeof(float) > dummyBytes) dummyBytes = elems * sizeof(float);
     }
     cudaMalloc(&s.d_dummy, dummyBytes);
 
-    s.bindings.assign((size_t)s.nbBindings, s.d_dummy);
-    if (s.inputIdx >=0&&s.inputIdx <s.nbBindings) s.bindings[s.inputIdx ]=s.d_input;
-    if (s.outputIdx>=0&&s.outputIdx<s.nbBindings) s.bindings[s.outputIdx]=s.d_output;
-
-    if (F>1) {
-        size_t fe=(size_t)3*s.modelH*s.modelW;
+    // ── Frame ring for 5D video models ────────────────────────────────────────
+    if (F > 1) {
+        size_t fe = (size_t)3 * s.modelH * s.modelW;
         s.frameRing.assign(F, std::vector<float>(fe, 0.5f));
-        s.frameRingPos=0; s.frameRingFull=false;
+        s.frameRingPos  = 0;
+        s.frameRingFull = false;
     }
 
     m_dynamicInput = engineIsDynamic;
@@ -795,13 +814,255 @@ HRESULT DepthEstimator::FinishTrtBuild() {
     m_modelInputH  = s.modelH;
 
     s.needsBuild = false;
-    LOG_INFO("TRT: FinishTrtBuild complete (",usedPrecision,") — dims=",
-             s.modelW,"×",s.modelH," F=",F," dynamic=",engineIsDynamic?"yes":"no");
+    LOG_INFO("TRT: FinishTrtBuild complete (", usedPrecision, ") — dims=",
+             s.modelW, "x", s.modelH, " F=", F,
+             " dynamic=", engineIsDynamic ? "yes" : "no",
+             "  pipeline: double-buffered async enqueueV3");
     return S_OK;
 }
 
 HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          int srcStride, bool isBGR, bool flipDepth,
+                                         float smoothAlpha, int depthDilate,
+                                         float depthEdgeThresh, bool depthJBU,
+                                         DepthResult& result) {
+    auto& s = *m_trtRtx;
+
+    // First call after a deferred build: compile/init on the worker thread.
+    if (s.needsBuild) {
+        HRESULT hr = FinishTrtBuild();
+        if (FAILED(hr)) return hr;
+        return E_PENDING;
+    }
+
+    // ── Buffer slot selection ─────────────────────────────────────────────────
+    int writeBuf = s.pipeIdx & 1;   // slot for this frame's GPU work
+    int readBuf  = writeBuf ^ 1;    // slot whose GPU work was submitted last call
+
+    // ── Preprocess current frame (CPU) ────────────────────────────────────────
+    std::vector<float> inputTensor;
+    int mw, mh;
+    PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR, inputTensor, mw, mh);
+    size_t frameElems = (size_t)3 * mw * mh;
+
+    // ── Update video ring buffer (5D models) ──────────────────────────────────
+    if (s.nbVideoFrames > 1) {
+        int F = s.nbVideoFrames;
+        if ((int)s.frameRing.size() != F ||
+            (!s.frameRing.empty() && s.frameRing[0].size() != frameElems)) {
+            s.frameRing.assign(F, std::vector<float>(frameElems, 0.5f));
+            s.frameRingPos  = 0;
+            s.frameRingFull = false;
+        }
+        s.frameRing[s.frameRingPos] = inputTensor;
+        s.frameRingPos = (s.frameRingPos + 1) % F;
+        if (!s.frameRingFull && s.frameRingPos == 0) s.frameRingFull = true;
+
+        // Assemble [1,F,3,H,W] in chronological order
+        std::vector<float> videoInput((size_t)F * frameElems);
+        for (int fi = 0; fi < F; ++fi) {
+            int slot = (s.frameRingPos + fi) % F;
+            std::memcpy(videoInput.data() + (size_t)fi * frameElems,
+                        s.frameRing[slot].data(), frameElems * sizeof(float));
+        }
+        inputTensor = std::move(videoInput);
+    }
+
+    // ── Set input shape (dynamic models) ─────────────────────────────────────
+    if (m_dynamicInput) {
+        bool ok;
+        if (s.nbVideoFrames > 1) {
+            int F = s.nbVideoFrames;
+            nvinfer1::Dims d{}; d.nbDims=5;
+            d.d[0]=1; d.d[1]=F; d.d[2]=3; d.d[3]=mh; d.d[4]=mw;
+            ok = s.context->setInputShape(s.inputName.c_str(), d);
+        } else {
+            ok = s.context->setInputShape(s.inputName.c_str(),
+                                           nvinfer1::Dims4{1,3,mh,mw});
+        }
+        if (!ok) { LOG_ERR("TRT: setInputShape(", mh, "x", mw, ") failed."); return E_FAIL; }
+        s.modelW = mw; s.modelH = mh;
+    }
+
+    // ── Upload input to GPU (inferStream, async) ──────────────────────────────
+    size_t uploadBytes = inputTensor.size() * sizeof(float);
+    if (uploadBytes > s.inputBytes) {
+        LOG_ERR("TRT: input (", uploadBytes, " B) > allocated buffer (", s.inputBytes, " B)");
+        return E_FAIL;
+    }
+    cudaMemcpyAsync(s.d_input[writeBuf], inputTensor.data(), uploadBytes,
+                    cudaMemcpyHostToDevice, s.inferStream);
+
+    // ── Set tensor addresses and launch inference asynchronously ──────────────
+    s.context->setTensorAddress(s.inputName.c_str(),  s.d_input[writeBuf]);
+    s.context->setTensorAddress(s.outputName.c_str(), s.d_output[writeBuf]);
+    // Set dummy address for any auxiliary output tensors
+    for (int i = 0; i < s.nbBindings; ++i) {
+        const char* tn = s.engine->getIOTensorName(i);
+        auto mode = s.engine->getTensorIOMode(tn);
+        if (mode == nvinfer1::TensorIOMode::kOUTPUT &&
+            s.outputName != tn) {
+            s.context->setTensorAddress(tn, s.d_dummy);
+        }
+        if (mode == nvinfer1::TensorIOMode::kINPUT &&
+            s.inputName != tn) {
+            s.context->setTensorAddress(tn, s.d_dummy);
+        }
+    }
+
+    // enqueueV3 is fully async — CPU returns before GPU finishes inference.
+    if (!s.context->enqueueV3(s.inferStream)) {
+        LOG_ERR("TRT: enqueueV3 failed.");
+        return E_FAIL;
+    }
+    // Record event so jbuStream can wait without polling
+    cudaEventRecord(s.inferDone[writeBuf], s.inferStream);
+
+    // ── Submit JBU / readback on jbuStream (waits for inference via event) ────
+    // jbuStream blocks on inferDone — GPU will sequence automatically.
+    cudaStreamWaitEvent(s.jbuStream, s.inferDone[writeBuf], 0);
+
+    // Store metadata needed to postprocess this slot's result in the next call
+    s.bufMW[writeBuf]     = mw;
+    s.bufMH[writeBuf]     = mh;
+    s.bufSrcW[writeBuf]   = srcW;
+    s.bufSrcH[writeBuf]   = srcH;
+    s.bufStride[writeBuf] = srcStride;
+    s.bufJBU[writeBuf]    = false; // updated below if JBU succeeds
+
+    // Point at the last temporal frame in the output tensor (5D models)
+    int F = (s.nbVideoFrames > 0) ? s.nbVideoFrames : 1;
+    float* d_outSlice = s.d_output[writeBuf] + (size_t)(F-1) * mw * mh;
+
+    if (depthJBU) {
+        // ── Ensure per-slot JBU buffers (lazy alloc / realloc on size change) ──
+        bool needAlloc = (s.jbuHrW[writeBuf] != srcW || s.jbuHrH[writeBuf] != srcH ||
+                          s.glrW[writeBuf]   != mw   || s.glrH[writeBuf]   != mh);
+        if (needAlloc) {
+            // Free existing
+            if (s.d_depthHR[writeBuf])   cudaFree(s.d_depthHR[writeBuf]);
+            if (s.d_guideBGRA[writeBuf]) cudaFree(s.d_guideBGRA[writeBuf]);
+            if (s.d_guideLR[writeBuf])   cudaFree(s.d_guideLR[writeBuf]);
+            if (s.d_dilateTmp[writeBuf]) cudaFree(s.d_dilateTmp[writeBuf]);
+            if (s.h_jbuOut[writeBuf])    cudaFreeHost(s.h_jbuOut[writeBuf]);
+            s.d_depthHR[writeBuf]   = nullptr;
+            s.d_guideBGRA[writeBuf] = nullptr;
+            s.d_guideLR[writeBuf]   = nullptr;
+            s.d_dilateTmp[writeBuf] = nullptr;
+            s.h_jbuOut[writeBuf]    = nullptr;
+            s.jbuHrW[writeBuf] = s.jbuHrH[writeBuf] = 0;
+            s.glrW[writeBuf]   = s.glrH[writeBuf]   = 0;
+
+            cudaError_t e1 = cudaMalloc(reinterpret_cast<void**>(&s.d_depthHR[writeBuf]),
+                                         (size_t)srcW * srcH * sizeof(float));
+            cudaError_t e2 = cudaMalloc(reinterpret_cast<void**>(&s.d_guideBGRA[writeBuf]),
+                                         (size_t)srcH * srcStride);
+            cudaError_t e3 = cudaMalloc(reinterpret_cast<void**>(&s.d_guideLR[writeBuf]),
+                                         (size_t)mw * mh * sizeof(float));
+            cudaError_t e4 = cudaMalloc(reinterpret_cast<void**>(&s.d_dilateTmp[writeBuf]),
+                                         (size_t)srcW * srcH * sizeof(float));
+            cudaError_t e5 = cudaMallocHost(reinterpret_cast<void**>(&s.h_jbuOut[writeBuf]),
+                                             (size_t)srcW * srcH * sizeof(float));
+            if (e1 || e2 || e3 || e4 || e5) {
+                LOG_ERR("CUDA JBU alloc failed slot=", writeBuf,
+                        " (e1=", e1, " e2=", e2, " e3=", e3, " e4=", e4, " e5=", e5, ")");
+                if (s.d_depthHR[writeBuf])   { cudaFree(s.d_depthHR[writeBuf]);   s.d_depthHR[writeBuf]   = nullptr; }
+                if (s.d_guideBGRA[writeBuf]) { cudaFree(s.d_guideBGRA[writeBuf]); s.d_guideBGRA[writeBuf] = nullptr; }
+                if (s.d_guideLR[writeBuf])   { cudaFree(s.d_guideLR[writeBuf]);   s.d_guideLR[writeBuf]   = nullptr; }
+                if (s.d_dilateTmp[writeBuf]) { cudaFree(s.d_dilateTmp[writeBuf]); s.d_dilateTmp[writeBuf] = nullptr; }
+                if (s.h_jbuOut[writeBuf])    { cudaFreeHost(s.h_jbuOut[writeBuf]); s.h_jbuOut[writeBuf]   = nullptr; }
+                goto submit_plain_readback;
+            }
+            s.jbuHrW[writeBuf] = srcW; s.jbuHrH[writeBuf] = srcH;
+            s.glrW[writeBuf]   = mw;   s.glrH[writeBuf]   = mh;
+        }
+
+        // All JBU kernels run on jbuStream (which already waits for inferDone)
+        cudaGetLastError(); // clear any sticky error from async enqueueV3
+        cudaMemcpyAsync(s.d_guideBGRA[writeBuf], srcData,
+                        (size_t)srcH * srcStride,
+                        cudaMemcpyHostToDevice, s.jbuStream);
+        jbu_cuda(d_outSlice, mw, mh,
+                 s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
+                 s.d_depthHR[writeBuf],
+                 1.0f, 0.10f, 2,
+                 s.d_guideLR[writeBuf], s.jbuStream);
+        // GPU dilation (replaces CPU DilateDepth for the JBU path)
+        if (depthDilate > 0) {
+            gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
+                       s.d_depthHR[writeBuf],
+                       srcW, srcH, depthDilate, depthEdgeThresh,
+                       s.jbuStream);
+        }
+        // Async readback of full-res depth
+        cudaMemcpyAsync(s.h_jbuOut[writeBuf], s.d_depthHR[writeBuf],
+                        (size_t)srcW * srcH * sizeof(float),
+                        cudaMemcpyDeviceToHost, s.jbuStream);
+        s.bufJBU[writeBuf] = true;
+        goto record_and_pipeline;
+    }
+
+submit_plain_readback:
+    {
+        // Non-JBU path: async readback of model-res output
+        size_t outSliceBytes = (size_t)mw * mh * sizeof(float);
+        cudaMemcpyAsync(s.h_output[writeBuf], d_outSlice, outSliceBytes,
+                        cudaMemcpyDeviceToHost, s.jbuStream);
+    }
+
+record_and_pipeline:
+    // Record event that CPU will wait on in the collect phase
+    cudaEventRecord(s.jbuDone[writeBuf], s.jbuStream);
+    ++s.pipeIdx;
+
+    // ── First frame: prime the pipeline — no result available yet ─────────────
+    if (!s.pipeReady) {
+        s.pipeReady = true;
+        return E_PENDING; // filter uses flat depth for this one frame
+    }
+
+    // ── Collect: wait for readBuf's GPU work and postprocess on CPU ───────────
+    // While we wait, GPU is running inference + JBU for writeBuf in parallel.
+    cudaEventSynchronize(s.jbuDone[readBuf]);
+
+    // Recover readBuf metadata
+    int rsrcW   = s.bufSrcW[readBuf],   rsrcH   = s.bufSrcH[readBuf];
+    int rmw     = s.bufMW[readBuf],     rmh     = s.bufMH[readBuf];
+    bool rJBU   = s.bufJBU[readBuf];
+
+    std::vector<float> out(rsrcW * rsrcH);
+
+    if (rJBU && s.h_jbuOut[readBuf]) {
+        // JBU path: full-res data in h_jbuOut — normalise + flip.
+        // GPU dilation was already applied on-device before readback.
+        const float* raw = s.h_jbuOut[readBuf];
+        float mn = raw[0], mx = raw[0];
+        int N = rsrcW * rsrcH;
+        for (int i = 1; i < N; ++i) {
+            if (raw[i] < mn) mn = raw[i];
+            if (raw[i] > mx) mx = raw[i];
+        }
+        float range = (mx - mn) > 1e-6f ? (mx - mn) : 1e-6f;
+        for (int i = 0; i < N; ++i) {
+            float v = (raw[i] - mn) / range;
+            out[i] = flipDepth ? 1.f - v : v;
+        }
+        // CPU dilate already done on GPU; skip here.
+    } else {
+        // Non-JBU path: model-res data → PostprocessDepth does norm+resize+flip+dilate
+        PostprocessDepth(s.h_output[readBuf], rmw, rmh, rsrcW, rsrcH,
+                         flipDepth, out, nullptr, 0, /*depthJBU=*/false,
+                         depthDilate, depthEdgeThresh);
+    }
+
+    if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
+        TemporalSmooth(out, smoothAlpha);
+
+    result.data   = std::move(out);
+    result.width  = rsrcW;
+    result.height = rsrcH;
+    return S_OK;
+}
                                          float smoothAlpha, int depthDilate,
                                          float depthEdgeThresh, bool depthJBU,
                                          DepthResult& result) {
