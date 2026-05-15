@@ -745,11 +745,15 @@ HRESULT DepthEstimator::FinishTrtBuild() {
 
         if (!s.inputName.empty() && engineIsDynamic) {
             int F = (s.nbVideoFrames>0)?s.nbVideoFrames:1;
-            bool ok = (F>1) ?
-                [&]{ nvinfer1::Dims d{}; d.nbDims=5; d.d[0]=1;d.d[1]=F;d.d[2]=3;d.d[3]=s.modelH;d.d[4]=s.modelW;
-                     return s.context->setInputShape(s.inputName.c_str(),d); }()
-                :
-                s.context->setInputShape(s.inputName.c_str(), nvinfer1::Dims4{1,3,s.modelH,s.modelW});
+            bool ok;
+            if (F > 1) {
+                nvinfer1::Dims d{};
+                d.nbDims=5; d.d[0]=1; d.d[1]=F; d.d[2]=3; d.d[3]=s.modelH; d.d[4]=s.modelW;
+                ok = s.context->setInputShape(s.inputName.c_str(), d);
+            } else {
+                ok = s.context->setInputShape(s.inputName.c_str(),
+                                               nvinfer1::Dims4{1,3,s.modelH,s.modelW});
+            }
             if (!ok) LOG_WARN("TRT: initial setInputShape failed in FinishTrtBuild.");
         }
     }
