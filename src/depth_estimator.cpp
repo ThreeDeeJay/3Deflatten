@@ -1067,7 +1067,9 @@ record_and_pipeline:
     result.height = rsrcH;
     return S_OK;
 }
-
+                                         float smoothAlpha, int depthDilate,
+                                         float depthEdgeThresh, bool depthJBU,
+                                         DepthResult& result) {
     auto& s = *m_trtRtx;
 
     // On first call after a deferred build, compile the engine now (worker thread).
