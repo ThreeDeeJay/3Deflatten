@@ -575,10 +575,9 @@ HRESULT DepthEstimator::FinishTrtBuild() {
 
     // ── Build engine if no cached copy was loaded ────────────────────────────
     // Two attempts: FP16 first, FP32 fallback.
-    // All TRT objects (builder/network/parser/config) are scoped to each
-    // attempt so they are destroyed automatically before the next one.
-    // No lambdas used here — MSVC rejects lambdas-inside-lambdas in some
-    // configurations even when the inner lambda has no capture.
+    // All TRT objects are scoped to each loop body so they are destroyed
+    // before the next attempt.  No lambdas used here — MSVC rejects
+    // lambdas-inside-lambdas (C2062/C2447) in certain build configurations.
     std::string usedPrecision = "cached";
 
     if (!s.engine) {
@@ -638,7 +637,6 @@ HRESULT DepthEstimator::FinishTrtBuild() {
 
             TrtConfigPtr cfg(builder->createBuilderConfig());
             if (!cfg) { LOG_ERR("TRT: createBuilderConfig returned null."); break; }
-
             if (tryFP16) cfg->setFlag(nvinfer1::BuilderFlag::kFP16);
             cfg->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, (size_t)8 << 30);
             LOG_INFO("TRT: precision=", precStr, "  workspace=8 GB");
@@ -658,7 +656,8 @@ HRESULT DepthEstimator::FinishTrtBuild() {
                     const int mxH = (inputDims.d[3] > 0) ? sH : dmd;
                     const int mxW = (inputDims.d[4] > 0) ? sW : dmd;
                     s.modelH = sH; s.modelW = sW;
-                    // Build Dims explicitly — avoids lambda-inside-lambda (MSVC C2062/C2447)
+                    // Explicit Dims — avoids d5=[](int...) lambda inside [&] lambda
+                    // which MSVC misparses as old-style K&R declaration (C2062/C2447).
                     nvinfer1::Dims dMin{}; dMin.nbDims=5;
                     dMin.d[0]=1; dMin.d[1]=F; dMin.d[2]=3; dMin.d[3]=mnH; dMin.d[4]=mnW;
                     nvinfer1::Dims dOpt{}; dOpt.nbDims=5;
@@ -693,7 +692,7 @@ HRESULT DepthEstimator::FinishTrtBuild() {
                         s.enginePath.replace(pos, 9, "_fp32.bin");
                     continue;
                 }
-                LOG_ERR("TRT: buildSerializedNetwork returned null for both FP16 and FP32.");
+                LOG_ERR("TRT: buildSerializedNetwork returned null for both precisions.");
                 s.needsBuild = false;
                 return E_FAIL;
             }
@@ -701,7 +700,6 @@ HRESULT DepthEstimator::FinishTrtBuild() {
             LOG_INFO("TRT: engine serialized OK  size=", ser->size() / 1024 / 1024,
                      " MB  precision=", precStr);
             usedPrecision = tryFP16 ? "fp16" : "fp32";
-
             {
                 std::ofstream f(s.enginePath, std::ios::binary);
                 if (f) {
@@ -711,7 +709,6 @@ HRESULT DepthEstimator::FinishTrtBuild() {
                     LOG_WARN("TRT: could not write engine cache.");
                 }
             }
-
             s.runtime.reset(s.fnMkRuntime(&s.logger, NV_TENSORRT_VERSION));
             if (!s.runtime) { LOG_ERR("TRT: createInferRuntime failed."); return E_FAIL; }
             s.engine.reset(s.runtime->deserializeCudaEngine(ser->data(), ser->size()));
@@ -734,9 +731,9 @@ HRESULT DepthEstimator::FinishTrtBuild() {
     {
         const int nb = s.engine->getNbIOTensors();
         for (int i = 0; i < nb; ++i) {
-            const char* tn = s.engine->getIOTensorName(i);
-            auto ioMode    = s.engine->getTensorIOMode(tn);
-            const bool isIn = (ioMode == nvinfer1::TensorIOMode::kINPUT);
+            const char* tn    = s.engine->getIOTensorName(i);
+            auto        ioMode = s.engine->getTensorIOMode(tn);
+            const bool  isIn  = (ioMode == nvinfer1::TensorIOMode::kINPUT);
             LOG_INFO("TRT: tensor[", i, "] '", tn, "'  ", isIn ? "INPUT" : "OUTPUT");
 
             if (isIn && s.inputIdx < 0) {
@@ -765,7 +762,7 @@ HRESULT DepthEstimator::FinishTrtBuild() {
             bool shapeOK;
             if (F > 1) {
                 nvinfer1::Dims d{};
-                d.nbDims = 5; d.d[0]=1; d.d[1]=F; d.d[2]=3;
+                d.nbDims=5; d.d[0]=1; d.d[1]=F; d.d[2]=3;
                 d.d[3]=s.modelH; d.d[4]=s.modelW;
                 shapeOK = s.context->setInputShape(s.inputName.c_str(), d);
             } else {
@@ -812,7 +809,6 @@ HRESULT DepthEstimator::FinishTrtBuild() {
         if (cerr) { LOG_ERR("cudaMallocHost(h_output[", i, "])=", cerr); return E_FAIL; }
     }
 
-    // Dummy buffer for unused TRT output tensors
     size_t dummyBytes = 16;
     for (int i = 0; i < s.nbBindings; ++i) {
         const char* tn = s.engine->getIOTensorName(i);
@@ -824,7 +820,6 @@ HRESULT DepthEstimator::FinishTrtBuild() {
     }
     cudaMalloc(&s.d_dummy, dummyBytes);
 
-    // ── Frame ring for 5D models ──────────────────────────────────────────────
     if (F > 1) {
         const size_t fe = (size_t)3 * s.modelH * s.modelW;
         s.frameRing.assign(F, std::vector<float>(fe, 0.5f));
@@ -846,6 +841,214 @@ HRESULT DepthEstimator::FinishTrtBuild() {
 
 HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          int srcStride, bool isBGR, bool flipDepth,
+                                         float smoothAlpha, int depthDilate,
+                                         float depthEdgeThresh, bool depthJBU,
+                                         DepthResult& result) {
+    auto& s = *m_trtRtx;
+
+    if (s.needsBuild) {
+        HRESULT hr = FinishTrtBuild();
+        if (FAILED(hr)) return hr;
+        return E_PENDING;
+    }
+
+    // ── Buffer slot selection ─────────────────────────────────────────────────
+    const int writeBuf = s.pipeIdx & 1;
+    const int readBuf  = writeBuf ^ 1;
+
+    // ── Preprocess current frame (CPU) ────────────────────────────────────────
+    std::vector<float> inputTensor;
+    int mw = 0, mh = 0;
+    PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR, inputTensor, mw, mh);
+
+    // ── Update video ring buffer (5D models) ──────────────────────────────────
+    if (s.nbVideoFrames > 1) {
+        const int F     = s.nbVideoFrames;
+        const size_t fe = (size_t)3 * mw * mh;
+        if ((int)s.frameRing.size() != F ||
+            (!s.frameRing.empty() && s.frameRing[0].size() != fe)) {
+            s.frameRing.assign(F, std::vector<float>(fe, 0.5f));
+            s.frameRingPos  = 0;
+            s.frameRingFull = false;
+        }
+        s.frameRing[s.frameRingPos] = inputTensor;
+        s.frameRingPos = (s.frameRingPos + 1) % F;
+        if (!s.frameRingFull && s.frameRingPos == 0) s.frameRingFull = true;
+
+        std::vector<float> video((size_t)F * fe);
+        for (int fi = 0; fi < F; ++fi) {
+            const int slot = (s.frameRingPos + fi) % F;
+            std::memcpy(video.data() + (size_t)fi * fe,
+                        s.frameRing[slot].data(), fe * sizeof(float));
+        }
+        inputTensor = std::move(video);
+    }
+
+    // ── Set input shape (dynamic models) ─────────────────────────────────────
+    if (m_dynamicInput) {
+        bool shapeOK;
+        if (s.nbVideoFrames > 1) {
+            const int F = s.nbVideoFrames;
+            nvinfer1::Dims d{};
+            d.nbDims=5; d.d[0]=1; d.d[1]=F; d.d[2]=3; d.d[3]=mh; d.d[4]=mw;
+            shapeOK = s.context->setInputShape(s.inputName.c_str(), d);
+        } else {
+            nvinfer1::Dims4 d4(1, 3, mh, mw);
+            shapeOK = s.context->setInputShape(s.inputName.c_str(), d4);
+        }
+        if (!shapeOK) {
+            LOG_ERR("TRT: setInputShape(", mh, "x", mw, ") failed.");
+            return E_FAIL;
+        }
+        s.modelW = mw; s.modelH = mh;
+    }
+
+    // ── Upload input to GPU (inferStream, async) ──────────────────────────────
+    const size_t uploadBytes = inputTensor.size() * sizeof(float);
+    if (uploadBytes > s.inputBytes) {
+        LOG_ERR("TRT: input (", uploadBytes, " B) > buffer (", s.inputBytes, " B)");
+        return E_FAIL;
+    }
+    cudaMemcpyAsync(s.d_input[writeBuf], inputTensor.data(), uploadBytes,
+                    cudaMemcpyHostToDevice, s.inferStream);
+
+    // ── Set tensor addresses and launch inference asynchronously ──────────────
+    s.context->setTensorAddress(s.inputName.c_str(),  s.d_input[writeBuf]);
+    s.context->setTensorAddress(s.outputName.c_str(), s.d_output[writeBuf]);
+    // Set dummy address for auxiliary tensors — check by name, not by mode,
+    // to avoid the C4189 unused-variable warning that 'mode' would generate.
+    for (int i = 0; i < s.nbBindings; ++i) {
+        const char* tn = s.engine->getIOTensorName(i);
+        if (s.inputName != tn && s.outputName != tn)
+            s.context->setTensorAddress(tn, s.d_dummy);
+    }
+    if (!s.context->enqueueV3(s.inferStream)) {
+        LOG_ERR("TRT: enqueueV3 failed."); return E_FAIL;
+    }
+    cudaEventRecord(s.inferDone[writeBuf], s.inferStream);
+
+    // ── Submit JBU / readback on jbuStream (waits for inference via event) ────
+    cudaStreamWaitEvent(s.jbuStream, s.inferDone[writeBuf], 0);
+
+    s.bufMW[writeBuf]     = mw;
+    s.bufMH[writeBuf]     = mh;
+    s.bufSrcW[writeBuf]   = srcW;
+    s.bufSrcH[writeBuf]   = srcH;
+    s.bufStride[writeBuf] = srcStride;
+    s.bufJBU[writeBuf]    = false;
+
+    const int F_out   = (s.nbVideoFrames > 0) ? s.nbVideoFrames : 1;
+    float* d_outSlice = s.d_output[writeBuf] + (size_t)(F_out - 1) * mw * mh;
+
+    // ── JBU path (flag-based — no goto, avoids MSVC C2143/C2447) ─────────────
+    bool jbuActive = false;
+    if (depthJBU) {
+        const bool needAlloc =
+            (s.jbuHrW[writeBuf] != srcW || s.jbuHrH[writeBuf] != srcH ||
+             s.glrW[writeBuf]   != mw   || s.glrH[writeBuf]   != mh);
+        bool allocOK = true;
+        if (needAlloc) {
+            cudaFree(s.d_depthHR[writeBuf]);    s.d_depthHR[writeBuf]   = nullptr;
+            cudaFree(s.d_guideBGRA[writeBuf]);  s.d_guideBGRA[writeBuf] = nullptr;
+            cudaFree(s.d_guideLR[writeBuf]);    s.d_guideLR[writeBuf]   = nullptr;
+            cudaFree(s.d_dilateTmp[writeBuf]);  s.d_dilateTmp[writeBuf] = nullptr;
+            if (s.h_jbuOut[writeBuf]) {
+                cudaFreeHost(s.h_jbuOut[writeBuf]); s.h_jbuOut[writeBuf] = nullptr;
+            }
+            cudaError_t e1 = cudaMalloc(reinterpret_cast<void**>(&s.d_depthHR[writeBuf]),
+                                         (size_t)srcW * srcH * sizeof(float));
+            cudaError_t e2 = cudaMalloc(reinterpret_cast<void**>(&s.d_guideBGRA[writeBuf]),
+                                         (size_t)srcH * srcStride);
+            cudaError_t e3 = cudaMalloc(reinterpret_cast<void**>(&s.d_guideLR[writeBuf]),
+                                         (size_t)mw * mh * sizeof(float));
+            cudaError_t e4 = cudaMalloc(reinterpret_cast<void**>(&s.d_dilateTmp[writeBuf]),
+                                         (size_t)srcW * srcH * sizeof(float));
+            cudaError_t e5 = cudaMallocHost(reinterpret_cast<void**>(&s.h_jbuOut[writeBuf]),
+                                             (size_t)srcW * srcH * sizeof(float));
+            allocOK = !(e1 || e2 || e3 || e4 || e5);
+            if (!allocOK) {
+                LOG_ERR("CUDA JBU alloc failed slot=", writeBuf,
+                        " (", e1, " ", e2, " ", e3, " ", e4, " ", e5, ")");
+                cudaFree(s.d_depthHR[writeBuf]);    s.d_depthHR[writeBuf]   = nullptr;
+                cudaFree(s.d_guideBGRA[writeBuf]);  s.d_guideBGRA[writeBuf] = nullptr;
+                cudaFree(s.d_guideLR[writeBuf]);    s.d_guideLR[writeBuf]   = nullptr;
+                cudaFree(s.d_dilateTmp[writeBuf]);  s.d_dilateTmp[writeBuf] = nullptr;
+                if (s.h_jbuOut[writeBuf]) {
+                    cudaFreeHost(s.h_jbuOut[writeBuf]); s.h_jbuOut[writeBuf] = nullptr;
+                }
+                s.jbuHrW[writeBuf] = s.jbuHrH[writeBuf] = 0;
+                s.glrW[writeBuf]   = s.glrH[writeBuf]   = 0;
+            } else {
+                s.jbuHrW[writeBuf] = srcW; s.jbuHrH[writeBuf] = srcH;
+                s.glrW[writeBuf]   = mw;   s.glrH[writeBuf]   = mh;
+            }
+        }
+        if (allocOK) {
+            cudaGetLastError(); // clear sticky errors from async enqueueV3
+            cudaMemcpyAsync(s.d_guideBGRA[writeBuf], srcData,
+                            (size_t)srcH * srcStride,
+                            cudaMemcpyHostToDevice, s.jbuStream);
+            jbu_cuda(d_outSlice, mw, mh,
+                     s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
+                     s.d_depthHR[writeBuf], 1.0f, 0.10f, 2,
+                     s.d_guideLR[writeBuf], s.jbuStream);
+            if (depthDilate > 0) {
+                gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
+                           s.d_depthHR[writeBuf],
+                           srcW, srcH, depthDilate, depthEdgeThresh, s.jbuStream);
+            }
+            cudaMemcpyAsync(s.h_jbuOut[writeBuf], s.d_depthHR[writeBuf],
+                            (size_t)srcW * srcH * sizeof(float),
+                            cudaMemcpyDeviceToHost, s.jbuStream);
+            s.bufJBU[writeBuf] = true;
+            jbuActive = true;
+        }
+    }
+    if (!jbuActive) {
+        cudaMemcpyAsync(s.h_output[writeBuf], d_outSlice,
+                        (size_t)mw * mh * sizeof(float),
+                        cudaMemcpyDeviceToHost, s.jbuStream);
+    }
+    cudaEventRecord(s.jbuDone[writeBuf], s.jbuStream);
+    ++s.pipeIdx;
+
+    if (!s.pipeReady) { s.pipeReady = true; return E_PENDING; }
+
+    // ── Collect previous frame's results ─────────────────────────────────────
+    cudaEventSynchronize(s.jbuDone[readBuf]);
+
+    const int  rsrcW = s.bufSrcW[readBuf], rsrcH = s.bufSrcH[readBuf];
+    const int  rmw   = s.bufMW[readBuf],   rmh   = s.bufMH[readBuf];
+    const bool rJBU  = s.bufJBU[readBuf];
+
+    std::vector<float> out((size_t)rsrcW * rsrcH);
+    if (rJBU && s.h_jbuOut[readBuf]) {
+        const float* raw = s.h_jbuOut[readBuf];
+        const int    N   = rsrcW * rsrcH;
+        float mn = raw[0], mx = raw[0];
+        for (int i = 1; i < N; ++i) {
+            if (raw[i] < mn) mn = raw[i];
+            if (raw[i] > mx) mx = raw[i];
+        }
+        const float range = (mx - mn) > 1e-6f ? (mx - mn) : 1e-6f;
+        for (int i = 0; i < N; ++i) {
+            const float v = (raw[i] - mn) / range;
+            out[i] = flipDepth ? 1.f - v : v;
+        }
+    } else {
+        PostprocessDepth(s.h_output[readBuf], rmw, rmh, rsrcW, rsrcH,
+                         flipDepth, out, nullptr, 0, false,
+                         depthDilate, depthEdgeThresh);
+    }
+
+    if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
+        TemporalSmooth(out, smoothAlpha);
+
+    result.data   = std::move(out);
+    result.width  = rsrcW;
+    result.height = rsrcH;
+    return S_OK;
+}
                                          float smoothAlpha, int depthDilate,
                                          float depthEdgeThresh, bool depthJBU,
                                          DepthResult& result) {
