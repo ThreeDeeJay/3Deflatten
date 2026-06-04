@@ -11,14 +11,22 @@ env:
   CUDA_VERSION_MINOR: "9"
   CUDA_VERSION_PATCH: "1"
   CUDA_DRIVER_VERSION: "576.57"
-  TENSORRT_VERSION_MAJOR: "10"
-  TENSORRT_VERSION_MINOR: "16"
+#  TENSORRT_VERSION_MAJOR: "10"
+#  TENSORRT_VERSION_MINOR: "16"
+#  TENSORRT_VERSION_PATCH: "0"
+#  TENSORRT_VERSION_BUILD: "72"
+  TENSORRT_VERSION_MAJOR: "11"
+  TENSORRT_VERSION_MINOR: "0"
   TENSORRT_VERSION_PATCH: "0"
-  TENSORRT_VERSION_BUILD: "72"
+  TENSORRT_VERSION_BUILD: "114"
+#  TENSORRT_RTX_VERSION_MAJOR: "1"
+#  TENSORRT_RTX_VERSION_MINOR: "4"
+#  TENSORRT_RTX_VERSION_PATCH: "0"
+#  TENSORRT_RTX_VERSION_BUILD: "76"
   TENSORRT_RTX_VERSION_MAJOR: "1"
-  TENSORRT_RTX_VERSION_MINOR: "4"
+  TENSORRT_RTX_VERSION_MINOR: "5"
   TENSORRT_RTX_VERSION_PATCH: "0"
-  TENSORRT_RTX_VERSION_BUILD: "76"
+  TENSORRT_RTX_VERSION_BUILD: "114"
 
 on:
   push:
@@ -107,7 +115,8 @@ jobs:
 
     - name: Download TensorRT
       run: |
-        curl --ssl-revoke-best-effort --create-dirs -L "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}/zip/TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}.Windows.amd64.cuda-${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}.zip" -o "TensorRT.zip" || true
+        curl --ssl-revoke-best-effort --fail --create-dirs -L "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}/zip/TensorRT-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}.Windows.amd64.cuda-${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}.zip" -o "TensorRT.zip" || true
+        curl --ssl-revoke-best-effort --fail --create-dirs -L "https://developer.download.nvidia.com/compute/machine-learning/tensorrt/${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}/zip/TensorRT-Enterprise-${{env.TENSORRT_VERSION_MAJOR}}.${{env.TENSORRT_VERSION_MINOR}}.${{env.TENSORRT_VERSION_PATCH}}.${{env.TENSORRT_VERSION_BUILD}}-Windows-amd64-cuda-${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}-Release-external.zip" -o "TensorRT.zip" || true
         7z x "TensorRT.zip"
     - name: Download TensorRT RTX
       run: |
