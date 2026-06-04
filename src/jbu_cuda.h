@@ -15,12 +15,9 @@ int jbu_cuda(const float*         depth_lr,
              void*                stream);
 
 // Separable morphological max-dilation on the GPU.
-//   src       : device float[w*h]  input depth map
-//   tmp       : device float[w*h]  scratch (horizontal-pass output)
-//   dst       : device float[w*h]  final output (may equal src for in-place)
-//   edgeThresh: only propagate values where delta >= threshold (same semantics
-//               as CPU DilateDepth — avoids flat-region bleeding)
-// Returns last cudaGetLastError() code (0 = success).
+//   src/tmp/dst : device float[w*h]
+//   edgeThresh  : only propagate values where delta >= threshold
+// Returns cudaGetLastError() (0 = success).
 int gpu_dilate(const float* src, float* tmp, float* dst,
                int w, int h, int radius, float edgeThresh,
                void* stream);
