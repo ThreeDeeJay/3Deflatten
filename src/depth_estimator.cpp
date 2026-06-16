@@ -839,6 +839,13 @@ HRESULT DepthEstimator::FinishTrtBuild() {
     return S_OK;
 }
 
+// Drop-in replacement for EstimateTrtRtx in depth_estimator.cpp.
+// Change from previous version: sync on writeBuf (current frame) instead of
+// readBuf (previous frame), eliminating the 1-frame depth lag.
+// The two CUDA streams still overlap within each frame (inferStream + jbuStream),
+// so GPU utilisation is unchanged. The ping-pong slot still alternates so
+// per-slot JBU buffers are never read and written simultaneously.
+
 HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          int srcStride, bool isBGR, bool flipDepth,
                                          float smoothAlpha, int depthDilate,
@@ -854,7 +861,8 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
 
     // ── Buffer slot selection ─────────────────────────────────────────────────
     const int writeBuf = s.pipeIdx & 1;
-    const int readBuf  = writeBuf ^ 1;
+    const int readBuf  = writeBuf ^ 1;   // kept for JBU alloc reuse only
+    (void)readBuf;
 
     // ── Preprocess current frame (CPU) ────────────────────────────────────────
     std::vector<float> inputTensor;
@@ -915,8 +923,8 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     // ── Set tensor addresses and launch inference asynchronously ──────────────
     s.context->setTensorAddress(s.inputName.c_str(),  s.d_input[writeBuf]);
     s.context->setTensorAddress(s.outputName.c_str(), s.d_output[writeBuf]);
-    // Set dummy address for auxiliary tensors — check by name, not by mode,
-    // to avoid the C4189 unused-variable warning that 'mode' would generate.
+    // Auxiliary tensors use the shared dummy buffer.
+    // Check by name (not by mode) to avoid the C4189 'mode' unused-var warning.
     for (int i = 0; i < s.nbBindings; ++i) {
         const char* tn = s.engine->getIOTensorName(i);
         if (s.inputName != tn && s.outputName != tn)
@@ -925,9 +933,10 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     if (!s.context->enqueueV3(s.inferStream)) {
         LOG_ERR("TRT: enqueueV3 failed."); return E_FAIL;
     }
+    // Signal: jbuStream may start once inference is done
     cudaEventRecord(s.inferDone[writeBuf], s.inferStream);
 
-    // ── Submit JBU / readback on jbuStream (waits for inference via event) ────
+    // ── jbuStream waits for inferDone (GPU-side, no CPU stall) ───────────────
     cudaStreamWaitEvent(s.jbuStream, s.inferDone[writeBuf], 0);
 
     s.bufMW[writeBuf]     = mw;
@@ -984,7 +993,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
             }
         }
         if (allocOK) {
-            cudaGetLastError(); // clear sticky errors from async enqueueV3
+            cudaGetLastError(); // clear any sticky error from async enqueueV3
             cudaMemcpyAsync(s.d_guideBGRA[writeBuf], srcData,
                             (size_t)srcH * srcStride,
                             cudaMemcpyHostToDevice, s.jbuStream);
@@ -1009,21 +1018,26 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                         (size_t)mw * mh * sizeof(float),
                         cudaMemcpyDeviceToHost, s.jbuStream);
     }
+
+    // Record event and advance pipeline index
     cudaEventRecord(s.jbuDone[writeBuf], s.jbuStream);
     ++s.pipeIdx;
 
-    if (!s.pipeReady) { s.pipeReady = true; return E_PENDING; }
+    // ── Collect THIS frame's result (sync on writeBuf = zero lag) ────────────
+    // We wait for the current slot's GPU work rather than a previous frame's.
+    // inferStream (inference) and jbuStream (JBU/readback) still run in parallel
+    // within the frame, so GPU utilisation is unchanged.
+    cudaEventSynchronize(s.jbuDone[writeBuf]);
 
-    // ── Collect previous frame's results ─────────────────────────────────────
-    cudaEventSynchronize(s.jbuDone[readBuf]);
-
-    const int  rsrcW = s.bufSrcW[readBuf], rsrcH = s.bufSrcH[readBuf];
-    const int  rmw   = s.bufMW[readBuf],   rmh   = s.bufMH[readBuf];
-    const bool rJBU  = s.bufJBU[readBuf];
+    const int  rsrcW = s.bufSrcW[writeBuf];
+    const int  rsrcH = s.bufSrcH[writeBuf];
+    const int  rmw   = s.bufMW[writeBuf];
+    const int  rmh   = s.bufMH[writeBuf];
+    const bool rJBU  = s.bufJBU[writeBuf];
 
     std::vector<float> out((size_t)rsrcW * rsrcH);
-    if (rJBU && s.h_jbuOut[readBuf]) {
-        const float* raw = s.h_jbuOut[readBuf];
+    if (rJBU && s.h_jbuOut[writeBuf]) {
+        const float* raw = s.h_jbuOut[writeBuf];
         const int    N   = rsrcW * rsrcH;
         float mn = raw[0], mx = raw[0];
         for (int i = 1; i < N; ++i) {
@@ -1036,7 +1050,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
             out[i] = flipDepth ? 1.f - v : v;
         }
     } else {
-        PostprocessDepth(s.h_output[readBuf], rmw, rmh, rsrcW, rsrcH,
+        PostprocessDepth(s.h_output[writeBuf], rmw, rmh, rsrcW, rsrcH,
                          flipDepth, out, nullptr, 0, false,
                          depthDilate, depthEdgeThresh);
     }
