@@ -45,7 +45,7 @@ public:
                      float       smoothAlpha,
                      int         depthDilate,
                      float       depthEdgeThresh,
-                     bool        depthJBU,
+                     DepthUpscaleMode upscaleMode,
                      DepthResult& result);
 
     bool         IsLoaded()     const { return m_loaded; }
@@ -65,13 +65,25 @@ private:
                           int dstW, int dstH, bool flipDepth,
                           std::vector<float>& depth,
                           const BYTE* guide = nullptr, int guideStride = 0,
-                          bool depthJBU = false,
+                          DepthUpscaleMode upscaleMode = DepthUpscaleMode::Bilinear,
                           int depthDilate = 0, float depthEdgeThresh = 0.20f);
     // Joint bilateral upsampling: upscale low-res depth using full-res RGB guide.
     // For each output pixel, compute a weighted sum of nearby low-res depth
-    // samples where weight = spatial_gaussian × colour_gaussian(guide).
-    // Produces crisp depth edges aligned to colour edges (no halo/bleed).
+    // samples where weight = spatial_gaussian × colour_gaussian(guide), using
+    // the FULL RGB (luma+chroma) distance against the guide sampled directly
+    // at full resolution (not a blurred low-res guide average).
+    // Produces crisp depth edges aligned to colour edges, though as a
+    // continuous weighted blend it can still show faint glow at edges.
     void JBUResize(const float* src, int sw, int sh,
+                   const BYTE* guide, int gw, int gh, int guideStride,
+                   float* dst, int dw, int dh);
+    // Weighted Mode Filtering (Min, Lu & Do, IEEE TIP 2012): sharper
+    // alternative to JBU.  Builds a weighted histogram of nearby low-res
+    // depth samples (same spatial+colour weighting as JBU), picks the
+    // dominant bin (the "mode"), then averages only the samples within it.
+    // Wrong-side-of-an-edge samples are excluded entirely rather than
+    // down-weighted, eliminating the blend/glow that JBU can show at edges.
+    void WMFResize(const float* src, int sw, int sh,
                    const BYTE* guide, int gw, int gh, int guideStride,
                    float* dst, int dw, int dh);
     void BilinearResize(const float* src, int sw, int sh,
@@ -87,7 +99,8 @@ private:
     HRESULT EstimateStreaming(const BYTE* srcData,
                               int srcW, int srcH, int srcStride,
                               bool isBGR, bool flipDepth, float smoothAlpha,
-                              int depthDilate, float depthEdgeThresh, bool depthJBU,
+                              int depthDilate, float depthEdgeThresh,
+                              DepthUpscaleMode upscaleMode,
                               DepthResult& result);
     bool DetectStreamingModel();
     void InitStreamingContext(int modelW, int modelH);
@@ -161,7 +174,8 @@ private:
     HRESULT FinishTrtBuild();   // deferred engine compilation, called on worker thread
     HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH, int srcStride,
                             bool isBGR, bool flipDepth, float smoothAlpha,
-                            int depthDilate, float depthEdgeThresh, bool depthJBU,
+                            int depthDilate, float depthEdgeThresh,
+                            DepthUpscaleMode upscaleMode,
                             DepthResult& result);
 #endif
 
