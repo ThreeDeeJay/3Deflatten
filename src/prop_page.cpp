@@ -96,6 +96,11 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"EdgeClamp  (SuperDepth3D style)");
         SendDlgItemMessage(hwnd, IDC_INFILL_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Inpaint  (3D Photo bilateral)");
 
+        // Depth upscale algorithm — must match DepthUpscaleMode enum order exactly
+        SendDlgItemMessage(hwnd, IDC_UPSCALE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Bilinear  (fastest, soft edges)");
+        SendDlgItemMessage(hwnd, IDC_UPSCALE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"JBU  (RGB-guided, sharp edges)");
+        SendDlgItemMessage(hwnd, IDC_UPSCALE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Weighted Mode Filter  (sharpest, no glow)");
+
         // Inference Runtime
         SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0, (LPARAM)L"ONNXRuntime");
         SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_ADDSTRING, 0,
@@ -166,7 +171,7 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         if (ctl==IDC_DEPTH_CHECK && note==BN_CLICKED) {
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
-        if (ctl==IDC_JBU_CHECK && note==BN_CLICKED) {
+        if (ctl==IDC_UPSCALE_COMBO && note==CBN_SELCHANGE) {
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_GPU_COMBO && note==CBN_SELCHANGE) {
@@ -312,8 +317,7 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
         TBM_SETPOS, TRUE, std::min(DILATE_MAX, std::max(0, m_cfg.depthDilate)));
     SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER,
         TBM_SETPOS, TRUE, EThreshToSlider(m_cfg.depthEdgeThresh));
-    SendDlgItemMessage(hwnd, IDC_JBU_CHECK, BM_SETCHECK,
-                       m_cfg.depthJBU ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessage(hwnd, IDC_UPSCALE_COMBO, CB_SETCURSEL, (int)m_cfg.upscaleMode, 0);
 
     UpdateValueLabels(hwnd);
 }
@@ -342,8 +346,8 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
     int mdIdx = std::min(2, std::max(0,
         (int)SendDlgItemMessage(hwnd, IDC_MESHDIV_COMBO, CB_GETCURSEL, 0, 0)));
     m_cfg.meshDiv = kMeshDivs[mdIdx];
-    m_cfg.depthJBU = (SendDlgItemMessage(hwnd, IDC_JBU_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
-                     ? TRUE : FALSE;
+    m_cfg.upscaleMode = (DepthUpscaleMode)std::min(2,
+        std::max(0, (int)SendDlgItemMessage(hwnd, IDC_UPSCALE_COMBO, CB_GETCURSEL, 0, 0)));
     m_cfg.depthDilate = std::min(DILATE_MAX, std::max(0,
         (int)SendDlgItemMessage(hwnd, IDC_DILATE_SLIDER, TBM_GETPOS, 0, 0)));
     m_cfg.depthEdgeThresh = SliderToEThresh(

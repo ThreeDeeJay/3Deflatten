@@ -123,7 +123,7 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.meshDiv          = getI(L"meshDiv", 2);
     m_cfg.depthDilate      = getI(L"depthDilate", 4);
     m_cfg.depthEdgeThresh  = getF(L"depthEdgeThresh", 0.20f);
-    m_cfg.depthJBU         = getI(L"depthJBU", 0) ? TRUE : FALSE;
+    m_cfg.upscaleMode      = (DepthUpscaleMode)getI(L"upscaleMode", 0);
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
@@ -161,7 +161,7 @@ void C3DeflattenFilter::SaveIni() const {
     setI(L"meshDiv",           m_cfg.meshDiv);
     setI(L"depthDilate",       m_cfg.depthDilate);
     setF(L"depthEdgeThresh",   m_cfg.depthEdgeThresh);
-    setI(L"depthJBU",          m_cfg.depthJBU ? 1 : 0);
+    setI(L"upscaleMode",       (int)m_cfg.upscaleMode);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
 
     LOG_INFO("SaveIni: '", m_iniPath, "'");
@@ -190,7 +190,7 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.meshDiv          = 2;
     m_cfg.depthDilate      = 4;
     m_cfg.depthEdgeThresh  = 0.20f;
-    m_cfg.depthJBU         = FALSE;
+    m_cfg.upscaleMode      = DepthUpscaleMode::Bilinear;
     m_hadRealDepth    = false;
     m_skipEvery       = 1;
     m_skipCounter     = 0;
@@ -421,7 +421,7 @@ void C3DeflattenFilter::DepthWorkerThread() {
                                         cfg.depthSmooth,
                                         cfg.depthDilate,
                                         cfg.depthEdgeThresh,
-                                        cfg.depthJBU == TRUE, result);
+                                        cfg.upscaleMode, result);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
 

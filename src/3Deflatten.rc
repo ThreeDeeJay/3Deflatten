@@ -53,11 +53,12 @@ BEGIN
     COMBOBOX  IDC_MESHDIV_COMBO,                  194, 161,  94,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    // Depth Post-processing (JBU + Dilation + Edge Threshold)
-    // Height 56 = 14 (JBU row) + 14 (dilate row) + 14 (thresh row) + 14 padding
+    // Depth Post-processing (Upscale algorithm + Dilation + Edge Threshold)
+    // Height 56 = 14 (upscale row) + 14 (dilate row) + 14 (thresh row) + 14 padding
     GROUPBOX  "Depth Post-processing", -1,          4, 174, 290,  56
-    AUTOCHECKBOX "Edge-guided upscaling (JBU — uses RGB edges to sharpen depth)",
-              IDC_JBU_CHECK,                        10, 186, 278,  12
+    LTEXT     "Upscale:", -1,                       10, 186,  40,  10
+    COMBOBOX  IDC_UPSCALE_COMBO,                    52, 184, 232,  60,
+              CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT     "Edge Dilate (0-16 px):", -1,         10, 202, 100,  10
     CONTROL   "", IDC_DILATE_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 202, 130,  12
