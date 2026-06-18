@@ -328,8 +328,18 @@ struct DepthEstimator::TrtRtxSession {
     // Per-slot JBU device buffers (lazy-allocated on first JBU call per slot)
     float*   d_depthHR[NBUF]   = {};   // JBU full-res output
     uint8_t* d_guideBGRA[NBUF] = {};   // guide frame BGRA on device
-    float*   d_guideLR[NBUF]   = {};   // guide downsampled to model res
+    float*   d_guideLR[NBUF]   = {};   // guide downsampled to model res;
+                                         // repurposed as WMF's normalised-
+                                         // depth scratch buffer (mw*mh floats,
+                                         // already correctly sized) — see
+                                         // normalize_depth_cuda() call site.
     float*   d_dilateTmp[NBUF] = {};   // scratch for GPU separable dilate
+
+    // Tiny persistent 2-float scratch for normalize_depth_cuda()'s min/max
+    // reduction (WMF only — JBU is scale-invariant and doesn't need this).
+    // Not per-slot: EstimateTrtRtx fully syncs each frame before returning,
+    // so there is never more than one normalize_depth_cuda() call in flight.
+    float*   d_minmax           = nullptr;
 
     // Per-slot JBU dimension tracking (detect resolution changes)
     int jbuHrW[NBUF] = {}, jbuHrH[NBUF] = {};
@@ -387,6 +397,7 @@ struct DepthEstimator::TrtRtxSession {
             if (d_dilateTmp[i])  { cudaFree(d_dilateTmp[i]);         d_dilateTmp[i] = nullptr; }
         }
         if (d_dummy)     { cudaFree(d_dummy);              d_dummy     = nullptr; }
+        if (d_minmax)    { cudaFree(d_minmax);             d_minmax    = nullptr; }
         if (jbuStream)   { cudaStreamDestroy(jbuStream);   jbuStream   = nullptr; }
         if (inferStream) { cudaStreamDestroy(inferStream);  inferStream = nullptr; }
         if (hParser) { FreeLibrary(hParser); hParser = nullptr; }
@@ -819,6 +830,7 @@ HRESULT DepthEstimator::FinishTrtBuild() {
         if (elems * sizeof(float) > dummyBytes) dummyBytes = elems * sizeof(float);
     }
     cudaMalloc(&s.d_dummy, dummyBytes);
+    cudaMalloc(reinterpret_cast<void**>(&s.d_minmax), 2 * sizeof(float));
 
     if (F > 1) {
         const size_t fe = (size_t)3 * s.modelH * s.modelW;
@@ -839,17 +851,17 @@ HRESULT DepthEstimator::FinishTrtBuild() {
     return S_OK;
 }
 
-// Drop-in replacement for EstimateTrtRtx in depth_estimator.cpp.
-// Change from previous version: sync on writeBuf (current frame) instead of
-// readBuf (previous frame), eliminating the 1-frame depth lag.
-// The two CUDA streams still overlap within each frame (inferStream + jbuStream),
-// so GPU utilisation is unchanged. The ping-pong slot still alternates so
-// per-slot JBU buffers are never read and written simultaneously.
+// EstimateTrtRtx: double-buffered async pipeline (enqueueV3 on inferStream,
+// JBU/WMF/dilate/readback on jbuStream) — collects THIS frame's result by
+// syncing on writeBuf (not a previous-frame readBuf), so there is zero added
+// depth-vs-RGB lag. inferStream and jbuStream still overlap within a single
+// frame, so GPU utilisation is unaffected by the zero-lag change.
 
 HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          int srcStride, bool isBGR, bool flipDepth,
                                          float smoothAlpha, int depthDilate,
-                                         float depthEdgeThresh, bool depthJBU,
+                                         float depthEdgeThresh,
+                                         DepthUpscaleMode upscaleMode,
                                          DepthResult& result) {
     auto& s = *m_trtRtx;
 
@@ -949,9 +961,17 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     const int F_out   = (s.nbVideoFrames > 0) ? s.nbVideoFrames : 1;
     float* d_outSlice = s.d_output[writeBuf] + (size_t)(F_out - 1) * mw * mh;
 
-    // ── JBU path (flag-based — no goto, avoids MSVC C2143/C2447) ─────────────
-    bool jbuActive = false;
-    if (depthJBU) {
+    // ── GPU upscale path: Bilinear / JBU / WMF all run on GPU now ─────────────
+    // Previously Bilinear mode skipped these kernels entirely and fell back
+    // to a CPU resize in the collect phase below — which left the GPU idle
+    // and was, paradoxically, SLOWER than running JBU/WMF on the GPU (a
+    // single-threaded full-HD CPU resize is slower than a small, massively
+    // parallel GPU kernel). All three modes now share the same buffer set
+    // and readback path; only the kernel(s) launched differ.
+    const bool wantJBU = (upscaleMode == DepthUpscaleMode::JBU);
+    const bool wantWMF = (upscaleMode == DepthUpscaleMode::WeightedMode);
+    bool gpuUpscaleActive = false;
+    {
         const bool needAlloc =
             (s.jbuHrW[writeBuf] != srcW || s.jbuHrH[writeBuf] != srcH ||
              s.glrW[writeBuf]   != mw   || s.glrH[writeBuf]   != mh);
@@ -976,7 +996,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                              (size_t)srcW * srcH * sizeof(float));
             allocOK = !(e1 || e2 || e3 || e4 || e5);
             if (!allocOK) {
-                LOG_ERR("CUDA JBU alloc failed slot=", writeBuf,
+                LOG_ERR("CUDA upscale alloc failed slot=", writeBuf,
                         " (", e1, " ", e2, " ", e3, " ", e4, " ", e5, ")");
                 cudaFree(s.d_depthHR[writeBuf]);    s.d_depthHR[writeBuf]   = nullptr;
                 cudaFree(s.d_guideBGRA[writeBuf]);  s.d_guideBGRA[writeBuf] = nullptr;
@@ -994,13 +1014,48 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         }
         if (allocOK) {
             cudaGetLastError(); // clear any sticky error from async enqueueV3
-            cudaMemcpyAsync(s.d_guideBGRA[writeBuf], srcData,
-                            (size_t)srcH * srcStride,
-                            cudaMemcpyHostToDevice, s.jbuStream);
-            jbu_cuda(d_outSlice, mw, mh,
-                     s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
-                     s.d_depthHR[writeBuf], 1.0f, 0.10f, 2,
-                     s.d_guideLR[writeBuf], s.jbuStream);
+
+            // Guide upload only needed for JBU/WMF (Bilinear ignores RGB).
+            if (wantJBU || wantWMF) {
+                cudaMemcpyAsync(s.d_guideBGRA[writeBuf], srcData,
+                                (size_t)srcH * srcStride,
+                                cudaMemcpyHostToDevice, s.jbuStream);
+            }
+
+            // sigma_s=1.2 (LR-space spatial), sigma_c=0.25 (full-RGB sum-of-
+            // squares colour distance), radius=3 — tuned for full-RGB JBU/WMF.
+            if (wantJBU) {
+                jbu_cuda(d_outSlice, mw, mh,
+                         s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
+                         s.d_depthHR[writeBuf], 1.2f, 0.25f, 3,
+                         s.d_guideLR[writeBuf], s.jbuStream);
+            } else if (wantWMF) {
+                // WMF's histogram binning assumes depth is already in [0,1].
+                // Unlike every CPU call site (Estimate()/PostprocessDepth()
+                // normalise before calling JBUResize/WMFResize), the raw TRT
+                // model output (d_outSlice) is NOT bounded to [0,1] — depth
+                // models commonly emit an arbitrary relative-depth scale.
+                // Without this, almost every sample's bin index clamps to
+                // bin 0 or bin (BINS-1), collapsing the mode to one extreme
+                // and the output to near-solid black/white. JBU doesn't need
+                // this: it's a pure linear weighted average, so any input
+                // scale is fixed up correctly by the existing post-hoc
+                // full-image normalise in the collect phase below.
+                // d_guideLR is otherwise unused by WMF, so it doubles as the
+                // normalised-depth scratch buffer here (already mw*mh-sized).
+                normalize_depth_cuda(d_outSlice, mw * mh,
+                                     s.d_minmax, s.d_guideLR[writeBuf],
+                                     s.jbuStream);
+                wmf_cuda(s.d_guideLR[writeBuf], mw, mh,
+                         s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
+                         s.d_depthHR[writeBuf], 1.2f, 0.25f, 3,
+                         nullptr, s.jbuStream);
+            } else {
+                // Bilinear — cheapest kernel, no guide/colour weighting.
+                bilinear_cuda(d_outSlice, mw, mh,
+                             s.d_depthHR[writeBuf], srcW, srcH, s.jbuStream);
+            }
+
             if (depthDilate > 0) {
                 gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                            s.d_depthHR[writeBuf],
@@ -1009,11 +1064,14 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
             cudaMemcpyAsync(s.h_jbuOut[writeBuf], s.d_depthHR[writeBuf],
                             (size_t)srcW * srcH * sizeof(float),
                             cudaMemcpyDeviceToHost, s.jbuStream);
-            s.bufJBU[writeBuf] = true;
-            jbuActive = true;
+            s.bufJBU[writeBuf] = true;   // "GPU upscale was used for this slot"
+            gpuUpscaleActive = true;
         }
     }
-    if (!jbuActive) {
+    if (!gpuUpscaleActive) {
+        // Rare fallback: GPU buffer allocation failed (e.g. CUDA OOM). Read
+        // back model-res data and let the collect phase's CPU PostprocessDepth
+        // do a plain bilinear resize instead of erroring the whole frame.
         cudaMemcpyAsync(s.h_output[writeBuf], d_outSlice,
                         (size_t)mw * mh * sizeof(float),
                         cudaMemcpyDeviceToHost, s.jbuStream);
@@ -1050,8 +1108,13 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
             out[i] = flipDepth ? 1.f - v : v;
         }
     } else {
+        // GPU upscale disabled (Bilinear selected) or buffer alloc failed —
+        // either way, model-res data needs a plain resize. Pass Bilinear
+        // explicitly here rather than upscaleMode: if JBU/WMF was requested
+        // but its GPU buffers failed to allocate, we still want a graceful
+        // bilinear fallback rather than erroring the whole frame.
         PostprocessDepth(s.h_output[writeBuf], rmw, rmh, rsrcW, rsrcH,
-                         flipDepth, out, nullptr, 0, false,
+                         flipDepth, out, nullptr, 0, DepthUpscaleMode::Bilinear,
                          depthDilate, depthEdgeThresh);
     }
 
@@ -1822,7 +1885,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
                                   float smoothAlpha,
                                   int   depthDilate,
                                   float depthEdgeThresh,
-                                  bool  depthJBU,
+                                  DepthUpscaleMode upscaleMode,
                                   DepthResult& result) {
     if (!m_loaded) {
         LOG_ERR("Estimate called but model not loaded");
@@ -1832,7 +1895,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
     if (m_trtRtx)
         return EstimateTrtRtx(srcData, srcWidth, srcHeight, srcStride,
                               isBGR, flipDepth, smoothAlpha,
-                              depthDilate, depthEdgeThresh, depthJBU, result);
+                              depthDilate, depthEdgeThresh, upscaleMode, result);
 #endif
     if (!m_session) {
         LOG_ERR("Estimate: no ORT session and no native TRT session");
@@ -1841,7 +1904,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
     if (m_streaming)
         return EstimateStreaming(srcData, srcWidth, srcHeight, srcStride,
                                  isBGR, flipDepth, smoothAlpha,
-                                 depthDilate, depthEdgeThresh, depthJBU, result);
+                                 depthDilate, depthEdgeThresh, upscaleMode, result);
 
     try {
         std::vector<float> inputTensor;
@@ -1902,16 +1965,24 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
             DA3StreamAccumulate(depth);
         }
 
-        // Resize to source resolution — use JBU when enabled (guide=srcData)
+        // Resize to source resolution — dispatch on the selected algorithm
         std::vector<float> out(srcWidth * srcHeight);
-        if (depthJBU) {
+        switch (upscaleMode) {
+        case DepthUpscaleMode::JBU:
             // Guide is the full-res BGRA source frame (srcData, srcWidth × srcHeight)
             JBUResize(depth.data(), accumW, accumH,
                       srcData, srcWidth, srcHeight, srcStride,
                       out.data(), srcWidth, srcHeight);
-        } else {
+            break;
+        case DepthUpscaleMode::WeightedMode:
+            WMFResize(depth.data(), accumW, accumH,
+                      srcData, srcWidth, srcHeight, srcStride,
+                      out.data(), srcWidth, srcHeight);
+            break;
+        default:
             BilinearResize(depth.data(), accumW, accumH,
                            out.data(), srcWidth, srcHeight);
+            break;
         }
 
         // Apply flip after accumulation
@@ -2014,7 +2085,7 @@ void DepthEstimator::PostprocessDepth(const float* raw,
                                        std::vector<float>& depth,
                                        const BYTE* guide,
                                        int guideStride,
-                                       bool depthJBU,
+                                       DepthUpscaleMode upscaleMode,
                                        int depthDilate,
                                        float depthEdgeThresh) {
     // Min-max normalise at raw (model) resolution before upscaling
@@ -2029,8 +2100,12 @@ void DepthEstimator::PostprocessDepth(const float* raw,
     }
 
     depth.resize(dstW * dstH);
-    if (depthJBU && guide && guideStride > 0) {
+    if (upscaleMode == DepthUpscaleMode::JBU && guide && guideStride > 0) {
         JBUResize(normalised.data(), rawW, rawH,
+                  guide, dstW, dstH, guideStride,
+                  depth.data(), dstW, dstH);
+    } else if (upscaleMode == DepthUpscaleMode::WeightedMode && guide && guideStride > 0) {
+        WMFResize(normalised.data(), rawW, rawH,
                   guide, dstW, dstH, guideStride,
                   depth.data(), dstW, dstH);
     } else {
@@ -2073,70 +2148,48 @@ void DepthEstimator::BilinearResize(const float* src, int sw, int sh,
 //
 // For each output pixel p at (x,y):
 //   1. Map (x,y) back to low-res coordinates (u,v).
-//   2. Accumulate contributions from all low-res pixels q within ±kRadius:
-//        weight(p,q) = spatial_gauss(dist(p,q)) × colour_gauss(|Ip − Iq|)
-//      where Ip is the guide luma at (x,y) and Iq is the guide luma at q's
-//      full-res position.
+//   2. Accumulate contributions from all low-res pixels q within ±kRadius,
+//      sampling the guide DIRECTLY at full resolution for both p and q
+//      (no blurred low-res guide average — keeps edges as sharp as the
+//      source RGB itself):
+//        weight(p,q) = spatial_gauss(dist(p,q)) × colour_gauss(|RGB_p − RGB_q|)
+//      using the FULL RGB (luma+chroma) distance, so edges that differ in
+//      hue but not brightness are still detected.
 //   3. Divide: depth(p) = Σ(weight·depth_q) / Σ(weight)
 //
-// Spatial sigma  ≈ half the upscale ratio (keeps blending tight at pixel level)
-// Colour sigma   = 0.10 in [0,1] luma space (edges with ΔL > ~0.10 are sharp)
-// Radius (low-res) = ceil(2 × spatialSigma)  — covers 2σ neighbourhood
-//
-// Complexity: O(dw·dh · (2r+1)² )  where r ≈ 2–4 at typical ratios.
-// For 1920×1080 up from 518×290 (ratio ≈ 3.7×), r=8 at low-res → ~17² ≈ 289
-// operations per output pixel → ~600 MP/s on modern x64 — fast enough for
-// the async depth worker thread.
+// This remains a continuous weighted blend: even a sample on the wrong side
+// of an edge contributes *some* nonzero weight, which is why JBU can still
+// show faint glow/feathering at edges even with a sharp, high-contrast
+// guide. WMFResize() below is a sharper alternative that excludes
+// wrong-side samples entirely. Use JBU when a soft, conservative blend at
+// uncertain boundaries is preferable to WMF's harder snap.
 void DepthEstimator::JBUResize(const float* src, int sw, int sh,
                                 const BYTE* guide, int gw, int gh, int guideStride,
                                 float* dst, int dw, int dh) {
-    // Pre-compute scale factors
     const float scaleX = (float)sw / dw;
     const float scaleY = (float)sh / dh;
 
-    // Spatial sigma in low-res pixels ≈ 1 (we search a small neighbourhood)
-    // Colour sigma in [0,1] normalised luma
-    const float spatialSigma = 1.0f;
-    const float colourSigma  = 0.10f;
+    // Spatial sigma in low-res pixels; colour sigma in full-RGB
+    // sum-of-squared-differences space (range [0,3], not [0,1] like luma).
+    const float spatialSigma = 1.2f;
+    const float colourSigma  = 0.25f;
     const float inv2sSq  = 1.0f / (2.0f * spatialSigma * spatialSigma);
     const float inv2cSq  = 1.0f / (2.0f * colourSigma  * colourSigma);
-    const int   radius   = (int)std::ceil(2.0f * spatialSigma);  // low-res radius
-
-    // Pre-compute guide luma at low-res sample centres (centre of each low-res cell)
-    // using bilinear sampling of the full-res guide, to match the depth sample positions.
-    std::vector<float> guideLR(sw * sh);
-    for (int sy = 0; sy < sh; ++sy) {
-        // low-res centre in full-res coords
-        float fy = (sy + 0.5f) * (float)gh / sh - 0.5f;
-        int gy0 = std::max(0, std::min((int)fy, gh-1));
-        float ty = fy - gy0;
-        int gy1 = std::min(gy0+1, gh-1);
-        for (int sx2 = 0; sx2 < sw; ++sx2) {
-            float fx = (sx2 + 0.5f) * (float)gw / sw - 0.5f;
-            int gx0 = std::max(0, std::min((int)fx, gw-1));
-            float tx = fx - gx0;
-            int gx1 = std::min(gx0+1, gw-1);
-            // BT.601 luma from BGRA: Y = (29B + 150G + 77R) >> 8  → [0,255]
-            auto luma = [&](int gx, int gy) -> float {
-                const BYTE* p = guide + gy * guideStride + gx * 4;
-                return (29*p[0] + 150*p[1] + 77*p[2]) * (1.0f/255.0f/256.0f);
-            };
-            guideLR[sy*sw + sx2] =
-                luma(gx0,gy0)*(1-tx)*(1-ty) + luma(gx1,gy0)*tx*(1-ty) +
-                luma(gx0,gy1)*(1-tx)*ty      + luma(gx1,gy1)*tx*ty;
-        }
-    }
+    const int   radius   = 3;
 
     for (int dy = 0; dy < dh; ++dy) {
-        // Guide luma row pointer
-        const BYTE* gRow = guide + dy * guideStride;
+        float fy = (dy + 0.5f) * (float)gh / dh - 0.5f;
+        int   gy = std::max(0, std::min((int)fy, gh - 1));
 
         for (int dx = 0; dx < dw; ++dx) {
-            // Guide luma at this output pixel [0,1]
-            const BYTE* gp = gRow + dx * 4;
-            float guideP = (29*gp[0] + 150*gp[1] + 77*gp[2]) * (1.0f/255.0f/256.0f);
+            float fx = (dx + 0.5f) * (float)gw / dw - 0.5f;
+            int   gx = std::max(0, std::min((int)fx, gw - 1));
 
-            // Corresponding low-res position (continuous)
+            const BYTE* gp = guide + gy * guideStride + gx * 4;
+            float rP = gp[2] * (1.0f / 255.0f);
+            float gP = gp[1] * (1.0f / 255.0f);
+            float bP = gp[0] * (1.0f / 255.0f);
+
             float lu = (dx + 0.5f) * scaleX - 0.5f;
             float lv = (dy + 0.5f) * scaleY - 0.5f;
             int lu0 = (int)std::floor(lu);
@@ -2144,22 +2197,140 @@ void DepthEstimator::JBUResize(const float* src, int sw, int sh,
 
             float wSum = 0.0f, dSum = 0.0f;
             for (int ky = lv0 - radius; ky <= lv0 + radius + 1; ++ky) {
-                int ky2 = std::max(0, std::min(ky, sh-1));
-                float dy2 = lv - ky;
+                int ky2 = std::max(0, std::min(ky, sh - 1));
+                float dvy = lv - ky;
                 for (int kx = lu0 - radius; kx <= lu0 + radius + 1; ++kx) {
-                    int kx2 = std::max(0, std::min(kx, sw-1));
-                    float dx2 = lu - kx;
+                    int kx2 = std::max(0, std::min(kx, sw - 1));
+                    float dvx = lu - kx;
+                    float ws = std::exp(-(dvx*dvx + dvy*dvy) * inv2sSq);
 
-                    float ws = std::exp(-(dx2*dx2 + dy2*dy2) * inv2sSq);
-                    float dc = guideP - guideLR[ky2*sw + kx2];
-                    float wc = std::exp(-dc*dc * inv2cSq);
-                    float w  = ws * wc;
+                    // Full-res guide sample at this LR neighbour's HR-cell
+                    // centre (sharp — never a blurred low-res average).
+                    int hx = std::min(gw - 1, (int)((kx2 + 0.5f) * gw / sw));
+                    int hy = std::min(gh - 1, (int)((ky2 + 0.5f) * gh / sh));
+                    const BYTE* gq = guide + hy * guideStride + hx * 4;
+                    float dr = rP - gq[2] * (1.0f / 255.0f);
+                    float dg = gP - gq[1] * (1.0f / 255.0f);
+                    float db = bP - gq[0] * (1.0f / 255.0f);
+                    float dc2 = dr*dr + dg*dg + db*db;   // full-RGB squared distance
+                    float w = ws * std::exp(-dc2 * inv2cSq);
 
                     wSum += w;
-                    dSum += w * src[ky2*sw + kx2];
+                    dSum += w * src[ky2 * sw + kx2];
                 }
             }
-            dst[dy*dw + dx] = (wSum > 1e-8f) ? (dSum / wSum) : src[lv0*sw + lu0];
+            dst[dy * dw + dx] = (wSum > 1e-8f) ? (dSum / wSum) : src[lv0 * sw + lu0];
+        }
+    }
+}
+
+// ── WMFResize — Weighted Mode Filtering ───────────────────────────────────────
+// Min, Lu & Do, "Depth Video Enhancement Based on Weighted Mode Filtering",
+// IEEE Trans. Image Processing 2012.  Sharper alternative to JBUResize.
+//
+// JBU's glow/feathering at edges is structural: it is a continuous weighted
+// average, so even a heavily down-weighted sample on the wrong side of an
+// edge still contributes *something* to the blend. WMF instead:
+//   Pass 1: build a weighted histogram of nearby low-res depth values,
+//           using the SAME spatial+full-RGB weighting as JBU.
+//   Pass 2: find the dominant bin (the "mode" — the most strongly
+//           supported depth level in this neighbourhood), then average
+//           ONLY the samples whose depth falls within that bin (±1 bin
+//           for sub-bin smoothness). Samples outside it are excluded
+//           completely, not down-weighted.
+// The result snaps to a hard transition aligned with the guide's RGB edge,
+// with no residual cross-edge blend left to glow.
+void DepthEstimator::WMFResize(const float* src, int sw, int sh,
+                                const BYTE* guide, int gw, int gh, int guideStride,
+                                float* dst, int dw, int dh) {
+    constexpr int kBins = 16;
+    const float scaleX = (float)sw / dw;
+    const float scaleY = (float)sh / dh;
+    const float spatialSigma = 1.2f;
+    const float colourSigma  = 0.25f;   // full-RGB sum-of-squares distance space
+    const float inv2sSq  = 1.0f / (2.0f * spatialSigma * spatialSigma);
+    const float inv2cSq  = 1.0f / (2.0f * colourSigma  * colourSigma);
+    const int   radius   = 3;
+    const float binWidth = 1.0f / (kBins - 1);
+
+    for (int dy = 0; dy < dh; ++dy) {
+        float fy = (dy + 0.5f) * (float)gh / dh - 0.5f;
+        int   gy = std::max(0, std::min((int)fy, gh - 1));
+
+        for (int dx = 0; dx < dw; ++dx) {
+            float fx = (dx + 0.5f) * (float)gw / dw - 0.5f;
+            int   gx = std::max(0, std::min((int)fx, gw - 1));
+
+            const BYTE* gp = guide + gy * guideStride + gx * 4;
+            float rP = gp[2] * (1.0f / 255.0f);
+            float gP = gp[1] * (1.0f / 255.0f);
+            float bP = gp[0] * (1.0f / 255.0f);
+
+            float lu = (dx + 0.5f) * scaleX - 0.5f;
+            float lv = (dy + 0.5f) * scaleY - 0.5f;
+            int lu0 = (int)std::floor(lu);
+            int lv0 = (int)std::floor(lv);
+
+            // Pass 1: weighted histogram over depth bins
+            float hist[kBins] = {0.0f};
+            for (int ky = lv0 - radius; ky <= lv0 + radius + 1; ++ky) {
+                int ky2 = std::max(0, std::min(ky, sh - 1));
+                float dvy = lv - ky;
+                for (int kx = lu0 - radius; kx <= lu0 + radius + 1; ++kx) {
+                    int kx2 = std::max(0, std::min(kx, sw - 1));
+                    float dvx = lu - kx;
+                    float ws = std::exp(-(dvx*dvx + dvy*dvy) * inv2sSq);
+
+                    int hx = std::min(gw - 1, (int)((kx2 + 0.5f) * gw / sw));
+                    int hy = std::min(gh - 1, (int)((ky2 + 0.5f) * gh / sh));
+                    const BYTE* gq = guide + hy * guideStride + hx * 4;
+                    float dr = rP - gq[2] * (1.0f / 255.0f);
+                    float dg = gP - gq[1] * (1.0f / 255.0f);
+                    float db = bP - gq[0] * (1.0f / 255.0f);
+                    float dc2 = dr*dr + dg*dg + db*db;
+                    float w = ws * std::exp(-dc2 * inv2cSq);
+
+                    float dval = src[ky2 * sw + kx2];
+                    int bin = (int)(dval * (kBins - 1) + 0.5f);
+                    bin = std::max(0, std::min(kBins - 1, bin));
+                    hist[bin] += w;
+                }
+            }
+
+            int bestBin = 0;
+            float bestW = hist[0];
+            for (int i = 1; i < kBins; ++i)
+                if (hist[i] > bestW) { bestW = hist[i]; bestBin = i; }
+            float modeCenter = bestBin * binWidth;
+
+            // Pass 2: refine using only samples within the winning bin —
+            // wrong-side-of-edge samples are excluded entirely here, which
+            // is what eliminates the blend/glow that JBU can show.
+            float wSum = 0.0f, dSum = 0.0f;
+            for (int ky = lv0 - radius; ky <= lv0 + radius + 1; ++ky) {
+                int ky2 = std::max(0, std::min(ky, sh - 1));
+                float dvy = lv - ky;
+                for (int kx = lu0 - radius; kx <= lu0 + radius + 1; ++kx) {
+                    int kx2 = std::max(0, std::min(kx, sw - 1));
+                    float dval = src[ky2 * sw + kx2];
+                    if (std::fabs(dval - modeCenter) > 1.5f * binWidth) continue;
+
+                    float dvx = lu - kx;
+                    float ws = std::exp(-(dvx*dvx + dvy*dvy) * inv2sSq);
+                    int hx = std::min(gw - 1, (int)((kx2 + 0.5f) * gw / sw));
+                    int hy = std::min(gh - 1, (int)((ky2 + 0.5f) * gh / sh));
+                    const BYTE* gq = guide + hy * guideStride + hx * 4;
+                    float dr = rP - gq[2] * (1.0f / 255.0f);
+                    float dg = gP - gq[1] * (1.0f / 255.0f);
+                    float db = bP - gq[0] * (1.0f / 255.0f);
+                    float dc2 = dr*dr + dg*dg + db*db;
+                    float w = ws * std::exp(-dc2 * inv2cSq);
+
+                    wSum += w;
+                    dSum += w * dval;
+                }
+            }
+            dst[dy * dw + dx] = (wSum > 1e-8f) ? (dSum / wSum) : modeCenter;
         }
     }
 }
@@ -2321,7 +2492,7 @@ HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
                                            bool isBGR, bool flipDepth,
                                            float smoothAlpha,
                                            int depthDilate, float depthEdgeThresh,
-                                           bool depthJBU,
+                                           DepthUpscaleMode upscaleMode,
                                            DepthResult& result) {
     try {
         std::vector<float> imgTensor;
@@ -2390,8 +2561,9 @@ HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
 
         // Postprocess depth → [0,1], resample to source resolution
         std::vector<float> depth(srcW * srcH);
+        const bool needGuide = (upscaleMode != DepthUpscaleMode::Bilinear);
         PostprocessDepth(rawDepth, rawW, rawH, srcW, srcH, flipDepth, depth,
-                         depthJBU ? srcData : nullptr, srcStride, depthJBU,
+                         needGuide ? srcData : nullptr, srcStride, upscaleMode,
                          depthDilate, depthEdgeThresh);
 
         // Temporal smoothing is redundant when streaming context is active

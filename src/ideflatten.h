@@ -46,6 +46,33 @@ enum class GPUProvider : int {
     TensorRTRtx  = 5,   // NVIDIA TRT-RTX EP (fastest; requires ORT built with --use_nv_tensorrt_rtx)
 };
 
+// Depth-map upscaling algorithm: how the (typically lower-resolution) model
+// output is enlarged to match full source resolution.
+//
+//  Bilinear    : plain bilinear resize.  Fastest, but soft/blurred edges —
+//                 the depth boundary doesn't align tightly with RGB edges.
+//  JBU         : Joint Bilateral Upsampling.  Weighted average of nearby
+//                 low-res depth samples, weighted by spatial distance AND
+//                 full RGB (luma+chroma) similarity to the full-res guide
+//                 image.  Sharper than bilinear, but — being a continuous
+//                 weighted blend — can still show faint glow/feathering at
+//                 edges, since cross-edge samples always get *some* nonzero
+//                 weight.
+//  WeightedMode: Weighted Mode Filtering (Min, Lu & Do, IEEE TIP 2012,
+//                 "Depth Video Enhancement Based on Weighted Mode Filtering").
+//                 Builds a weighted histogram of nearby depth values, picks
+//                 the dominant bin (the "mode"), and averages only the
+//                 samples that fall within it.  Wrong-side-of-the-edge
+//                 samples get excluded entirely rather than down-weighted,
+//                 producing a hard transition that snaps to the RGB edge
+//                 with no glow/feathering.  Slightly more GPU/CPU work than
+//                 JBU.
+enum class DepthUpscaleMode : int {
+    Bilinear     = 0,
+    JBU          = 1,
+    WeightedMode = 2,
+};
+
 struct DeflattenConfig {
     float       convergence;   // [0,1]   depth plane at screen depth (default 0.25)
     float       separation;    // [0,0.1] stereo strength             (default 0.05)
@@ -61,7 +88,7 @@ struct DeflattenConfig {
     int         meshDiv;       // mesh vertex grid divisor: 1=full 2=half(default) 4=quarter
     int         depthDilate;   // foreground edge dilation radius in pixels (0=off, default 4)
     float       depthEdgeThresh; // depth discontinuity threshold for dilation [0,1] (default 0.20)
-    BOOL        depthJBU;      // joint bilateral upscaling using RGB guide (default FALSE)
+    DepthUpscaleMode upscaleMode; // Bilinear / JBU / WeightedMode (default Bilinear)
 };
 
 MIDL_INTERFACE("4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F")
