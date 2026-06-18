@@ -328,8 +328,18 @@ struct DepthEstimator::TrtRtxSession {
     // Per-slot JBU device buffers (lazy-allocated on first JBU call per slot)
     float*   d_depthHR[NBUF]   = {};   // JBU full-res output
     uint8_t* d_guideBGRA[NBUF] = {};   // guide frame BGRA on device
-    float*   d_guideLR[NBUF]   = {};   // guide downsampled to model res
+    float*   d_guideLR[NBUF]   = {};   // guide downsampled to model res;
+                                         // repurposed as WMF's normalised-
+                                         // depth scratch buffer (mw*mh floats,
+                                         // already correctly sized) — see
+                                         // normalize_depth_cuda() call site.
     float*   d_dilateTmp[NBUF] = {};   // scratch for GPU separable dilate
+
+    // Tiny persistent 2-float scratch for normalize_depth_cuda()'s min/max
+    // reduction (WMF only — JBU is scale-invariant and doesn't need this).
+    // Not per-slot: EstimateTrtRtx fully syncs each frame before returning,
+    // so there is never more than one normalize_depth_cuda() call in flight.
+    float*   d_minmax           = nullptr;
 
     // Per-slot JBU dimension tracking (detect resolution changes)
     int jbuHrW[NBUF] = {}, jbuHrH[NBUF] = {};
@@ -387,6 +397,7 @@ struct DepthEstimator::TrtRtxSession {
             if (d_dilateTmp[i])  { cudaFree(d_dilateTmp[i]);         d_dilateTmp[i] = nullptr; }
         }
         if (d_dummy)     { cudaFree(d_dummy);              d_dummy     = nullptr; }
+        if (d_minmax)    { cudaFree(d_minmax);             d_minmax    = nullptr; }
         if (jbuStream)   { cudaStreamDestroy(jbuStream);   jbuStream   = nullptr; }
         if (inferStream) { cudaStreamDestroy(inferStream);  inferStream = nullptr; }
         if (hParser) { FreeLibrary(hParser); hParser = nullptr; }
@@ -819,6 +830,7 @@ HRESULT DepthEstimator::FinishTrtBuild() {
         if (elems * sizeof(float) > dummyBytes) dummyBytes = elems * sizeof(float);
     }
     cudaMalloc(&s.d_dummy, dummyBytes);
+    cudaMalloc(reinterpret_cast<void**>(&s.d_minmax), 2 * sizeof(float));
 
     if (F > 1) {
         const size_t fe = (size_t)3 * s.modelH * s.modelW;
@@ -949,14 +961,17 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     const int F_out   = (s.nbVideoFrames > 0) ? s.nbVideoFrames : 1;
     float* d_outSlice = s.d_output[writeBuf] + (size_t)(F_out - 1) * mw * mh;
 
-    // ── GPU upscale path: JBU or WMF (flag-based — no goto, avoids MSVC C2143/C2447) ──
-    // Both algorithms share the same buffer set (alloc/free logic identical);
-    // only the kernel called differs. Bilinear needs no GPU buffers at all —
-    // it falls through to the plain model-res readback below.
+    // ── GPU upscale path: Bilinear / JBU / WMF all run on GPU now ─────────────
+    // Previously Bilinear mode skipped these kernels entirely and fell back
+    // to a CPU resize in the collect phase below — which left the GPU idle
+    // and was, paradoxically, SLOWER than running JBU/WMF on the GPU (a
+    // single-threaded full-HD CPU resize is slower than a small, massively
+    // parallel GPU kernel). All three modes now share the same buffer set
+    // and readback path; only the kernel(s) launched differ.
     const bool wantJBU = (upscaleMode == DepthUpscaleMode::JBU);
     const bool wantWMF = (upscaleMode == DepthUpscaleMode::WeightedMode);
-    bool jbuActive = false;
-    if (wantJBU || wantWMF) {
+    bool gpuUpscaleActive = false;
+    {
         const bool needAlloc =
             (s.jbuHrW[writeBuf] != srcW || s.jbuHrH[writeBuf] != srcH ||
              s.glrW[writeBuf]   != mw   || s.glrH[writeBuf]   != mh);
@@ -999,9 +1014,14 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         }
         if (allocOK) {
             cudaGetLastError(); // clear any sticky error from async enqueueV3
-            cudaMemcpyAsync(s.d_guideBGRA[writeBuf], srcData,
-                            (size_t)srcH * srcStride,
-                            cudaMemcpyHostToDevice, s.jbuStream);
+
+            // Guide upload only needed for JBU/WMF (Bilinear ignores RGB).
+            if (wantJBU || wantWMF) {
+                cudaMemcpyAsync(s.d_guideBGRA[writeBuf], srcData,
+                                (size_t)srcH * srcStride,
+                                cudaMemcpyHostToDevice, s.jbuStream);
+            }
+
             // sigma_s=1.2 (LR-space spatial), sigma_c=0.25 (full-RGB sum-of-
             // squares colour distance), radius=3 — tuned for full-RGB JBU/WMF.
             if (wantJBU) {
@@ -1009,12 +1029,33 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                          s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
                          s.d_depthHR[writeBuf], 1.2f, 0.25f, 3,
                          s.d_guideLR[writeBuf], s.jbuStream);
-            } else { // wantWMF
-                wmf_cuda(d_outSlice, mw, mh,
+            } else if (wantWMF) {
+                // WMF's histogram binning assumes depth is already in [0,1].
+                // Unlike every CPU call site (Estimate()/PostprocessDepth()
+                // normalise before calling JBUResize/WMFResize), the raw TRT
+                // model output (d_outSlice) is NOT bounded to [0,1] — depth
+                // models commonly emit an arbitrary relative-depth scale.
+                // Without this, almost every sample's bin index clamps to
+                // bin 0 or bin (BINS-1), collapsing the mode to one extreme
+                // and the output to near-solid black/white. JBU doesn't need
+                // this: it's a pure linear weighted average, so any input
+                // scale is fixed up correctly by the existing post-hoc
+                // full-image normalise in the collect phase below.
+                // d_guideLR is otherwise unused by WMF, so it doubles as the
+                // normalised-depth scratch buffer here (already mw*mh-sized).
+                normalize_depth_cuda(d_outSlice, mw * mh,
+                                     s.d_minmax, s.d_guideLR[writeBuf],
+                                     s.jbuStream);
+                wmf_cuda(s.d_guideLR[writeBuf], mw, mh,
                          s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
                          s.d_depthHR[writeBuf], 1.2f, 0.25f, 3,
-                         s.d_guideLR[writeBuf], s.jbuStream);
+                         nullptr, s.jbuStream);
+            } else {
+                // Bilinear — cheapest kernel, no guide/colour weighting.
+                bilinear_cuda(d_outSlice, mw, mh,
+                             s.d_depthHR[writeBuf], srcW, srcH, s.jbuStream);
             }
+
             if (depthDilate > 0) {
                 gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                            s.d_depthHR[writeBuf],
@@ -1023,11 +1064,14 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
             cudaMemcpyAsync(s.h_jbuOut[writeBuf], s.d_depthHR[writeBuf],
                             (size_t)srcW * srcH * sizeof(float),
                             cudaMemcpyDeviceToHost, s.jbuStream);
-            s.bufJBU[writeBuf] = true;
-            jbuActive = true;
+            s.bufJBU[writeBuf] = true;   // "GPU upscale was used for this slot"
+            gpuUpscaleActive = true;
         }
     }
-    if (!jbuActive) {
+    if (!gpuUpscaleActive) {
+        // Rare fallback: GPU buffer allocation failed (e.g. CUDA OOM). Read
+        // back model-res data and let the collect phase's CPU PostprocessDepth
+        // do a plain bilinear resize instead of erroring the whole frame.
         cudaMemcpyAsync(s.h_output[writeBuf], d_outSlice,
                         (size_t)mw * mh * sizeof(float),
                         cudaMemcpyDeviceToHost, s.jbuStream);

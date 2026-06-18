@@ -208,6 +208,128 @@ int wmf_cuda(const float*          dlr, int lrW, int lrH,
     return (int)cudaGetLastError();
 }
 
+// ── Plain bilinear upscale (no guide) ────────────────────────────────────────
+// Used for the "off" / Bilinear mode so the GPU stays busy and the pipeline
+// stays GPU-resident regardless of which algorithm is selected. Previously
+// Bilinear mode skipped all GPU upscale kernels and fell back to a CPU
+// resize in the collect phase — which left the GPU idle for that portion of
+// the frame and was, paradoxically, SLOWER than running JBU/WMF on the GPU
+// (a single-threaded CPU resize of a full HD frame is slower than a small,
+// massively-parallel GPU kernel).
+__global__ void k_bilinear(
+    const float* __restrict__ dlr, int lrW, int lrH,
+    float* __restrict__ dhr, int hrW, int hrH)
+{
+    int ox = blockIdx.x*blockDim.x + threadIdx.x;
+    int oy = blockIdx.y*blockDim.y + threadIdx.y;
+    if (ox >= hrW || oy >= hrH) return;
+
+    float fu = (ox + 0.5f) * lrW / (float)hrW - 0.5f;
+    float fv = (oy + 0.5f) * lrH / (float)hrH - 0.5f;
+    int lx0 = (int)floorf(fu);
+    int ly0 = (int)floorf(fv);
+    float tx = (fu < 0.f) ? 0.f : fu - lx0;
+    float ty = (fv < 0.f) ? 0.f : fv - ly0;
+    lx0 = max(0, min(lx0, lrW - 1));
+    ly0 = max(0, min(ly0, lrH - 1));
+    int lx1 = min(lx0 + 1, lrW - 1);
+    int ly1 = min(ly0 + 1, lrH - 1);
+
+    float v00 = dlr[ly0*lrW + lx0];
+    float v10 = dlr[ly0*lrW + lx1];
+    float v01 = dlr[ly1*lrW + lx0];
+    float v11 = dlr[ly1*lrW + lx1];
+    dhr[oy*hrW + ox] = v00*(1-tx)*(1-ty) + v10*tx*(1-ty)
+                      + v01*(1-tx)*ty    + v11*tx*ty;
+}
+
+int bilinear_cuda(const float* dlr, int lrW, int lrH,
+                   float* dhr, int hrW, int hrH, void* stream)
+{
+    cudaStream_t st = (cudaStream_t)stream;
+    dim3 b(16, 16);
+    k_bilinear<<<dim3((hrW+15)/16, (hrH+15)/16), b, 0, st>>>(
+        dlr, lrW, lrH, dhr, hrW, hrH);
+    return (int)cudaGetLastError();
+}
+
+// ── Min/max normalisation (GPU-side preprocessing required by WMF) ──────────
+// Float atomicMin/Max via CAS loop — correct for negative values too (unlike
+// the common int-bitcast trick, which only preserves ordering within a
+// single sign). Contention is negligible: only one CAS per BLOCK, not per
+// thread.
+__device__ __forceinline__ void atomicMinFloat(float* addr, float val) {
+    int* iaddr = (int*)addr;
+    int old = *iaddr, assumed;
+    do {
+        assumed = old;
+        if (__int_as_float(assumed) <= val) break;
+        old = atomicCAS(iaddr, assumed, __float_as_int(val));
+    } while (assumed != old);
+}
+__device__ __forceinline__ void atomicMaxFloat(float* addr, float val) {
+    int* iaddr = (int*)addr;
+    int old = *iaddr, assumed;
+    do {
+        assumed = old;
+        if (__int_as_float(assumed) >= val) break;
+        old = atomicCAS(iaddr, assumed, __float_as_int(val));
+    } while (assumed != old);
+}
+
+__global__ void k_minmax_init(float* mm) {
+    mm[0] =  3.0e38f;   // running min
+    mm[1] = -3.0e38f;   // running max
+}
+
+__global__ void k_minmax_reduce(const float* __restrict__ data, int n, float* mm) {
+    __shared__ float smin[256];
+    __shared__ float smax[256];
+    int tid = threadIdx.x;
+    float lmin =  3.0e38f, lmax = -3.0e38f;
+    for (int i = blockIdx.x*blockDim.x + tid; i < n; i += blockDim.x*gridDim.x) {
+        float v = data[i];
+        lmin = fminf(lmin, v);
+        lmax = fmaxf(lmax, v);
+    }
+    smin[tid] = lmin; smax[tid] = lmax;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (tid < s) {
+            smin[tid] = fminf(smin[tid], smin[tid + s]);
+            smax[tid] = fmaxf(smax[tid], smax[tid + s]);
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        atomicMinFloat(&mm[0], smin[0]);
+        atomicMaxFloat(&mm[1], smax[0]);
+    }
+}
+
+__global__ void k_normalize(const float* __restrict__ raw, int n,
+                              const float* __restrict__ mm,
+                              float* __restrict__ out) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float mn = mm[0], mx = mm[1];
+    float range = (mx - mn) > 1e-6f ? (mx - mn) : 1e-6f;
+    out[i] = (raw[i] - mn) / range;
+}
+
+int normalize_depth_cuda(const float* raw, int n,
+                          float* mm_scratch, float* out, void* stream)
+{
+    cudaStream_t st = (cudaStream_t)stream;
+    k_minmax_init<<<1, 1, 0, st>>>(mm_scratch);
+    int blocks = (n + 255) / 256;
+    if (blocks > 256) blocks = 256;   // grid-stride loop covers the rest
+    k_minmax_reduce<<<blocks, 256, 0, st>>>(raw, n, mm_scratch);
+    int nblk = (n + 255) / 256;
+    k_normalize<<<nblk, 256, 0, st>>>(raw, n, mm_scratch, out);
+    return (int)cudaGetLastError();
+}
+
 // ── Separable max-dilation (unchanged algorithm) ─────────────────────────────
 __global__ void k_dilate_h(const float* __restrict__ in, float* __restrict__ out,
                              int w, int h, int radius, float edgeThresh)

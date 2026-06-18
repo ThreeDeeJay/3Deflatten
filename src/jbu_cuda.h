@@ -39,6 +39,25 @@ int wmf_cuda(const float*         depth_lr,
              float*               guide_lr_dev,
              void*                stream);
 
+// Plain GPU bilinear upscale — no guide needed. Use this (not a CPU resize)
+// for the "off" / Bilinear case: running the upscale on GPU keeps the whole
+// pipeline GPU-resident regardless of which algorithm is selected, instead
+// of leaving the GPU idle while the CPU does a slow full-resolution resize.
+int bilinear_cuda(const float* depth_lr, int lrW, int lrH,
+                   float* depth_hr, int hrW, int hrH,
+                   void* stream);
+
+// Min/max-normalises `n` raw depth values into [0,1], writing the result to
+// `out`. Required before wmf_cuda(): WMF's histogram binning assumes input
+// depth is already in [0,1], but raw TensorRT model output is not bounded to
+// that range. JBU does not need this (it is a pure linear weighted average,
+// so it stays correct under any input scale).
+// mm_scratch: pre-allocated 2-float device buffer (caller-owned, reused
+//             across calls — see TrtRtxSession::d_minmax).
+int normalize_depth_cuda(const float* raw, int n,
+                          float* mm_scratch, float* out,
+                          void* stream);
+
 // Separable morphological max-dilation on the GPU.
 //   src/tmp/dst : device float[w*h]
 //   edgeThresh  : only propagate values where delta >= threshold
