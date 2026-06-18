@@ -181,14 +181,17 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
 }
 )HLSL";
 
-// ── Mesh vertex shader — simple depth-based disparity warp ────────────────────
-// Each vertex carries its source UV (u,v) which never changes.
-// The VS reads depth at that UV, computes a horizontal disparity shift, and
-// places the vertex at the shifted screen position for the current eye.
-// The PS samples srcTex at the original UV → RGB always exactly matches the mesh.
-// No SV_CullDistance: silhouette edges stretch naturally rather than cutting,
-// so foreground pixels stay attached to their own polygon at all separations.
-// Z-buffering handles self-occlusion where shifted foreground overlaps background.
+// ── Mesh vertex + geometry shaders ───────────────────────────────────────────
+// MeshVS: each vertex carries its source UV (u,v).  The VS reads depth at
+// that UV, computes a horizontal disparity shift, and places the vertex at
+// the correct shifted screen position for the current eye.  The PS samples
+// srcTex at the original UV so RGB always exactly matches the mesh geometry.
+//
+// MeshGS: geometry shader that culls triangles whose three vertices span a
+// depth discontinuity (max pairwise depth difference > g_discThresh).
+// Culled triangles leave their pixels at the DSV-cleared depth (1.0) and
+// RTV-cleared colour (black); pass 2 (UV-warp hole-fill) then fills those
+// gaps using the selected infill algorithm.
 static const char* kMeshVSSrc = R"HLSL(
 cbuffer CBStereo : register(b0) {
     float  g_convergence;
@@ -233,7 +236,7 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
         // SBS: left eye  → NDC x ∈ [-1, 0]  (eyeSign +1)
         //      right eye → NDC x ∈ [ 0,+1]  (eyeSign -1)
         float halfOfs = (g_eyeSign > 0.0) ? -1.0 : 0.0;
-        ndcX = eyeX * 1.0 + halfOfs;   // eyeX is already in [0,1] → map to half
+        ndcX = eyeX * 1.0 + halfOfs;
         ndcY = 1.0 - 2.0 * uv.y;
     } else {
         // TAB: top eye    → NDC y ∈ [ 1, 0]  (eyeSign +1)
@@ -247,6 +250,31 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     o.pos = float4(ndcX, ndcY, 1.0 - depth, 1.0);
     o.uv  = uv;   // UNCHANGED — PS always samples the original source pixel
     return o;
+}
+
+// ── Mesh Geometry Shader — depth-discontinuity triangle culling ───────────
+// Each triangle from MeshVS is inspected here before rasterization.
+// If any pair of the three vertices has a depth difference exceeding
+// g_discThresh, the triangle straddles a foreground/background boundary
+// (a silhouette edge). Emitting nothing for such triangles creates a clean
+// gap at the edge instead of a stretched/smeared polygon. The gap pixels
+// retain the DSV-cleared depth 1.0 and are filled in pass 2 by
+// PS_StereoWarp (UV-warp hole-fill) using the selected infill algorithm.
+// Triangles that do NOT straddle a discontinuity are passed through as-is.
+//
+// VS wrote: pos.z = 1.0 - depth; recover depth as (1.0 - pos.z).
+// w = 1.0 throughout (no perspective divide needed — clip_z == NDC_z here).
+[maxvertexcount(3)]
+void MeshGS(triangle MeshOut v[3], inout TriangleStream<MeshOut> stream) {
+    float d0 = 1.0 - v[0].pos.z;
+    float d1 = 1.0 - v[1].pos.z;
+    float d2 = 1.0 - v[2].pos.z;
+    float maxDiff = max(max(abs(d0 - d1), abs(d1 - d2)), abs(d0 - d2));
+    if (maxDiff > g_discThresh) return;   // cull: gap filled by UV-warp pass
+    stream.Append(v[0]);
+    stream.Append(v[1]);
+    stream.Append(v[2]);
+    stream.RestartStrip();
 }
 )HLSL";
 
@@ -447,7 +475,23 @@ HRESULT StereoRenderer::CreateShaders() {
                 m_dev->CreateInputLayout(
                     mied, 1,
                     vsBlob2->GetBufferPointer(), vsBlob2->GetBufferSize(), &m_meshIL);
-                LOG_INFO("Mesh shaders compiled OK");
+
+                // Compile GS from the same source string (MeshGS entry point).
+                // The GS culls triangles spanning depth discontinuities; without
+                // it the mesh stretches at silhouette edges and infill has no gap
+                // to fill.  Non-fatal if it fails — log but continue.
+                ComPtr<ID3DBlob> gsBlob, err3;
+                HRESULT hrGS = D3DCompile(kMeshVSSrc, strlen(kMeshVSSrc),
+                    "mesh_gs.hlsl", nullptr, nullptr,
+                    "MeshGS", "gs_5_0", 0, 0, &gsBlob, &err3);
+                if (FAILED(hrGS)) {
+                    if (err3) LOG_ERR("MeshGS compile: ", (const char*)err3->GetBufferPointer());
+                    LOG_WARN("Mesh GS failed to compile — edge culling + infill disabled.");
+                } else {
+                    m_dev->CreateGeometryShader(
+                        gsBlob->GetBufferPointer(), gsBlob->GetBufferSize(), nullptr, &m_meshGS);
+                    LOG_INFO("Mesh shaders compiled OK (VS + GS + PS)");
+                }
             }
         }
     }
@@ -723,18 +767,19 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     m_ctx->RSSetViewports(1,&vp);
 
     // ── Clear output to black and depth to 1.0 ───────────────────────────────
-    // Uncovered pixels (disocclusions, frame borders) remain black.
-    // Infill is not implemented in this pass — the mesh stretches at edges
-    // rather than culling, so disocclusion regions are naturally minimised.
+    // Uncovered pixels (gaps cut by MeshGS at depth discontinuities) retain
+    // depth 1.0 and colour black.  Pass 2 (UV-warp hole-fill) fills them.
     const float black[4] = {0,0,0,1};
     m_ctx->ClearRenderTargetView(m_rtv.Get(), black);
     if (m_dsv) m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 
-    // ── Mesh pass (single pass, two DrawIndexed calls for left+right eye) ────
-    // The mesh covers the full frame. Each vertex carries its source UV unchanged
-    // so the PS always samples exactly the right RGB pixel regardless of disparity.
-    if (!m_meshVS || !m_meshIL || !m_meshVB || !m_meshIB) {
-        LOG_WARN("Mesh resources missing — no output this frame.");
+    // ── Pass 1: mesh + GS (two DrawIndexed calls for left+right eye) ─────────
+    // MeshVS shifts each vertex by its per-depth disparity.
+    // MeshGS culls triangles whose vertices straddle a depth discontinuity,
+    // leaving those pixels at cleared depth 1.0 for pass 2 to fill.
+    // MeshPS samples srcTex at the original (unshifted) UV.
+    if (!m_meshVS || !m_meshGS || !m_meshIL || !m_meshVB || !m_meshIB) {
+        LOG_WARN("Mesh resources missing (VS/GS/IL/VB/IB) — no output this frame.");
         return;
     }
 
@@ -747,8 +792,10 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     m_ctx->IASetVertexBuffers(0, 1, m_meshVB.GetAddressOf(), &mstride, &moff);
     m_ctx->IASetIndexBuffer(m_meshIB.Get(), DXGI_FORMAT_R32_UINT, 0);
     m_ctx->VSSetShader(m_meshVS.Get(), nullptr, 0);
+    m_ctx->GSSetShader(m_meshGS.Get(), nullptr, 0);
     m_ctx->PSSetShader(m_meshPS.Get(), nullptr, 0);
     m_ctx->VSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
+    m_ctx->GSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
     m_ctx->PSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
     m_ctx->VSSetShaderResources(1, 1, m_depthSRV.GetAddressOf());
     m_ctx->VSSetSamplers(0, 1, m_sampler.GetAddressOf());
@@ -771,8 +818,51 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     drawEye(+1.f);   // left eye  (SBS: left half;  TAB: top half)
     drawEye(-1.f);   // right eye (SBS: right half; TAB: bottom half)
 
+    // Unbind GS — required before pass 2 which has no GS stage.
+    m_ctx->GSSetShader(nullptr, nullptr, 0);
     m_ctx->VSSetShaderResources(1, 0, nullptr);
     m_ctx->OMSetDepthStencilState(nullptr, 0);
+
+    // ── Pass 2: UV-warp hole-fill ─────────────────────────────────────────────
+    // Draw a full-screen quad with depth-test EQUAL 1.0, no depth write.
+    // The PS (PS_StereoWarp) only executes for pixels still at depth 1.0 —
+    // exactly the gaps MeshGS left by culling discontinuity-straddling
+    // triangles. For each such pixel the PS computes the warp disparity, detects
+    // that it lands on foreground (depthJump > 0.10), and runs the selected
+    // g_infillMode search (Inner/Outer/Blend/EdgeClamp/Inpaint) to find and
+    // write the correct background colour. Covered pixels (mesh depth < 1.0)
+    // fail the EQUAL test and are skipped with no PS invocation (essentially
+    // free early-Z rejection on FL11.0 hardware like the RTX 2080 Ti).
+    // PS_StereoWarp determines which eye each pixel belongs to from its UV
+    // (uv.x < 0.5 for SBS, uv.y < 0.5 for TAB), so one Draw(4) covers both.
+    {
+        m_ctx->OMSetDepthStencilState(m_dsStateHoleFill.Get(), 0);
+        m_ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), m_dsv.Get());
+        m_ctx->RSSetState(m_raster.Get());
+        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        m_ctx->IASetInputLayout(m_il.Get());
+        UINT wstride = sizeof(Vertex), woff = 0;
+        m_ctx->IASetVertexBuffers(0, 1, m_vb.GetAddressOf(), &wstride, &woff);
+        m_ctx->VSSetShader(m_vs.Get(), nullptr, 0);
+        m_ctx->PSSetShader(m_ps.Get(), nullptr, 0);
+        // Reset CB: eyeSign=0 (PS_StereoWarp derives eye from UV, not eyeSign).
+        D3D11_MAPPED_SUBRESOURCE mcw{};
+        if (SUCCEEDED(m_ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mcw))) {
+            *static_cast<CBStereo*>(mcw.pData) = cbBase;  // cbBase.eyeSign == 0
+            m_ctx->Unmap(m_cb.Get(), 0);
+        }
+        m_ctx->VSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
+        m_ctx->PSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
+        // PS_StereoWarp uses t0=srcTex, t1=depthTex
+        m_ctx->PSSetShaderResources(0, 1, m_srcSRV.GetAddressOf());
+        m_ctx->PSSetShaderResources(1, 1, m_depthSRV.GetAddressOf());
+        m_ctx->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
+        m_ctx->Draw(4, 0);
+        // Unbind PS SRVs to avoid binding hazards on the next mesh pass.
+        ID3D11ShaderResourceView* nullSRVs[2] = {nullptr, nullptr};
+        m_ctx->PSSetShaderResources(0, 2, nullSRVs);
+        m_ctx->OMSetDepthStencilState(nullptr, 0);
+    }
 
     // ── Triple-buffered staging readback — guaranteed zero Map(READ) stall ───
     // Frame N: CopyResource → staging[N%3]      (async, returns immediately)

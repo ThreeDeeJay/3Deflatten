@@ -98,22 +98,31 @@ private:
         float pad1;
     };
 
-    // ── Mesh reprojection resources (pass 2 of 2) ─────────────────────────────
-    // Reference: Shih et al. "3D Photography using Context-aware Layered Depth
-    // Inpainting" (CVPR 2020) §3.  We build a triangle mesh from the depth map at
-    // half source resolution.  Triangles that span depth discontinuities are culled
-    // via SV_CullDistance (§3 "Mesh generation").  The mesh is rendered on top of
-    // the UV-warp background (pass 1) with z-buffering; disoccluded holes retain
-    // the UV-warp inpaint — the groundwork for a future learned inpainter.
+    // ── Mesh reprojection + GS culling + UV-warp hole-fill (two-pass) ────────
+    // Pass 1 — mesh + GS:
+    //   MeshVS computes per-vertex disparity-shifted screen position.
+    //   MeshGS (geometry shader) inspects each triangle's three depth values;
+    //   if the max pairwise difference exceeds g_discThresh the triangle spans
+    //   a foreground/background boundary and is culled — emitting nothing.
+    //   The gap is left at the DSV's cleared depth (1.0) and RTV's cleared
+    //   colour (black), ready for pass 2.
+    // Pass 2 — UV-warp hole-fill:
+    //   A full-screen quad with depth-test EQUAL 1.0 (m_dsStateHoleFill, no
+    //   depth write).  PS only runs for pixels still at depth 1.0 (gaps the
+    //   GS cut).  PS_StereoWarp with the selected g_infillMode searches for
+    //   the correct background colour in source-space and writes it, filling
+    //   each hole exactly once with no overdraw on covered pixels.
+    // Reference: Shih et al. CVPR 2020 §3 for the mesh + edge-cutting concept.
     ComPtr<ID3D11VertexShader>      m_meshVS;
+    ComPtr<ID3D11GeometryShader>    m_meshGS;   // culls edge-straddling triangles
     ComPtr<ID3D11PixelShader>       m_meshPS;
     ComPtr<ID3D11InputLayout>       m_meshIL;
     ComPtr<ID3D11Buffer>            m_meshVB;   // float2 uv per vertex, meshW*meshH verts
     ComPtr<ID3D11Buffer>            m_meshIB;   // uint32 indices, (meshW-1)*(meshH-1)*6
     ComPtr<ID3D11Texture2D>         m_dsTex;    // depth-stencil for mesh z-test
     ComPtr<ID3D11DepthStencilView>  m_dsv;
-    ComPtr<ID3D11DepthStencilState> m_dsState;      // LESS, depth write enabled (mesh pass)
-    ComPtr<ID3D11DepthStencilState> m_dsStateHoleFill; // EQUAL, no write (UV-warp hole-fill)
-    ComPtr<ID3D11RasterizerState>   m_meshRaster; // no backface cull
+    ComPtr<ID3D11DepthStencilState> m_dsState;         // LESS_EQUAL, depth write (mesh pass)
+    ComPtr<ID3D11DepthStencilState> m_dsStateHoleFill; // EQUAL, no write (hole-fill pass)
+    ComPtr<ID3D11RasterizerState>   m_meshRaster;      // no backface cull
     int                             m_meshW = 0, m_meshH = 0;
 };
