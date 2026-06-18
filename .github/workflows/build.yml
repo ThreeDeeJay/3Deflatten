@@ -213,20 +213,24 @@ jobs:
 #          copy "scripts/register.bat"                    "Release/"
 #          copy "scripts/unregister.bat"                  "Release/"
 
+      - name: Purge tag - latest-${{env.Branch}}
+        run: |
+          gh release delete latest-${{env.Branch}} --repo ${{github.repository}} --cleanup-tag --yes || true
+
+      - name: Release - latest-${{env.Branch}} - 3Deflatten_x64.ax
+        run: |
+          gh release create latest-${{env.Branch}} --repo ${{github.repository}} --target ${{env.CommitHash}} --generate-notes --latest=false --prerelease --title "${{env.Title}} r${{env.CommitCount}}@${{env.CommitHashShort}}" --notes "Build archive: https://github.com/${{github.repository}}/releases/tag/archive-${{env.Branch}}
+          Build log: https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"
+          gh release upload latest-${{env.Branch}} --repo ${{github.repository}} --clobber "Release/Win64/3Deflatten_x64.ax"
+
       - name: Compress artifacts
         run: |
           7z a "Release/${{env.Title}}.zip" "${{github.workspace}}/Release/*" -mx=9
           cp "Release/${{env.Title}}.zip" "Release/${{env.Title}}_r${{env.CommitCount}}@${{env.CommitHashShort}}.zip"
 
-      - name: Purge tag - latest-${{env.Branch}}
+      - name: Release - latest-${{env.Branch}} - ${{env.Title}}.zip
         run: |
-          gh release delete latest-${{env.Branch}} --repo ${{github.repository}} --cleanup-tag --yes || true
-
-      - name: Release - latest-${{env.Branch}}
-        run: |
-          gh release create latest-${{env.Branch}} --repo ${{github.repository}} --target ${{env.CommitHash}} --generate-notes --latest=false --prerelease --title "${{env.Title}} r${{env.CommitCount}}@${{env.CommitHashShort}}" --notes "Build archive: https://github.com/${{github.repository}}/releases/tag/archive-${{env.Branch}}
-          Build log: https://github.com/${{github.repository}}/actions/runs/${{github.run_id}}"
-          gh release upload latest-${{env.Branch}} --repo ${{github.repository}} --clobber "Release/${{env.Title}}.zip" "Release/Win64/3Deflatten_x64.ax"
+          gh release upload latest-${{env.Branch}} --repo ${{github.repository}} --clobber "Release/${{env.Title}}.zip"
 
       - name: Release - archive-${{env.Branch}}
         run: |
