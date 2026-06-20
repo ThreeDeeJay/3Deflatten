@@ -31,7 +31,8 @@ cbuffer CBStereo : register(b0) {
     float  g_depthOffsetU;
     // row 3
     float  g_depthOffsetV;
-    float  g_discThresh;  // unused in warp pass (present to keep layout aligned)
+    float  g_discThresh;  // used by both the mesh GS edge-cull AND the warp
+                           // pass's background-search (see PS_StereoWarp)
     float  g_eyeSign;     // unused in warp pass
     float  g_pad1;
 };
@@ -101,83 +102,92 @@ float4 PS_StereoWarp(VS_OUT i) : SV_TARGET {
     }
     float eyeSign = isLeft ? 1.0 : -1.0;
 
-    float2 depUV = DepthUV(eyeUV);
-    float depth  = g_depthTex.SampleLevel(g_sampler, depUV, 0).r;
-
-    float  disparity = g_separation * (depth - g_convergence);
-    float2 srcUV     = saturate(eyeUV + float2(eyeSign * disparity, 0.0));
-
-    float sampledDepth = g_depthTex.SampleLevel(g_sampler, DepthUV(srcUV), 0).r;
-    float depthJump    = sampledDepth - depth;
-
-    [branch]
-    if (depthJump > 0.10) {
-        float  blend   = saturate((depthJump - 0.10) * 10.0);
-        float4 rawSmp  = g_srcTex.SampleLevel(g_sampler, srcUV, 0);
-        // Source-space step vectors:
-        //   innerDir (+eyeSign): through foreground to the hidden background
-        //   outerDir (-eyeSign): back to the visible outer background
-        float2 innerDir = float2( eyeSign * g_texelW * 2.0, 0);
-        float2 outerDir = float2(-eyeSign * g_texelW * 2.0, 0);
-
-        if (g_infillMode == 0) {
-            // Inner: hidden background behind near edge (+eyeSign through fg)
-            // Fallback = outermost visible bg (not rawSample) for wide gaps
-            int hitStep;
-            float4 inner = SrcSearchFirst(srcUV, innerDir, depth, 32, hitStep);
-            if (hitStep == 0) inner = SrcSearchLast(srcUV, outerDir, depth, 32);
-            return lerp(rawSmp, inner, blend);
-
-        } else if (g_infillMode == 1) {
-            // Outer: extend visible background from gap's outer edge
-            // -eyeSign from srcUV; LAST match = outermost visible bg
-            float4 outer = SrcSearchLast(srcUV, outerDir, depth, 32);
-            return lerp(rawSmp, outer, blend);
-
-        } else if (g_infillMode == 2) {
-            // Blend: confidence-weighted mix of Inner + Outer
-            int innerHit;
-            float4 inner = SrcSearchFirst(srcUV, innerDir, depth, 32, innerHit);
-            float4 outer = SrcSearchLast (srcUV, outerDir, depth, 32);
-            float conf = (innerHit > 0) ? saturate(1.0 - (float)innerHit / 32.0) : 0.0;
-            return lerp(rawSmp, lerp(outer, inner, conf), blend);
-
-        } else if (g_infillMode == 3) {
-            // EdgeClamp (SuperDepth3D-style): FIRST visible outer bg pixel
-            // = texture edge-clamp in the warp direction, same effect as
-            //   SuperDepth3D "Offset Based" / VM0 Normal infill.
-            int hitStep;
-            float4 edge = SrcSearchFirst(srcUV, outerDir, depth, 32, hitStep);
-            return lerp(rawSmp, edge, blend);
-
-        } else {
-            // Inpaint: bilateral-weighted blend from both directions
-            // Approximates 3D Photo Inpainting (Shih et al. CVPR 2020):
-            // context-aware fill using depth-weighted samples on both sides.
-            float4 fillColor   = float4(0, 0, 0, 0);
-            float  totalWeight = 0.001;
-            [loop]
-            for (int s = 1; s <= 32; ++s) {
-                float sf = (float)s;
-                float2 pIn  = srcUV + innerDir * sf;
-                float2 pOut = srcUV + outerDir * sf;
-                if (pIn.x > 0.0 && pIn.x < 1.0) {
-                    float dIn = g_depthTex.SampleLevel(g_sampler, pIn, 0).r;
-                    float wIn = exp(-sf * 0.12) * max(0.0, 1.0 - abs(dIn - depth) * 10.0);
-                    fillColor += wIn * g_srcTex.SampleLevel(g_sampler, pIn, 0);
-                    totalWeight += wIn;
-                }
-                if (pOut.x > 0.0 && pOut.x < 1.0) {
-                    float dOut = g_depthTex.SampleLevel(g_sampler, pOut, 0).r;
-                    float wOut = exp(-sf * 0.12) * max(0.0, 1.0 - abs(dOut - depth) * 10.0);
-                    fillColor += wOut * g_srcTex.SampleLevel(g_sampler, pOut, 0);
-                    totalWeight += wOut;
-                }
-            }
-            return lerp(rawSmp, fillColor / totalWeight, blend);
-        }
+    // ── Find the true background reference ──────────────────────────────────
+    // This PS now ONLY runs on pixels the mesh pass left at depth==1.0 (gaps
+    // cut by MeshGS — see the EQUAL-depth hole-fill pass in RenderGPU).
+    // Sampling depth directly at eyeUV (the old model, designed for a
+    // standalone per-pixel backward-warp with no mesh) is wrong here: a gap
+    // is many texels wide and its output positions can numerically coincide
+    // with the FOREGROUND's own source extent, making "depth at this pixel"
+    // read as foreground instead of the background that's actually supposed
+    // to show through. That produced a fill with no real disparity — flat,
+    // "stuck to the screen" looking.
+    //
+    // Fix: walk in the established "outer" direction (-eyeSign, away from
+    // where the foreground shifted to) from eyeUV, tracking the highest
+    // depth seen so far (the foreground's peak as we cross it). The moment
+    // depth falls more than g_discThresh below that running peak, we've
+    // stepped past the foreground's edge into real background — use THAT
+    // position's depth as the reference for the infill searches below,
+    // instead of the unreliable eyeUV sample.
+    float2 bgSearchDir = float2(-eyeSign * g_texelW, 0.0);
+    float  runningPeak = g_depthTex.SampleLevel(g_sampler, DepthUV(eyeUV), 0).r;
+    float2 srcUV  = eyeUV;
+    float  depth  = runningPeak;
+    [loop]
+    for (int s = 1; s <= 96; ++s) {
+        float2 p = eyeUV + bgSearchDir * s;
+        if (p.x <= 0.0 || p.x >= 1.0) { srcUV = saturate(p); depth = runningPeak; break; }
+        float d = g_depthTex.SampleLevel(g_sampler, p, 0).r;
+        runningPeak = max(runningPeak, d);
+        if (runningPeak - d > g_discThresh) { srcUV = p; depth = d; break; }
     }
-    return g_srcTex.SampleLevel(g_sampler, srcUV, 0);
+
+    // Source-space step vectors for the infill searches below:
+    //   innerDir (+eyeSign): back toward the foreground
+    //   outerDir (-eyeSign): further into the background
+    float2 innerDir = float2( eyeSign * g_texelW * 2.0, 0);
+    float2 outerDir = float2(-eyeSign * g_texelW * 2.0, 0);
+
+    if (g_infillMode == 0) {
+        // Inner: hidden background behind near edge (+eyeSign through fg)
+        // Fallback = outermost visible bg for wide gaps
+        int hitStep;
+        float4 inner = SrcSearchFirst(srcUV, innerDir, depth, 32, hitStep);
+        if (hitStep == 0) inner = SrcSearchLast(srcUV, outerDir, depth, 32);
+        return inner;
+
+    } else if (g_infillMode == 1) {
+        // Outer: extend visible background from gap's outer edge
+        return SrcSearchLast(srcUV, outerDir, depth, 32);
+
+    } else if (g_infillMode == 2) {
+        // Blend: confidence-weighted mix of Inner + Outer
+        int innerHit;
+        float4 inner = SrcSearchFirst(srcUV, innerDir, depth, 32, innerHit);
+        float4 outer = SrcSearchLast (srcUV, outerDir, depth, 32);
+        float conf = (innerHit > 0) ? saturate(1.0 - (float)innerHit / 32.0) : 0.0;
+        return lerp(outer, inner, conf);
+
+    } else if (g_infillMode == 3) {
+        // EdgeClamp: FIRST visible outer bg pixel
+        int hitStep;
+        return SrcSearchFirst(srcUV, outerDir, depth, 32, hitStep);
+
+    } else {
+        // Inpaint: bilateral-weighted blend from both directions
+        float4 fillColor   = float4(0, 0, 0, 0);
+        float  totalWeight = 0.001;
+        [loop]
+        for (int s = 1; s <= 32; ++s) {
+            float sf = (float)s;
+            float2 pIn  = srcUV + innerDir * sf;
+            float2 pOut = srcUV + outerDir * sf;
+            if (pIn.x > 0.0 && pIn.x < 1.0) {
+                float dIn = g_depthTex.SampleLevel(g_sampler, pIn, 0).r;
+                float wIn = exp(-sf * 0.12) * max(0.0, 1.0 - abs(dIn - depth) * 10.0);
+                fillColor += wIn * g_srcTex.SampleLevel(g_sampler, pIn, 0);
+                totalWeight += wIn;
+            }
+            if (pOut.x > 0.0 && pOut.x < 1.0) {
+                float dOut = g_depthTex.SampleLevel(g_sampler, pOut, 0).r;
+                float wOut = exp(-sf * 0.12) * max(0.0, 1.0 - abs(dOut - depth) * 10.0);
+                fillColor += wOut * g_srcTex.SampleLevel(g_sampler, pOut, 0);
+                totalWeight += wOut;
+            }
+        }
+        return fillColor / totalWeight;
+    }
 }
 )HLSL";
 
@@ -756,7 +766,7 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
         cb->infillMode    = (int)cfg.infillMode;
         cb->depthOffsetU  = srcW > 0 ? motionDx / (float)srcW : 0.f;
         cb->depthOffsetV  = srcH > 0 ? motionDy / (float)srcH : 0.f;
-        cb->discThresh    = 0.05f;
+        cb->discThresh    = cfg.discThresh;
         cb->eyeSign       = 0.f;
         cb->pad1          = 0.f;
         cbBase = *cb;   // save for mesh eye-sign updates

@@ -28,14 +28,22 @@ int jbu_cuda(const float*         depth_lr,
 // it. Wrong-side-of-an-edge samples are excluded entirely rather than merely
 // down-weighted, so there is no blend left to glow — the output snaps to a
 // hard transition aligned with the guide's RGB edge.
-// Same signature shape as jbu_cuda() so call sites can switch between the
-// two with no other code changes. guide_lr_dev is likewise unused.
+// dilateBias [0,1]: among histogram bins whose weight is within
+//   (dilateBias*100)% of the winning bin's weight, prefer the HIGHEST-depth
+//   (nearest) one instead of strictly the single best-supported one. This
+//   grows the foreground class natively, within WMF's own RGB-guided
+//   neighbourhood, instead of stacking a separate box-shaped max-dilate on
+//   top of WMF's already-sharp output (which tends to look blockier).
+//   0 = no bias (original strict-mode behaviour).
+// Same signature shape as jbu_cuda() (plus dilateBias) so call sites can
+// switch between the two with minimal changes. guide_lr_dev is unused.
 int wmf_cuda(const float*         depth_lr,
              int lrW, int lrH,
              const unsigned char* guide_bgra,
              int hrW, int hrH, int hrStride,
              float*               depth_hr,
              float sigma_s, float sigma_c, int radius,
+             float                dilateBias,
              float*               guide_lr_dev,
              void*                stream);
 
@@ -61,7 +69,16 @@ int normalize_depth_cuda(const float* raw, int n,
 // Separable morphological max-dilation on the GPU.
 //   src/tmp/dst : device float[w*h]
 //   edgeThresh  : only propagate values where delta >= threshold
+//   flipped     : false = expand HIGH values (the normal "depth=1=near"
+//                 convention); true = expand LOW values instead.
+//                 IMPORTANT: this must reflect the polarity the data will
+//                 have AFTER any flipDepth correction, since dilation only
+//                 makes sense relative to "which direction is near". This
+//                 kernel runs BEFORE the (CPU-side, post-readback) flip is
+//                 applied, so the caller must pass flipDepth here directly —
+//                 dilating high-then-flipping silently inverts the effect
+//                 (foreground appears to shrink instead of expand).
 // Returns cudaGetLastError() (0 = success).
 int gpu_dilate(const float* src, float* tmp, float* dst,
                int w, int h, int radius, float edgeThresh,
-               void* stream);
+               bool flipped, void* stream);

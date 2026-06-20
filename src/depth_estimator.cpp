@@ -1024,6 +1024,11 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
 
             // sigma_s=1.2 (LR-space spatial), sigma_c=0.25 (full-RGB sum-of-
             // squares colour distance), radius=3 — tuned for full-RGB JBU/WMF.
+            // wmfDilateBias mirrors the CPU path's WMFResize/PostprocessDepth
+            // bias (see those for rationale) — reuses the depthDilate slider
+            // to natively grow WMF's foreground class instead of stacking a
+            // separate post-hoc dilate on top of its already-sharp output.
+            const float wmfDilateBias = (float)depthDilate / 16.0f * 0.4f;
             if (wantJBU) {
                 jbu_cuda(d_outSlice, mw, mh,
                          s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
@@ -1048,7 +1053,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                      s.jbuStream);
                 wmf_cuda(s.d_guideLR[writeBuf], mw, mh,
                          s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
-                         s.d_depthHR[writeBuf], 1.2f, 0.25f, 3,
+                         s.d_depthHR[writeBuf], 1.2f, 0.25f, 3, wmfDilateBias,
                          nullptr, s.jbuStream);
             } else {
                 // Bilinear — cheapest kernel, no guide/colour weighting.
@@ -1056,10 +1061,23 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                              s.d_depthHR[writeBuf], srcW, srcH, s.jbuStream);
             }
 
-            if (depthDilate > 0) {
+            // Skipped for WMF — its own dilateBias (above) already grows
+            // the foreground natively within its RGB-guided neighbourhood;
+            // stacking this separable box-filter dilate on top tends to
+            // look blockier on an already-sharp WMF edge.
+            //
+            // IMPORTANT (flip ordering): this runs BEFORE flipDepth is
+            // applied (that happens later, on CPU, in the collect phase
+            // below) — so we must tell gpu_dilate the data's PRE-flip
+            // polarity via `flipped` so it expands the side that will end
+            // up being "near" AFTER the flip, not before. Dilating before
+            // flip with the wrong polarity makes foreground edges visually
+            // SHRINK instead of expand once flipped.
+            if (depthDilate > 0 && !wantWMF) {
                 gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                            s.d_depthHR[writeBuf],
-                           srcW, srcH, depthDilate, depthEdgeThresh, s.jbuStream);
+                           srcW, srcH, depthDilate, depthEdgeThresh,
+                           flipDepth, s.jbuStream);
             }
             cudaMemcpyAsync(s.h_jbuOut[writeBuf], s.d_depthHR[writeBuf],
                             (size_t)srcW * srcH * sizeof(float),
@@ -1965,8 +1983,13 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
             DA3StreamAccumulate(depth);
         }
 
-        // Resize to source resolution — dispatch on the selected algorithm
+        // Resize to source resolution — dispatch on the selected algorithm.
+        // dilateBias drives WMF's own native foreground-growing bias (see
+        // WMFResize) from the same depthDilate slider used by the separate
+        // post-hoc DilateDepth() for Bilinear/JBU — stacking both for WMF
+        // tends to look blockier, so WMF skips the separate pass below.
         std::vector<float> out(srcWidth * srcHeight);
+        const float wmfDilateBias = (float)depthDilate / 16.0f * 0.4f;
         switch (upscaleMode) {
         case DepthUpscaleMode::JBU:
             // Guide is the full-res BGRA source frame (srcData, srcWidth × srcHeight)
@@ -1977,7 +2000,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
         case DepthUpscaleMode::WeightedMode:
             WMFResize(depth.data(), accumW, accumH,
                       srcData, srcWidth, srcHeight, srcStride,
-                      out.data(), srcWidth, srcHeight);
+                      out.data(), srcWidth, srcHeight, wmfDilateBias);
             break;
         default:
             BilinearResize(depth.data(), accumW, accumH,
@@ -1990,8 +2013,9 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
             for (float& v : out) v = 1.f - v;
 
         // Edge dilation: expand foreground (high-depth) pixels outward to fill
-        // the thin background halo at silhouette edges.
-        if (depthDilate > 0)
+        // the thin background halo at silhouette edges. Skipped for WMF —
+        // its own dilateBias (above) already grows the foreground natively.
+        if (depthDilate > 0 && upscaleMode != DepthUpscaleMode::WeightedMode)
             DilateDepth(out, srcWidth, srcHeight, depthDilate, depthEdgeThresh);
 
         // Temporal smoothing.  Disabled when DA3-Streaming is active because:
@@ -2100,6 +2124,7 @@ void DepthEstimator::PostprocessDepth(const float* raw,
     }
 
     depth.resize(dstW * dstH);
+    const float wmfDilateBias = (float)depthDilate / 16.0f * 0.4f;
     if (upscaleMode == DepthUpscaleMode::JBU && guide && guideStride > 0) {
         JBUResize(normalised.data(), rawW, rawH,
                   guide, dstW, dstH, guideStride,
@@ -2107,7 +2132,7 @@ void DepthEstimator::PostprocessDepth(const float* raw,
     } else if (upscaleMode == DepthUpscaleMode::WeightedMode && guide && guideStride > 0) {
         WMFResize(normalised.data(), rawW, rawH,
                   guide, dstW, dstH, guideStride,
-                  depth.data(), dstW, dstH);
+                  depth.data(), dstW, dstH, wmfDilateBias);
     } else {
         BilinearResize(normalised.data(), rawW, rawH, depth.data(), dstW, dstH);
     }
@@ -2115,7 +2140,9 @@ void DepthEstimator::PostprocessDepth(const float* raw,
     if (flipDepth)
         for (float& v : depth) v = 1.f - v;
 
-    if (depthDilate > 0)
+    // Skipped for WMF — its own dilateBias (above) already grows the
+    // foreground natively within its RGB-guided neighbourhood.
+    if (depthDilate > 0 && upscaleMode != DepthUpscaleMode::WeightedMode)
         DilateDepth(depth, dstW, dstH, depthDilate, depthEdgeThresh);
 }
 
@@ -2242,7 +2269,7 @@ void DepthEstimator::JBUResize(const float* src, int sw, int sh,
 // with no residual cross-edge blend left to glow.
 void DepthEstimator::WMFResize(const float* src, int sw, int sh,
                                 const BYTE* guide, int gw, int gh, int guideStride,
-                                float* dst, int dw, int dh) {
+                                float* dst, int dw, int dh, float dilateBias) {
     constexpr int kBins = 16;
     const float scaleX = (float)sw / dw;
     const float scaleY = (float)sh / dh;
@@ -2301,6 +2328,18 @@ void DepthEstimator::WMFResize(const float* src, int sw, int sh,
             float bestW = hist[0];
             for (int i = 1; i < kBins; ++i)
                 if (hist[i] > bestW) { bestW = hist[i]; bestBin = i; }
+
+            // dilateBias > 0: among bins at least as supported as
+            // bestW*(1-bias), prefer the HIGHEST-depth (nearest) one —
+            // grows the foreground class natively instead of needing a
+            // separate post-hoc dilate pass (see jbu_cuda.cu's k_wmf for
+            // the GPU-side version of this same logic).
+            if (dilateBias > 0.0f) {
+                float thresh = bestW * (1.0f - dilateBias);
+                for (int i = kBins - 1; i > bestBin; --i) {
+                    if (hist[i] >= thresh) { bestBin = i; break; }
+                }
+            }
             float modeCenter = bestBin * binWidth;
 
             // Pass 2: refine using only samples within the winning bin —

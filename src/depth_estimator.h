@@ -83,9 +83,12 @@ private:
     // dominant bin (the "mode"), then averages only the samples within it.
     // Wrong-side-of-an-edge samples are excluded entirely rather than
     // down-weighted, eliminating the blend/glow that JBU can show at edges.
+    // dilateBias [0,1]: prefer the highest-depth (nearest) bin among those
+    // nearly as well-supported as the winning one — grows the foreground
+    // class natively instead of needing a separate post-hoc dilate pass.
     void WMFResize(const float* src, int sw, int sh,
                    const BYTE* guide, int gw, int gh, int guideStride,
-                   float* dst, int dw, int dh);
+                   float* dst, int dw, int dh, float dilateBias = 0.0f);
     void BilinearResize(const float* src, int sw, int sh,
                         float* dst,       int dw, int dh);
     void TemporalSmooth(std::vector<float>& current, float alpha);

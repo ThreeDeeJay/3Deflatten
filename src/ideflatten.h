@@ -89,6 +89,9 @@ struct DeflattenConfig {
     int         depthDilate;   // foreground edge dilation radius in pixels (0=off, default 4)
     float       depthEdgeThresh; // depth discontinuity threshold for dilation [0,1] (default 0.20)
     DepthUpscaleMode upscaleMode; // Bilinear / JBU / WeightedMode (default Bilinear)
+    float       discThresh;    // mesh edge-cut threshold: depth jump between adjacent
+                                // mesh vertices above this culls the triangle, creating a
+                                // gap filled by the UV-warp hole-fill pass (default 0.10)
 };
 
 MIDL_INTERFACE("4D455F32-1A2B-4C3D-8E4F-5A6B7C8D9E0F")

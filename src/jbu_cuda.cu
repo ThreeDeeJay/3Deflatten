@@ -108,7 +108,7 @@ __global__ void k_wmf(
     const unsigned char*  __restrict__ g, int hrW, int hrH, int hrS,
     int lrW, int lrH,
     float* __restrict__ dhr,
-    float inv2ss, float inv2cs, int radius)
+    float inv2ss, float inv2cs, int radius, float dilateBias)
 {
     int ox = blockIdx.x*blockDim.x + threadIdx.x;
     int oy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -159,6 +159,19 @@ __global__ void k_wmf(
     for (int i = 1; i < WMF_BINS; ++i)
         if (hist[i] > bestW) { bestW = hist[i]; bestBin = i; }
 
+    // dilateBias > 0: among bins at least as supported as bestW*(1-bias),
+    // prefer the HIGHEST-depth (nearest) one instead of strictly the best.
+    // This natively grows the foreground class within WMF's own RGB-guided
+    // neighbourhood — a cleaner alternative to a separate box-shaped
+    // max-dilate stacked on top of WMF's already-sharp output.
+    if (dilateBias > 0.f) {
+        float thresh = bestW * (1.f - dilateBias);
+#pragma unroll
+        for (int i = WMF_BINS - 1; i > bestBin; --i) {
+            if (hist[i] >= thresh) { bestBin = i; break; }
+        }
+    }
+
     const float binWidth   = 1.0f / (WMF_BINS - 1);
     const float modeCenter = bestBin * binWidth;
 
@@ -196,7 +209,7 @@ __global__ void k_wmf(
 int wmf_cuda(const float*          dlr, int lrW, int lrH,
              const unsigned char*  g,   int hrW, int hrH, int hrS,
              float*                dhr,
-             float ss, float sc, int radius,
+             float ss, float sc, int radius, float dilateBias,
              float* /*guide_lr_dev, unused*/, void* stream)
 {
     cudaStream_t st = (cudaStream_t)stream;
@@ -204,7 +217,7 @@ int wmf_cuda(const float*          dlr, int lrW, int lrH,
     float i2ss = 1.f / (2.f * ss * ss);
     float i2cs = 1.f / (2.f * sc * sc);
     k_wmf<<<dim3((hrW+15)/16, (hrH+15)/16), b, 0, st>>>(
-        dlr, g, hrW, hrH, hrS, lrW, lrH, dhr, i2ss, i2cs, radius);
+        dlr, g, hrW, hrH, hrS, lrW, lrH, dhr, i2ss, i2cs, radius, dilateBias);
     return (int)cudaGetLastError();
 }
 
@@ -330,39 +343,44 @@ int normalize_depth_cuda(const float* raw, int n,
     return (int)cudaGetLastError();
 }
 
-// ── Separable max-dilation (unchanged algorithm) ─────────────────────────────
+// ── Separable max-dilation ────────────────────────────────────────────────
+// dirSign: +1 expands HIGH values (normal "depth=1=near" convention),
+// -1 expands LOW values instead. Must reflect the polarity the data will
+// have AFTER flipDepth is applied — see gpu_dilate()'s declaration comment.
 __global__ void k_dilate_h(const float* __restrict__ in, float* __restrict__ out,
-                             int w, int h, int radius, float edgeThresh)
+                             int w, int h, int radius, float edgeThresh, float dirSign)
 {
     int x = blockIdx.x*blockDim.x + threadIdx.x, y = blockIdx.y;
     if (x >= w || y >= h) return;
     float center = in[y*w+x], best = center;
     for (int xi = max(0,x-radius); xi <= min(w-1,x+radius); ++xi) {
         float v = in[y*w+xi];
-        if (v > best && (v-center) >= edgeThresh) best = v;
+        if (dirSign*v > dirSign*best && dirSign*(v-center) >= edgeThresh) best = v;
     }
     out[y*w+x] = best;
 }
 
 __global__ void k_dilate_v(const float* __restrict__ in, float* __restrict__ out,
-                             int w, int h, int radius, float edgeThresh)
+                             int w, int h, int radius, float edgeThresh, float dirSign)
 {
     int x = blockIdx.x*blockDim.x + threadIdx.x, y = blockIdx.y;
     if (x >= w || y >= h) return;
     float center = in[y*w+x], best = center;
     for (int yi = max(0,y-radius); yi <= min(h-1,y+radius); ++yi) {
         float v = in[yi*w+x];
-        if (v > best && (v-center) >= edgeThresh) best = v;
+        if (dirSign*v > dirSign*best && dirSign*(v-center) >= edgeThresh) best = v;
     }
     out[y*w+x] = best;
 }
 
 int gpu_dilate(const float* src, float* tmp, float* dst,
-               int w, int h, int radius, float edgeThresh, void* stream)
+               int w, int h, int radius, float edgeThresh,
+               bool flipped, void* stream)
 {
     cudaStream_t st = (cudaStream_t)stream;
+    float dirSign = flipped ? -1.0f : 1.0f;
     dim3 block(256), grid((w+255)/256, h);
-    k_dilate_h<<<grid,block,0,st>>>(src, tmp, w, h, radius, edgeThresh);
-    k_dilate_v<<<grid,block,0,st>>>(tmp, dst, w, h, radius, edgeThresh);
+    k_dilate_h<<<grid,block,0,st>>>(src, tmp, w, h, radius, edgeThresh, dirSign);
+    k_dilate_v<<<grid,block,0,st>>>(tmp, dst, w, h, radius, edgeThresh, dirSign);
     return (int)cudaGetLastError();
 }
