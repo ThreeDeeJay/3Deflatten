@@ -83,12 +83,18 @@ private:
     // dominant bin (the "mode"), then averages only the samples within it.
     // Wrong-side-of-an-edge samples are excluded entirely rather than
     // down-weighted, eliminating the blend/glow that JBU can show at edges.
-    // dilateBias [0,1]: prefer the highest-depth (nearest) bin among those
-    // nearly as well-supported as the winning one — grows the foreground
-    // class natively instead of needing a separate post-hoc dilate pass.
+    // depthDilate [0-16]: derives gather radius, spatial sigma (reach), and
+    //   a bin-preference bias all from this one slider — biasing which bin
+    //   wins within a fixed tiny radius barely moves the edge, so reach
+    //   must grow with the slider for the effect to be visible.
+    // flipDepth: this is called BEFORE flipDepth is applied by the caller,
+    //   so the bias direction must reflect pre-flip polarity (mirrors
+    //   gpu_dilate's `flipped` param) — otherwise the foreground class
+    //   visually SHRINKS once flipped instead of expanding.
     void WMFResize(const float* src, int sw, int sh,
                    const BYTE* guide, int gw, int gh, int guideStride,
-                   float* dst, int dw, int dh, float dilateBias = 0.0f);
+                   float* dst, int dw, int dh,
+                   int depthDilate = 0, bool flipDepth = false);
     void BilinearResize(const float* src, int sw, int sh,
                         float* dst,       int dw, int dh);
     void TemporalSmooth(std::vector<float>& current, float alpha);

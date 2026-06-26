@@ -29,21 +29,26 @@ int jbu_cuda(const float*         depth_lr,
 // down-weighted, so there is no blend left to glow — the output snaps to a
 // hard transition aligned with the guide's RGB edge.
 // dilateBias [0,1]: among histogram bins whose weight is within
-//   (dilateBias*100)% of the winning bin's weight, prefer the HIGHEST-depth
-//   (nearest) one instead of strictly the single best-supported one. This
+//   (dilateBias*100)% of the winning bin's weight, prefer the bin nearer the
+//   foreground class instead of strictly the single best-supported one. This
 //   grows the foreground class natively, within WMF's own RGB-guided
 //   neighbourhood, instead of stacking a separate box-shaped max-dilate on
 //   top of WMF's already-sharp output (which tends to look blockier).
 //   0 = no bias (original strict-mode behaviour).
-// Same signature shape as jbu_cuda() (plus dilateBias) so call sites can
-// switch between the two with minimal changes. guide_lr_dev is unused.
+// flipped: this runs BEFORE flipDepth is applied (which happens later, on
+//   CPU, in the collect phase) — so "foreground" pre-flip is the HIGHEST
+//   depth bin normally, but the LOWEST bin when the data's polarity will be
+//   inverted afterward. Caller must pass flipDepth here directly, same
+//   requirement as gpu_dilate()'s `flipped` param.
+// Same signature shape as jbu_cuda() (plus dilateBias/flipped) so call sites
+// can switch between the two with minimal changes. guide_lr_dev is unused.
 int wmf_cuda(const float*         depth_lr,
              int lrW, int lrH,
              const unsigned char* guide_bgra,
              int hrW, int hrH, int hrStride,
              float*               depth_hr,
              float sigma_s, float sigma_c, int radius,
-             float                dilateBias,
+             float                dilateBias, bool flipped,
              float*               guide_lr_dev,
              void*                stream);
 

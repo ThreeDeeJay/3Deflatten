@@ -223,6 +223,7 @@ SamplerState     g_sampler  : register(s0);
 struct MeshOut {
     float4 pos : SV_Position;
     float2 uv  : TEXCOORD0;
+    float  smoothDepth : TEXCOORD1;   // spatially-averaged — see MeshGS comment
 };
 
 MeshOut MeshVS(float2 uv : TEXCOORD) {
@@ -231,6 +232,27 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     // Read depth with motion compensation
     float2 depUV = saturate(uv - float2(g_depthOffsetU, g_depthOffsetV));
     float  depth = g_depthTex.SampleLevel(g_sampler, depUV, 0).r;
+
+    // Spatially-averaged depth used ONLY by MeshGS's cut decision below —
+    // NOT for disparity/geometry, which still uses the single-sample
+    // `depth` for full edge sharpness. Depth models can be noisy/unstable
+    // in flat or texture-less regions (sky, blown-out highlights), and a
+    // single pair of adjacent vertices can exceed g_discThresh by chance no
+    // matter how high the threshold is set. Averaging a 3x3 neighbourhood
+    // (spaced a few texels apart to also cover ViT-patch-scale artifacts,
+    // not just single-pixel dither) suppresses that noise before the
+    // comparison; genuine object-boundary jumps are much larger and
+    // consistent across the neighbourhood, so they survive averaging intact.
+    float smoothDepth = 0.0;
+    [unroll]
+    for (int sy = -1; sy <= 1; ++sy) {
+        [unroll]
+        for (int sx = -1; sx <= 1; ++sx) {
+            float2 p = saturate(depUV + float2(sx * g_texelW * 4.0, sy * g_texelH * 4.0));
+            smoothDepth += g_depthTex.SampleLevel(g_sampler, p, 0).r;
+        }
+    }
+    smoothDepth *= (1.0 / 9.0);
 
     // Horizontal disparity: positive = near (shift outward from screen centre)
     float disparity = g_separation * (depth - g_convergence);
@@ -259,26 +281,27 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     // NDC Z: 1-depth so near (depth=1) → z=0 wins LESS z-test over far (depth=0) → z=1
     o.pos = float4(ndcX, ndcY, 1.0 - depth, 1.0);
     o.uv  = uv;   // UNCHANGED — PS always samples the original source pixel
+    o.smoothDepth = smoothDepth;
     return o;
 }
 
 // ── Mesh Geometry Shader — depth-discontinuity triangle culling ───────────
 // Each triangle from MeshVS is inspected here before rasterization.
-// If any pair of the three vertices has a depth difference exceeding
-// g_discThresh, the triangle straddles a foreground/background boundary
-// (a silhouette edge). Emitting nothing for such triangles creates a clean
-// gap at the edge instead of a stretched/smeared polygon. The gap pixels
-// retain the DSV-cleared depth 1.0 and are filled in pass 2 by
+// If any pair of the three vertices has a SMOOTHED depth difference
+// exceeding g_discThresh, the triangle straddles a foreground/background
+// boundary (a silhouette edge). Emitting nothing for such triangles creates
+// a clean gap at the edge instead of a stretched/smeared polygon. The gap
+// pixels retain the DSV-cleared depth 1.0 and are filled in pass 2 by
 // PS_StereoWarp (UV-warp hole-fill) using the selected infill algorithm.
 // Triangles that do NOT straddle a discontinuity are passed through as-is.
-//
-// VS wrote: pos.z = 1.0 - depth; recover depth as (1.0 - pos.z).
-// w = 1.0 throughout (no perspective divide needed — clip_z == NDC_z here).
+// Uses smoothDepth (MeshVS's 3x3-averaged sample), not the raw per-vertex
+// depth, so isolated noisy depth estimates in flat regions (sky, etc.)
+// don't trigger spurious cuts regardless of how g_discThresh is set.
 [maxvertexcount(3)]
 void MeshGS(triangle MeshOut v[3], inout TriangleStream<MeshOut> stream) {
-    float d0 = 1.0 - v[0].pos.z;
-    float d1 = 1.0 - v[1].pos.z;
-    float d2 = 1.0 - v[2].pos.z;
+    float d0 = v[0].smoothDepth;
+    float d1 = v[1].smoothDepth;
+    float d2 = v[2].smoothDepth;
     float maxDiff = max(max(abs(d0 - d1), abs(d1 - d2)), abs(d0 - d2));
     if (maxDiff > g_discThresh) return;   // cull: gap filled by UV-warp pass
     stream.Append(v[0]);

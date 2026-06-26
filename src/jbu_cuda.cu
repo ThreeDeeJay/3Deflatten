@@ -108,7 +108,7 @@ __global__ void k_wmf(
     const unsigned char*  __restrict__ g, int hrW, int hrH, int hrS,
     int lrW, int lrH,
     float* __restrict__ dhr,
-    float inv2ss, float inv2cs, int radius, float dilateBias)
+    float inv2ss, float inv2cs, int radius, float dilateBias, bool flipped)
 {
     int ox = blockIdx.x*blockDim.x + threadIdx.x;
     int oy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -160,15 +160,28 @@ __global__ void k_wmf(
         if (hist[i] > bestW) { bestW = hist[i]; bestBin = i; }
 
     // dilateBias > 0: among bins at least as supported as bestW*(1-bias),
-    // prefer the HIGHEST-depth (nearest) one instead of strictly the best.
-    // This natively grows the foreground class within WMF's own RGB-guided
-    // neighbourhood — a cleaner alternative to a separate box-shaped
-    // max-dilate stacked on top of WMF's already-sharp output.
+    // prefer the bin closer to the foreground class instead of strictly the
+    // best. This natively grows the foreground class within WMF's own
+    // RGB-guided neighbourhood — a cleaner alternative to a separate
+    // box-shaped max-dilate stacked on top of WMF's already-sharp output.
+    //
+    // Direction depends on `flipped`: this runs BEFORE flipDepth is applied
+    // (which happens later, on CPU, in the collect phase) — pre-flip,
+    // "foreground" is normally the HIGHEST depth bin, but the LOWEST bin
+    // when the data's polarity will be inverted afterward. Biasing toward
+    // the wrong end here is the same bug as gpu_dilate's flip handling —
+    // it makes the foreground class visually SHRINK once flipped instead
+    // of expanding.
     if (dilateBias > 0.f) {
         float thresh = bestW * (1.f - dilateBias);
-#pragma unroll
-        for (int i = WMF_BINS - 1; i > bestBin; --i) {
-            if (hist[i] >= thresh) { bestBin = i; break; }
+        if (!flipped) {
+            for (int i = WMF_BINS - 1; i > bestBin; --i) {
+                if (hist[i] >= thresh) { bestBin = i; break; }
+            }
+        } else {
+            for (int i = 0; i < bestBin; ++i) {
+                if (hist[i] >= thresh) { bestBin = i; break; }
+            }
         }
     }
 
@@ -209,7 +222,7 @@ __global__ void k_wmf(
 int wmf_cuda(const float*          dlr, int lrW, int lrH,
              const unsigned char*  g,   int hrW, int hrH, int hrS,
              float*                dhr,
-             float ss, float sc, int radius, float dilateBias,
+             float ss, float sc, int radius, float dilateBias, bool flipped,
              float* /*guide_lr_dev, unused*/, void* stream)
 {
     cudaStream_t st = (cudaStream_t)stream;
@@ -217,7 +230,7 @@ int wmf_cuda(const float*          dlr, int lrW, int lrH,
     float i2ss = 1.f / (2.f * ss * ss);
     float i2cs = 1.f / (2.f * sc * sc);
     k_wmf<<<dim3((hrW+15)/16, (hrH+15)/16), b, 0, st>>>(
-        dlr, g, hrW, hrH, hrS, lrW, lrH, dhr, i2ss, i2cs, radius, dilateBias);
+        dlr, g, hrW, hrH, hrS, lrW, lrH, dhr, i2ss, i2cs, radius, dilateBias, flipped);
     return (int)cudaGetLastError();
 }
 
