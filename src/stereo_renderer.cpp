@@ -538,13 +538,32 @@ HRESULT StereoRenderer::CreateShaders() {
         m_dev->CreateDepthStencilState(&dsd, &m_dsState);
     }
 
-    // Hole-fill DS state: EQUAL test, no write — UV-warp only draws pixels the
-    // mesh left uncovered (depth == 1.0, the cleared value).
+    // Hole-fill DS state: GREATER test (against the CLEAR value, see below),
+    // no write — UV-warp only draws pixels the mesh left completely
+    // untouched.
+    //
+    // Why GREATER instead of EQUAL: mesh z = 1.0 - depth, and depth is
+    // clamped to [0,1], so the FARTHEST legitimate geometry (depth -> 0)
+    // writes z -> 1.0 — the SAME value the depth buffer is cleared to. An
+    // EQUAL-vs-1.0 test cannot tell "legitimately-rendered far/sky mesh
+    // triangle" apart from "an actual gap": both read back as exactly 1.0,
+    // so the old EQUAL test incorrectly re-filled correctly-rendered far
+    // geometry too — the "far depth artifacts".
+    //
+    // Fix: clear the depth buffer to 2.0 instead of 1.0 (clearly outside the
+    // viewport's [0,1] depth range, so no rasterized fragment can ever
+    // legitimately equal or exceed it — see RenderGPU's ClearDepthStencilView
+    // call). GREATER-vs-the-buffer then unambiguously distinguishes "still
+    // at the impossible clear value" (a true gap) from "covered by ANY mesh
+    // triangle, including ones at the farthest depth" (buffer <= 1.0,
+    // clamped by the viewport, so never > a 1.0-z hole-fill fragment... wait,
+    // see below: the comparison is buffer > incoming, with incoming fixed at
+    // 1.0 from VS_FullScreen, so buffer must be the clear value 2.0 to pass).
     {
         D3D11_DEPTH_STENCIL_DESC dsd{};
         dsd.DepthEnable    = TRUE;
         dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-        dsd.DepthFunc      = D3D11_COMPARISON_EQUAL;
+        dsd.DepthFunc      = D3D11_COMPARISON_GREATER;
         m_dev->CreateDepthStencilState(&dsd, &m_dsStateHoleFill);
     }
 
