@@ -108,7 +108,7 @@ __global__ void k_wmf(
     const unsigned char*  __restrict__ g, int hrW, int hrH, int hrS,
     int lrW, int lrH,
     float* __restrict__ dhr,
-    float inv2ss, float inv2cs, int radius, float dilateBias, bool flipped)
+    float inv2ss, float inv2cs, int radius)
 {
     int ox = blockIdx.x*blockDim.x + threadIdx.x;
     int oy = blockIdx.y*blockDim.y + threadIdx.y;
@@ -159,31 +159,6 @@ __global__ void k_wmf(
     for (int i = 1; i < WMF_BINS; ++i)
         if (hist[i] > bestW) { bestW = hist[i]; bestBin = i; }
 
-    // dilateBias > 0: among bins at least as supported as bestW*(1-bias),
-    // prefer the bin closer to the foreground class instead of strictly the
-    // best. This natively grows the foreground class within WMF's own
-    // RGB-guided neighbourhood — a cleaner alternative to a separate
-    // box-shaped max-dilate stacked on top of WMF's already-sharp output.
-    //
-    // Direction depends on `flipped`: this runs BEFORE flipDepth is applied
-    // (which happens later, on CPU, in the collect phase) — pre-flip,
-    // "foreground" is normally the HIGHEST depth bin, but the LOWEST bin
-    // when the data's polarity will be inverted afterward. Biasing toward
-    // the wrong end here is the same bug as gpu_dilate's flip handling —
-    // it makes the foreground class visually SHRINK once flipped instead
-    // of expanding.
-    if (dilateBias > 0.f) {
-        float thresh = bestW * (1.f - dilateBias);
-        if (!flipped) {
-            for (int i = WMF_BINS - 1; i > bestBin; --i) {
-                if (hist[i] >= thresh) { bestBin = i; break; }
-            }
-        } else {
-            for (int i = 0; i < bestBin; ++i) {
-                if (hist[i] >= thresh) { bestBin = i; break; }
-            }
-        }
-    }
 
     const float binWidth   = 1.0f / (WMF_BINS - 1);
     const float modeCenter = bestBin * binWidth;
@@ -222,7 +197,7 @@ __global__ void k_wmf(
 int wmf_cuda(const float*          dlr, int lrW, int lrH,
              const unsigned char*  g,   int hrW, int hrH, int hrS,
              float*                dhr,
-             float ss, float sc, int radius, float dilateBias, bool flipped,
+             float ss, float sc, int radius,
              float* /*guide_lr_dev, unused*/, void* stream)
 {
     cudaStream_t st = (cudaStream_t)stream;
@@ -230,7 +205,7 @@ int wmf_cuda(const float*          dlr, int lrW, int lrH,
     float i2ss = 1.f / (2.f * ss * ss);
     float i2cs = 1.f / (2.f * sc * sc);
     k_wmf<<<dim3((hrW+15)/16, (hrH+15)/16), b, 0, st>>>(
-        dlr, g, hrW, hrH, hrS, lrW, lrH, dhr, i2ss, i2cs, radius, dilateBias, flipped);
+        dlr, g, hrW, hrH, hrS, lrW, lrH, dhr, i2ss, i2cs, radius);
     return (int)cudaGetLastError();
 }
 
@@ -395,5 +370,52 @@ int gpu_dilate(const float* src, float* tmp, float* dst,
     dim3 block(256), grid((w+255)/256, h);
     k_dilate_h<<<grid,block,0,st>>>(src, tmp, w, h, radius, edgeThresh, dirSign);
     k_dilate_v<<<grid,block,0,st>>>(tmp, dst, w, h, radius, edgeThresh, dirSign);
+    return (int)cudaGetLastError();
+}
+
+// ── WMF boundary-shift dilation ───────────────────────────────────────────────
+__global__ void k_wmf_dilate_h(const float* __restrict__ in, float* __restrict__ out,
+                                 int w, int h, int radius, float edgeThresh, float dirSign)
+{
+    int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y;
+    if (x>=w||y>=h) return;
+    float center=in[y*w+x], result=center;
+    for (int d=1; d<=radius; ++d) {
+        int xl=x-d, xr=x+d; float vl=0.f, vr=0.f;
+        bool gotL=false, gotR=false;
+        if (xl>=0) { vl=in[y*w+xl]; gotL=dirSign*(vl-center)>=edgeThresh; }
+        if (xr< w) { vr=in[y*w+xr]; gotR=dirSign*(vr-center)>=edgeThresh; }
+        if (gotL&&gotR){ result=(dirSign*vl>=dirSign*vr)?vl:vr; break; }
+        else if (gotL)  { result=vl; break; }
+        else if (gotR)  { result=vr; break; }
+    }
+    out[y*w+x]=result;
+}
+__global__ void k_wmf_dilate_v(const float* __restrict__ in, float* __restrict__ out,
+                                 int w, int h, int radius, float edgeThresh, float dirSign)
+{
+    int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y;
+    if (x>=w||y>=h) return;
+    float center=in[y*w+x], result=center;
+    for (int d=1; d<=radius; ++d) {
+        int yt=y-d, yb=y+d; float vt=0.f, vb=0.f;
+        bool gotT=false, gotB=false;
+        if (yt>=0) { vt=in[yt*w+x]; gotT=dirSign*(vt-center)>=edgeThresh; }
+        if (yb< h) { vb=in[yb*w+x]; gotB=dirSign*(vb-center)>=edgeThresh; }
+        if (gotT&&gotB){ result=(dirSign*vt>=dirSign*vb)?vt:vb; break; }
+        else if (gotT)  { result=vt; break; }
+        else if (gotB)  { result=vb; break; }
+    }
+    out[y*w+x]=result;
+}
+int wmf_dilate_cuda(const float* src, float* tmp, float* dst,
+                     int w, int h, int radius, float edgeThresh,
+                     bool flipped, void* stream)
+{
+    cudaStream_t st=(cudaStream_t)stream;
+    float ds=flipped?-1.f:1.f;
+    dim3 block(256),grid((w+255)/256,h);
+    k_wmf_dilate_h<<<grid,block,0,st>>>(src,tmp,w,h,radius,edgeThresh,ds);
+    k_wmf_dilate_v<<<grid,block,0,st>>>(tmp,dst,w,h,radius,edgeThresh,ds);
     return (int)cudaGetLastError();
 }

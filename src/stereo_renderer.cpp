@@ -224,6 +224,7 @@ struct MeshOut {
     float4 pos : SV_Position;
     float2 uv  : TEXCOORD0;
     float  smoothDepth : TEXCOORD1;   // spatially-averaged — see MeshGS comment
+    float  skirtBlend  : TEXCOORD2;   // 0=real mesh; 1=skirt corner (inpaint in PS)
 };
 
 MeshOut MeshVS(float2 uv : TEXCOORD) {
@@ -282,6 +283,7 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     o.pos = float4(ndcX, ndcY, 1.0 - depth, 1.0);
     o.uv  = uv;   // UNCHANGED — PS always samples the original source pixel
     o.smoothDepth = smoothDepth;
+    o.skirtBlend  = 0.0;
     return o;
 }
 
@@ -299,14 +301,25 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
 // don't trigger spurious cuts regardless of how g_discThresh is set.
 [maxvertexcount(3)]
 void MeshGS(triangle MeshOut v[3], inout TriangleStream<MeshOut> stream) {
-    float d0 = v[0].smoothDepth;
-    float d1 = v[1].smoothDepth;
-    float d2 = v[2].smoothDepth;
-    float maxDiff = max(max(abs(d0 - d1), abs(d1 - d2)), abs(d0 - d2));
-    if (maxDiff > g_discThresh) return;   // cull: gap filled by UV-warp pass
-    stream.Append(v[0]);
-    stream.Append(v[1]);
-    stream.Append(v[2]);
+    float d0=v[0].smoothDepth, d1=v[1].smoothDepth, d2=v[2].smoothDepth;
+    float maxDiff = max(max(abs(d0-d1),abs(d1-d2)),abs(d0-d2));
+    if (maxDiff <= g_discThresh) {
+        // No discontinuity — pass through as normal mesh geometry.
+        stream.Append(v[0]); stream.Append(v[1]); stream.Append(v[2]);
+        stream.RestartStrip(); return;
+    }
+    // Build a background-extension skirt instead of discarding the triangle.
+    // Anchor = vertex with the lowest smoothDepth (background/far side).
+    // The other two keep their screen XY (the silhouette edge positions) but
+    // inherit the anchor's depth/Z/UV — fills the disocclusion gap by
+    // construction with zero residual. skirtBlend=1 at relocated corners so
+    // MeshPS runs an inpaint search there instead of a straight sample.
+    int bgIdx = (d0<=d1) ? ((d0<=d2)?0:2) : ((d1<=d2)?1:2);
+    int o1=(bgIdx+1)%3, o2=(bgIdx+2)%3;
+    MeshOut anchor=v[bgIdx]; anchor.skirtBlend=0.0;
+    MeshOut ext1=v[bgIdx];   ext1.pos.xy=v[o1].pos.xy; ext1.skirtBlend=1.0;
+    MeshOut ext2=v[bgIdx];   ext2.pos.xy=v[o2].pos.xy; ext2.skirtBlend=1.0;
+    stream.Append(anchor); stream.Append(ext1); stream.Append(ext2);
     stream.RestartStrip();
 }
 )HLSL";
@@ -316,11 +329,32 @@ void MeshGS(triangle MeshOut v[3], inout TriangleStream<MeshOut> stream) {
 // and uv was not modified, the RGB texture is always perfectly aligned with
 // the mesh geometry regardless of separation or depth value.
 static const char* kMeshPSSrc = R"HLSL(
-Texture2D<float4> g_srcTex  : register(t0);
-SamplerState      g_sampler : register(s0);
+cbuffer CBStereo : register(b0) {
+    float g_convergence; float g_separation; float g_flipDepth; int g_outputMode;
+    float g_texelW; float g_texelH; int g_infillMode; float g_depthOffsetU;
+    float g_depthOffsetV; float g_discThresh; float g_eyeSign; float g_pad1;
+};
+Texture2D<float4> g_srcTex   : register(t0);
+Texture2D<float>  g_depthTex : register(t1);
+SamplerState      g_sampler  : register(s0);
 
-float4 MeshPS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_TARGET {
-    return g_srcTex.SampleLevel(g_sampler, uv, 0);
+float4 MeshPS(float4 pos : SV_Position, float2 uv : TEXCOORD0,
+              float smoothDepth : TEXCOORD1, float skirtBlend : TEXCOORD2) : SV_TARGET {
+    float4 base = g_srcTex.SampleLevel(g_sampler, uv, 0);
+    if (skirtBlend < 0.01) return base;
+    float refD = g_depthTex.SampleLevel(g_sampler, uv, 0).r;
+    float4 fill = float4(0,0,0,0); float wT = 0.001;
+    [loop] for (int s=1; s<=24; ++s) {
+        float sf=(float)s;
+        float2 p1=uv+float2(g_texelW*sf,0), p2=uv-float2(g_texelW*sf,0);
+        if (p1.x>0&&p1.x<1) { float d=g_depthTex.SampleLevel(g_sampler,p1,0).r;
+            float w=exp(-sf*0.12)*max(0.0,1.0-abs(d-refD)*10.0);
+            fill+=w*g_srcTex.SampleLevel(g_sampler,p1,0); wT+=w; }
+        if (p2.x>0&&p2.x<1) { float d=g_depthTex.SampleLevel(g_sampler,p2,0).r;
+            float w=exp(-sf*0.12)*max(0.0,1.0-abs(d-refD)*10.0);
+            fill+=w*g_srcTex.SampleLevel(g_sampler,p2,0); wT+=w; }
+    }
+    return lerp(base, fill/wT, skirtBlend);
 }
 )HLSL";
 struct Vertex { float x, y, u, v; };
@@ -823,7 +857,8 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     // depth 1.0 and colour black.  Pass 2 (UV-warp hole-fill) fills them.
     const float black[4] = {0,0,0,1};
     m_ctx->ClearRenderTargetView(m_rtv.Get(), black);
-    if (m_dsv) m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    // 2.0 = outside [0,1] so GREATER-vs-2.0 identifies true gaps unambiguously
+    if (m_dsv) m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 2.0f, 0);
 
     // ── Pass 1: mesh + GS (two DrawIndexed calls for left+right eye) ─────────
     // MeshVS shifts each vertex by its per-depth disparity.
@@ -852,6 +887,7 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     m_ctx->VSSetShaderResources(1, 1, m_depthSRV.GetAddressOf());
     m_ctx->VSSetSamplers(0, 1, m_sampler.GetAddressOf());
     m_ctx->PSSetShaderResources(0, 1, m_srcSRV.GetAddressOf());
+    m_ctx->PSSetShaderResources(1, 1, m_depthSRV.GetAddressOf());
     m_ctx->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
 
     int nIdx = (m_meshW - 1) * (m_meshH - 1) * 6;
@@ -872,7 +908,9 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
 
     // Unbind GS — required before pass 2 which has no GS stage.
     m_ctx->GSSetShader(nullptr, nullptr, 0);
+    m_ctx->GSSetShader(nullptr, nullptr, 0);
     m_ctx->VSSetShaderResources(1, 0, nullptr);
+    { ID3D11ShaderResourceView* n2[2]={nullptr,nullptr}; m_ctx->PSSetShaderResources(0,2,n2); }
     m_ctx->OMSetDepthStencilState(nullptr, 0);
 
     // ── Pass 2: UV-warp hole-fill ─────────────────────────────────────────────
