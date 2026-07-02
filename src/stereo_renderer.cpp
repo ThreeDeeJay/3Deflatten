@@ -248,7 +248,7 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     for (int sy = -1; sy <= 1; ++sy) {
         [unroll]
         for (int sx = -1; sx <= 1; ++sx) {
-            float2 p = saturate(depUV + float2(sx * g_texelW * 8.0, sy * g_texelH * 8.0));
+            float2 p = saturate(depUV + float2(sx * g_texelW * 4.0, sy * g_texelH * 4.0));
             smoothDepth += g_depthTex.SampleLevel(g_sampler, p, 0).r;
         }
     }
@@ -303,12 +303,7 @@ void MeshGS(triangle MeshOut v[3], inout TriangleStream<MeshOut> stream) {
     float d1 = v[1].smoothDepth;
     float d2 = v[2].smoothDepth;
     float maxDiff = max(max(abs(d0 - d1), abs(d1 - d2)), abs(d0 - d2));
-    // Only cut when at least one vertex has meaningful foreground depth.
-    // In flat far regions (sky, background) the model outputs small noisy
-    // variations that can exceed g_discThresh; maxD < 0.15 means the
-    // triangle is entirely in the far/sky class and should never be cut.
-    float maxD = max(max(d0, d1), d2);
-    if (maxDiff > g_discThresh && maxD > 0.15) return;
+    if (maxDiff > g_discThresh) return;
     stream.Append(v[0]);
     stream.Append(v[1]);
     stream.Append(v[2]);
@@ -549,7 +544,7 @@ HRESULT StereoRenderer::CreateShaders() {
         D3D11_DEPTH_STENCIL_DESC dsd{};
         dsd.DepthEnable    = TRUE;
         dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-        dsd.DepthFunc      = D3D11_COMPARISON_EQUAL;
+        dsd.DepthFunc      = D3D11_COMPARISON_GREATER;
         m_dev->CreateDepthStencilState(&dsd, &m_dsStateHoleFill);
     }
 
@@ -809,7 +804,7 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     // depth 1.0 and colour black.  Pass 2 (UV-warp hole-fill) fills them.
     const float black[4] = {0,0,0,1};
     m_ctx->ClearRenderTargetView(m_rtv.Get(), black);
-    if (m_dsv) m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+    if (m_dsv) m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 2.0f, 0);
 
     // ── Pass 1: mesh + GS (two DrawIndexed calls for left+right eye) ─────────
     // MeshVS shifts each vertex by its per-depth disparity.
