@@ -303,7 +303,12 @@ void MeshGS(triangle MeshOut v[3], inout TriangleStream<MeshOut> stream) {
     float d1 = v[1].smoothDepth;
     float d2 = v[2].smoothDepth;
     float maxDiff = max(max(abs(d0 - d1), abs(d1 - d2)), abs(d0 - d2));
-    if (maxDiff > g_discThresh) return;   // cull: gap filled by UV-warp pass
+    // Only cut when at least one vertex has meaningful foreground depth.
+    // In flat far regions (sky, background) the model outputs small noisy
+    // variations that can exceed g_discThresh; maxD < 0.15 means the
+    // triangle is entirely in the far/sky class and should never be cut.
+    float maxD = max(max(d0, d1), d2);
+    if (maxDiff > g_discThresh && maxD > 0.15) return;
     stream.Append(v[0]);
     stream.Append(v[1]);
     stream.Append(v[2]);
