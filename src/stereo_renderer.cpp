@@ -303,7 +303,20 @@ void MeshGS(triangle MeshOut v[3], inout TriangleStream<MeshOut> stream) {
     float d1 = v[1].smoothDepth;
     float d2 = v[2].smoothDepth;
     float maxDiff = max(max(abs(d0 - d1), abs(d1 - d2)), abs(d0 - d2));
-    if (maxDiff > g_discThresh) return;
+    if (maxDiff > g_discThresh) {
+        // Only cut at a genuine depth discontinuity, not model noise.
+        // Real edges produce one clear outlier vertex (one gap dominates);
+        // noise spreads evenly across all three (both gaps are similar).
+        // Sort and measure asymmetry: ratio near 1 = real edge, near 0 = noise.
+        float lo = min(min(d0,d1),d2);
+        float hi = max(max(d0,d1),d2);
+        float mid = d0+d1+d2 - lo - hi;
+        float gap_lo = mid - lo;
+        float gap_hi = hi - mid;
+        float ratio = abs(gap_hi - gap_lo) / (maxDiff + 0.001);
+        if (ratio > 0.5) return;   // asymmetric = real edge → cut
+        // else symmetric = noise → fall through and pass triangle
+    }
     stream.Append(v[0]);
     stream.Append(v[1]);
     stream.Append(v[2]);
@@ -544,7 +557,7 @@ HRESULT StereoRenderer::CreateShaders() {
         D3D11_DEPTH_STENCIL_DESC dsd{};
         dsd.DepthEnable    = TRUE;
         dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-        dsd.DepthFunc      = D3D11_COMPARISON_GREATER;
+        dsd.DepthFunc      = D3D11_COMPARISON_EQUAL;
         m_dev->CreateDepthStencilState(&dsd, &m_dsStateHoleFill);
     }
 
@@ -804,7 +817,7 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     // depth 1.0 and colour black.  Pass 2 (UV-warp hole-fill) fills them.
     const float black[4] = {0,0,0,1};
     m_ctx->ClearRenderTargetView(m_rtv.Get(), black);
-    if (m_dsv) m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 2.0f, 0);
+    if (m_dsv) m_ctx->ClearDepthStencilView(m_dsv.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 
     // ── Pass 1: mesh + GS (two DrawIndexed calls for left+right eye) ─────────
     // MeshVS shifts each vertex by its per-depth disparity.
