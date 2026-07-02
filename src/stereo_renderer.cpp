@@ -248,7 +248,7 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     for (int sy = -1; sy <= 1; ++sy) {
         [unroll]
         for (int sx = -1; sx <= 1; ++sx) {
-            float2 p = saturate(depUV + float2(sx * g_texelW * 4.0, sy * g_texelH * 4.0));
+            float2 p = saturate(depUV + float2(sx * g_texelW * 8.0, sy * g_texelH * 8.0));
             smoothDepth += g_depthTex.SampleLevel(g_sampler, p, 0).r;
         }
     }
