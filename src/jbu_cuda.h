@@ -5,12 +5,10 @@
 
 // Joint Bilateral Upsampling.  Weighted average of nearby low-res depth
 // samples, weighted by spatial distance and full RGB (luma+chroma) colour
-// distance against the guide.  Sharper than plain bilinear, but — being a
-// continuous weighted blend — can still show faint glow/feathering at edges,
-// since cross-edge samples always contribute *some* nonzero weight.
-// guide_lr_dev: pre-allocated device float buffer (lrW*lrH), caller-owned.
-//               Currently unused by the implementation (kept for ABI/buffer-
-//               reuse compatibility with the caller's allocation lifecycle).
+// distance against the guide, sampling the guide directly at full resolution
+// (not a blurred low-res guide average).
+// guide_lr_dev: pre-allocated device float buffer (lrW*lrH), caller-owned,
+//               currently unused (kept for buffer-reuse compatibility).
 int jbu_cuda(const float*         depth_lr,
              int lrW, int lrH,
              const unsigned char* guide_bgra,
@@ -20,70 +18,62 @@ int jbu_cuda(const float*         depth_lr,
              float*               guide_lr_dev,
              void*                stream);
 
-// Weighted Mode Filtering (Min, Lu & Do, "Depth Video Enhancement Based on
-// Weighted Mode Filtering", IEEE Trans. Image Processing 2012).
+// Weighted Mode Filtering (Min, Lu & Do, IEEE TIP 2012).
 // Sharper alternative to JBU: builds a weighted histogram of nearby low-res
-// depth samples (same spatial + full-RGB colour weighting as JBU), finds the
-// dominant bin (the "mode"), then averages only the samples that fall within
-// it. Wrong-side-of-an-edge samples are excluded entirely rather than merely
-// down-weighted, so there is no blend left to glow — the output snaps to a
-// hard transition aligned with the guide's RGB edge.
-// dilateBias [0,1]: among histogram bins whose weight is within
-//   (dilateBias*100)% of the winning bin's weight, prefer the bin nearer the
-//   foreground class instead of strictly the single best-supported one. This
-//   grows the foreground class natively, within WMF's own RGB-guided
-//   neighbourhood, instead of stacking a separate box-shaped max-dilate on
-//   top of WMF's already-sharp output (which tends to look blockier).
-//   0 = no bias (original strict-mode behaviour).
-// flipped: this runs BEFORE flipDepth is applied (which happens later, on
-//   CPU, in the collect phase) — so "foreground" pre-flip is the HIGHEST
-//   depth bin normally, but the LOWEST bin when the data's polarity will be
-//   inverted afterward. Caller must pass flipDepth here directly, same
-//   requirement as gpu_dilate()'s `flipped` param.
-// Same signature shape as jbu_cuda() (plus dilateBias/flipped) so call sites
-// can switch between the two with minimal changes. guide_lr_dev is unused.
+// depth samples, finds the dominant bin (the "mode"), then averages only the
+// samples that fall within it. Wrong-side-of-an-edge samples are excluded
+// entirely rather than merely down-weighted, so there is no blend left to
+// glow. sigma_s/sigma_c/radius here are fixed quality/sharpness parameters,
+// NOT a dilation control — see wmf_dilate_cuda() below for actual dilation.
+// guide_lr_dev is likewise unused.
 int wmf_cuda(const float*         depth_lr,
              int lrW, int lrH,
              const unsigned char* guide_bgra,
              int hrW, int hrH, int hrStride,
              float*               depth_hr,
              float sigma_s, float sigma_c, int radius,
-             float                dilateBias, bool flipped,
              float*               guide_lr_dev,
              void*                stream);
 
-// Plain GPU bilinear upscale — no guide needed. Use this (not a CPU resize)
-// for the "off" / Bilinear case: running the upscale on GPU keeps the whole
-// pipeline GPU-resident regardless of which algorithm is selected, instead
-// of leaving the GPU idle while the CPU does a slow full-resolution resize.
+// Plain GPU bilinear upscale — no guide needed. Keeps the pipeline fully
+// GPU-resident for the "Bilinear" mode instead of falling back to a slow
+// single-threaded CPU resize that was paradoxically slower than JBU/WMF.
 int bilinear_cuda(const float* depth_lr, int lrW, int lrH,
                    float* depth_hr, int hrW, int hrH,
                    void* stream);
 
 // Min/max-normalises `n` raw depth values into [0,1], writing the result to
 // `out`. Required before wmf_cuda(): WMF's histogram binning assumes input
-// depth is already in [0,1], but raw TensorRT model output is not bounded to
-// that range. JBU does not need this (it is a pure linear weighted average,
-// so it stays correct under any input scale).
-// mm_scratch: pre-allocated 2-float device buffer (caller-owned, reused
-//             across calls — see TrtRtxSession::d_minmax).
+// depth is already in [0,1], but raw TensorRT model output is not.
+// mm_scratch: pre-allocated 2-float device buffer (caller-owned, reused).
 int normalize_depth_cuda(const float* raw, int n,
                           float* mm_scratch, float* out,
                           void* stream);
 
-// Separable morphological max-dilation on the GPU.
+// Separable morphological max-dilation on the GPU (for Bilinear / JBU output).
 //   src/tmp/dst : device float[w*h]
 //   edgeThresh  : only propagate values where delta >= threshold
-//   flipped     : false = expand HIGH values (the normal "depth=1=near"
-//                 convention); true = expand LOW values instead.
-//                 IMPORTANT: this must reflect the polarity the data will
-//                 have AFTER any flipDepth correction, since dilation only
-//                 makes sense relative to "which direction is near". This
-//                 kernel runs BEFORE the (CPU-side, post-readback) flip is
-//                 applied, so the caller must pass flipDepth here directly —
-//                 dilating high-then-flipping silently inverts the effect
-//                 (foreground appears to shrink instead of expand).
+//   flipped     : false = expand HIGH values (normal "depth=1=near");
+//                 true  = expand LOW values. Must reflect the PRE-flip
+//                 polarity since this runs before the CPU-side flip is
+//                 applied in the collect phase.
 // Returns cudaGetLastError() (0 = success).
 int gpu_dilate(const float* src, float* tmp, float* dst,
                int w, int h, int radius, float edgeThresh,
                bool flipped, void* stream);
+
+// WMF-specific dilation: separable two-pass NEAREST-NEIGHBOUR boundary
+// shift. For each background pixel, scans outward by increasing distance
+// for the nearest qualifying foreground neighbour and ADOPTS its real value
+// (rather than taking the max across the whole window). This shifts the
+// detected edge boundary outward by close to exactly `radius` pixels while
+// keeping a single nearby object's true depth value — "shifting the
+// boundary" rather than "naively adding whichever is numerically highest".
+// Use this (not gpu_dilate) when upscaleMode == WeightedMode.
+//   src/tmp/dst : device float[w*h], full source resolution
+//   edgeThresh  : only adopt a neighbour where |delta| >= threshold
+//   flipped     : same meaning/requirement as gpu_dilate's `flipped`.
+// Returns cudaGetLastError() (0 = success).
+int wmf_dilate_cuda(const float* src, float* tmp, float* dst,
+                     int w, int h, int radius, float edgeThresh,
+                     bool flipped, void* stream);

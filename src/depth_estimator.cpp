@@ -1023,16 +1023,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
             }
 
             // sigma_s=1.2 (LR-space spatial), sigma_c=0.25 (full-RGB sum-of-
-            // squares colour distance), radius=3 — tuned for full-RGB JBU.
-            // WMF scales radius/sigma_s with depthDilate too (not just
-            // dilateBias): biasing which bin wins within a FIXED tiny
-            // radius barely moves the edge at all, since there's nothing
-            // farther away competing for the win. Reach must grow with the
-            // slider for the effect to be visible, matching what users
-            // expect from "Edge Dilate".
-            const float wmfDilateBias = (float)depthDilate / 16.0f * 0.4f;
-            const int   wmfRadius     = 3 + depthDilate / 4;        // 3..7
-            const float wmfSigmaS     = 1.2f + (float)depthDilate * 0.15f; // 1.2..3.6
+            // squares colour distance), radius=3 — tuned for full-RGB JBU/WMF.
             if (wantJBU) {
                 jbu_cuda(d_outSlice, mw, mh,
                          s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
@@ -1055,14 +1046,9 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                 normalize_depth_cuda(d_outSlice, mw * mh,
                                      s.d_minmax, s.d_guideLR[writeBuf],
                                      s.jbuStream);
-                // flipDepth passed directly: this runs BEFORE the flip
-                // (applied later, on CPU, in the collect phase), so the
-                // bias direction must reflect PRE-flip polarity — same
-                // requirement as gpu_dilate's `flipped` param below.
                 wmf_cuda(s.d_guideLR[writeBuf], mw, mh,
                          s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
-                         s.d_depthHR[writeBuf], wmfSigmaS, 0.25f, wmfRadius,
-                         wmfDilateBias, flipDepth,
+                         s.d_depthHR[writeBuf], 1.2f, 0.25f, 3,
                          nullptr, s.jbuStream);
             } else {
                 // Bilinear — cheapest kernel, no guide/colour weighting.
@@ -1070,23 +1056,10 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                              s.d_depthHR[writeBuf], srcW, srcH, s.jbuStream);
             }
 
-            // Skipped for WMF — its own dilateBias (above) already grows
-            // the foreground natively within its RGB-guided neighbourhood;
-            // stacking this separable box-filter dilate on top tends to
-            // look blockier on an already-sharp WMF edge.
-            //
-            // IMPORTANT (flip ordering): this runs BEFORE flipDepth is
-            // applied (that happens later, on CPU, in the collect phase
-            // below) — so we must tell gpu_dilate the data's PRE-flip
-            // polarity via `flipped` so it expands the side that will end
-            // up being "near" AFTER the flip, not before. Dilating before
-            // flip with the wrong polarity makes foreground edges visually
-            // SHRINK instead of expand once flipped.
-            if (depthDilate > 0 && !wantWMF) {
+            if (depthDilate > 0) {
                 gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                            s.d_depthHR[writeBuf],
-                           srcW, srcH, depthDilate, depthEdgeThresh,
-                           flipDepth, s.jbuStream);
+                           srcW, srcH, depthDilate, depthEdgeThresh, s.jbuStream);
             }
             cudaMemcpyAsync(s.h_jbuOut[writeBuf], s.d_depthHR[writeBuf],
                             (size_t)srcW * srcH * sizeof(float),
@@ -1992,11 +1965,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
             DA3StreamAccumulate(depth);
         }
 
-        // Resize to source resolution — dispatch on the selected algorithm.
-        // WMF derives its own reach/bias internally from depthDilate+
-        // flipDepth (see WMFResize) instead of using the separate post-hoc
-        // DilateDepth() used by Bilinear/JBU — stacking both for WMF tends
-        // to look blockier, so WMF skips the separate pass below.
+        // Resize to source resolution — dispatch on the selected algorithm
         std::vector<float> out(srcWidth * srcHeight);
         switch (upscaleMode) {
         case DepthUpscaleMode::JBU:
@@ -2008,7 +1977,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
         case DepthUpscaleMode::WeightedMode:
             WMFResize(depth.data(), accumW, accumH,
                       srcData, srcWidth, srcHeight, srcStride,
-                      out.data(), srcWidth, srcHeight, depthDilate, flipDepth);
+                      out.data(), srcWidth, srcHeight);
             break;
         default:
             BilinearResize(depth.data(), accumW, accumH,
@@ -2021,9 +1990,8 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
             for (float& v : out) v = 1.f - v;
 
         // Edge dilation: expand foreground (high-depth) pixels outward to fill
-        // the thin background halo at silhouette edges. Skipped for WMF —
-        // its own internal bias (above) already grows the foreground natively.
-        if (depthDilate > 0 && upscaleMode != DepthUpscaleMode::WeightedMode)
+        // the thin background halo at silhouette edges.
+        if (depthDilate > 0)
             DilateDepth(out, srcWidth, srcHeight, depthDilate, depthEdgeThresh);
 
         // Temporal smoothing.  Disabled when DA3-Streaming is active because:
@@ -2139,7 +2107,7 @@ void DepthEstimator::PostprocessDepth(const float* raw,
     } else if (upscaleMode == DepthUpscaleMode::WeightedMode && guide && guideStride > 0) {
         WMFResize(normalised.data(), rawW, rawH,
                   guide, dstW, dstH, guideStride,
-                  depth.data(), dstW, dstH, depthDilate, flipDepth);
+                  depth.data(), dstW, dstH);
     } else {
         BilinearResize(normalised.data(), rawW, rawH, depth.data(), dstW, dstH);
     }
@@ -2147,11 +2115,118 @@ void DepthEstimator::PostprocessDepth(const float* raw,
     if (flipDepth)
         for (float& v : depth) v = 1.f - v;
 
-    // Skipped for WMF — its own internal bias (derived from depthDilate
-    // inside WMFResize) already grows the foreground natively within its
-    // RGB-guided neighbourhood.
-    if (depthDilate > 0 && upscaleMode != DepthUpscaleMode::WeightedMode)
-        DilateDepth(depth, dstW, dstH, depthDilate, depthEdgeThresh);
+    if (depthDilate > 0) {
+        if (upscaleMode == DepthUpscaleMode::WeightedMode)
+            WMFDilateDepth(depth, dstW, dstH, depthDilate, depthEdgeThresh, flipDepth);
+        else
+            DilateDepth(depth, dstW, dstH, depthDilate, depthEdgeThresh);
+    }
+}
+
+// ── WMFResize ─────────────────────────────────────────────────────────────────
+void DepthEstimator::WMFResize(const float* src, int sw, int sh,
+                                const BYTE* guide, int gw, int gh, int guideStride,
+                                float* dst, int dw, int dh) {
+    constexpr int kBins = 16;
+    const float scaleX = (float)sw/dw, scaleY = (float)sh/dh;
+    const float inv2sSq = 1.f/(2.f*1.2f*1.2f);
+    const float inv2cSq = 1.f/(2.f*0.25f*0.25f);
+    const int   radius  = 3;
+    const float binWidth = 1.f/(kBins-1);
+    for (int dy = 0; dy < dh; ++dy) {
+        float fy = (dy+0.5f)*(float)gh/dh - 0.5f;
+        int   gy = std::max(0, std::min((int)fy, gh-1));
+        for (int dx = 0; dx < dw; ++dx) {
+            float fx = (dx+0.5f)*(float)gw/dw - 0.5f;
+            int   gx = std::max(0, std::min((int)fx, gw-1));
+            const BYTE* gp = guide + gy*guideStride + gx*4;
+            float rP=gp[2]*(1.f/255.f), gP=gp[1]*(1.f/255.f), bP=gp[0]*(1.f/255.f);
+            float lu=(dx+0.5f)*scaleX-0.5f, lv=(dy+0.5f)*scaleY-0.5f;
+            int lu0=(int)std::floor(lu), lv0=(int)std::floor(lv);
+            float hist[kBins]={};
+            for (int ky=lv0-radius; ky<=lv0+radius+1; ++ky) {
+                int ky2=std::max(0,std::min(ky,sh-1)); float dvy=lv-ky;
+                for (int kx=lu0-radius; kx<=lu0+radius+1; ++kx) {
+                    int kx2=std::max(0,std::min(kx,sw-1)); float dvx=lu-kx;
+                    float ws=std::exp(-(dvx*dvx+dvy*dvy)*inv2sSq);
+                    int hx=std::min(gw-1,(int)((kx2+0.5f)*gw/sw));
+                    int hy=std::min(gh-1,(int)((ky2+0.5f)*gh/sh));
+                    const BYTE* gq=guide+hy*guideStride+hx*4;
+                    float dr=rP-gq[2]*(1.f/255.f), dg=gP-gq[1]*(1.f/255.f), db=bP-gq[0]*(1.f/255.f);
+                    float w=ws*std::exp(-(dr*dr+dg*dg+db*db)*inv2cSq);
+                    float dval=src[ky2*sw+kx2];
+                    int bin=std::max(0,std::min(kBins-1,(int)(dval*(kBins-1)+0.5f)));
+                    hist[bin]+=w;
+                }
+            }
+            int bestBin=0; float bestW=hist[0];
+            for (int i=1;i<kBins;++i) if(hist[i]>bestW){bestW=hist[i];bestBin=i;}
+            float modeCenter=bestBin*binWidth;
+            float wS=0.f, dS=0.f;
+            for (int ky=lv0-radius; ky<=lv0+radius+1; ++ky) {
+                int ky2=std::max(0,std::min(ky,sh-1)); float dvy=lv-ky;
+                for (int kx=lu0-radius; kx<=lu0+radius+1; ++kx) {
+                    int kx2=std::max(0,std::min(kx,sw-1));
+                    float dval=src[ky2*sw+kx2];
+                    if(std::fabs(dval-modeCenter)>1.5f*binWidth) continue;
+                    float dvx=lu-kx;
+                    float ws=std::exp(-(dvx*dvx+dvy*dvy)*inv2sSq);
+                    int hx=std::min(gw-1,(int)((kx2+0.5f)*gw/sw));
+                    int hy=std::min(gh-1,(int)((ky2+0.5f)*gh/sh));
+                    const BYTE* gq=guide+hy*guideStride+hx*4;
+                    float dr=rP-gq[2]*(1.f/255.f), dg=gP-gq[1]*(1.f/255.f), db=bP-gq[0]*(1.f/255.f);
+                    float w=ws*std::exp(-(dr*dr+dg*dg+db*db)*inv2cSq);
+                    wS+=w; dS+=w*dval;
+                }
+            }
+            dst[dy*dw+dx]=(wS>1e-8f)?dS/wS:modeCenter;
+        }
+    }
+}
+
+// ── WMFDilateDepth — boundary-shift dilation for WMF ─────────────────────────
+// Nearest-neighbour search outward; adopts the first qualifying neighbour's
+// ACTUAL value rather than taking the window max — shifts the detected edge
+// boundary outward by ~radius pixels without blending in unrelated objects.
+// flipDepth: pre-flip polarity — foreground is HIGH normally, LOW when flipped.
+void DepthEstimator::WMFDilateDepth(std::vector<float>& depth, int w, int h,
+                                     int radius, float edgeThresh, bool flipDepth) {
+    if (radius <= 0 || depth.empty()) return;
+    std::vector<float> tmp(w*h);
+    // Horizontal pass
+    for (int y=0; y<h; ++y) {
+        const float* in = depth.data()+y*w;
+        float* out = tmp.data()+y*w;
+        for (int x=0; x<w; ++x) {
+            float center=in[x], result=center;
+            for (int d=1; d<=radius; ++d) {
+                int xl=x-d, xr=x+d;
+                bool gotL=false, gotR=false; float vl=0.f, vr=0.f;
+                if (xl>=0) { vl=in[xl]; gotL=flipDepth?(center-vl>=edgeThresh):(vl-center>=edgeThresh); }
+                if (xr< w) { vr=in[xr]; gotR=flipDepth?(center-vr>=edgeThresh):(vr-center>=edgeThresh); }
+                if (gotL&&gotR) { result=flipDepth?(vl<vr?vl:vr):(vl>vr?vl:vr); break; }
+                else if (gotL)  { result=vl; break; }
+                else if (gotR)  { result=vr; break; }
+            }
+            out[x]=result;
+        }
+    }
+    // Vertical pass
+    for (int x=0; x<w; ++x) {
+        for (int y=0; y<h; ++y) {
+            float center=tmp[y*w+x], result=center;
+            for (int d=1; d<=radius; ++d) {
+                int yt=y-d, yb=y+d;
+                bool gotT=false, gotB=false; float vt=0.f, vb=0.f;
+                if (yt>=0) { vt=tmp[yt*w+x]; gotT=flipDepth?(center-vt>=edgeThresh):(vt-center>=edgeThresh); }
+                if (yb< h) { vb=tmp[yb*w+x]; gotB=flipDepth?(center-vb>=edgeThresh):(vb-center>=edgeThresh); }
+                if (gotT&&gotB) { result=flipDepth?(vt<vb?vt:vb):(vt>vb?vt:vb); break; }
+                else if (gotT)  { result=vt; break; }
+                else if (gotB)  { result=vb; break; }
+            }
+            depth[y*w+x]=result;
+        }
+    }
 }
 
 // ── BilinearResize ─────────────────────────────────────────────────────────────
@@ -2277,20 +2352,15 @@ void DepthEstimator::JBUResize(const float* src, int sw, int sh,
 // with no residual cross-edge blend left to glow.
 void DepthEstimator::WMFResize(const float* src, int sw, int sh,
                                 const BYTE* guide, int gw, int gh, int guideStride,
-                                float* dst, int dw, int dh,
-                                int depthDilate, bool flipDepth) {
+                                float* dst, int dw, int dh) {
     constexpr int kBins = 16;
     const float scaleX = (float)sw / dw;
     const float scaleY = (float)sh / dh;
-    // Derived from depthDilate — see header comment: biasing which bin wins
-    // within a fixed tiny radius barely moves the edge, so reach
-    // (spatialSigma, radius) must grow with the slider too, not just bias.
-    const float spatialSigma = 1.2f + (float)depthDilate * 0.15f;  // 1.2..3.6
+    const float spatialSigma = 1.2f;
     const float colourSigma  = 0.25f;   // full-RGB sum-of-squares distance space
     const float inv2sSq  = 1.0f / (2.0f * spatialSigma * spatialSigma);
     const float inv2cSq  = 1.0f / (2.0f * colourSigma  * colourSigma);
-    const int   radius   = 3 + depthDilate / 4;                     // 3..7
-    const float dilateBias = (float)depthDilate / 16.0f * 0.4f;     // 0..0.4
+    const int   radius   = 3;
     const float binWidth = 1.0f / (kBins - 1);
 
     for (int dy = 0; dy < dh; ++dy) {
@@ -2341,28 +2411,6 @@ void DepthEstimator::WMFResize(const float* src, int sw, int sh,
             float bestW = hist[0];
             for (int i = 1; i < kBins; ++i)
                 if (hist[i] > bestW) { bestW = hist[i]; bestBin = i; }
-
-            // dilateBias > 0: among bins at least as supported as
-            // bestW*(1-bias), prefer the bin closer to the foreground class
-            // — grows the foreground class natively instead of needing a
-            // separate post-hoc dilate pass (see jbu_cuda.cu's k_wmf for
-            // the GPU-side version of this same logic).
-            // Direction depends on flipDepth (see header comment): this
-            // runs BEFORE the caller applies the flip, so pre-flip
-            // "foreground" is the highest bin normally, but the lowest bin
-            // when polarity will be inverted afterward.
-            if (dilateBias > 0.0f) {
-                float thresh = bestW * (1.0f - dilateBias);
-                if (!flipDepth) {
-                    for (int i = kBins - 1; i > bestBin; --i) {
-                        if (hist[i] >= thresh) { bestBin = i; break; }
-                    }
-                } else {
-                    for (int i = 0; i < bestBin; ++i) {
-                        if (hist[i] >= thresh) { bestBin = i; break; }
-                    }
-                }
-            }
             float modeCenter = bestBin * binWidth;
 
             // Pass 2: refine using only samples within the winning bin —
