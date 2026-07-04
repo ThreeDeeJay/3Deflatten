@@ -91,10 +91,11 @@ private:
     //   so the bias direction must reflect pre-flip polarity (mirrors
     //   gpu_dilate's `flipped` param) — otherwise the foreground class
     //   visually SHRINKS once flipped instead of expanding.
+    void WMFDilateDepth(std::vector<float>& depth, int w, int h,
+                        int radius, float edgeThresh, bool flipDepth);
     void WMFResize(const float* src, int sw, int sh,
                    const BYTE* guide, int gw, int gh, int guideStride,
-                   float* dst, int dw, int dh,
-                   int depthDilate = 0, bool flipDepth = false);
+                   float* dst, int dw, int dh);
     void BilinearResize(const float* src, int sw, int sh,
                         float* dst,       int dw, int dh);
     void TemporalSmooth(std::vector<float>& current, float alpha);
