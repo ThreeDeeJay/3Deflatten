@@ -1030,9 +1030,6 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
             // farther away competing for the win. Reach must grow with the
             // slider for the effect to be visible, matching what users
             // expect from "Edge Dilate".
-            const float wmfDilateBias = (float)depthDilate / 16.0f * 0.4f;
-            const int   wmfRadius     = 3 + depthDilate / 4;        // 3..7
-            const float wmfSigmaS     = 1.2f + (float)depthDilate * 0.15f; // 1.2..3.6
             if (wantJBU) {
                 jbu_cuda(d_outSlice, mw, mh,
                          s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
@@ -2011,7 +2008,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
         case DepthUpscaleMode::WeightedMode:
             WMFResize(depth.data(), accumW, accumH,
                       srcData, srcWidth, srcHeight, srcStride,
-                      out.data(), srcWidth, srcHeight, depthDilate, flipDepth);
+                      out.data(), srcWidth, srcHeight);
             break;
         default:
             BilinearResize(depth.data(), accumW, accumH,
@@ -2142,7 +2139,7 @@ void DepthEstimator::PostprocessDepth(const float* raw,
     } else if (upscaleMode == DepthUpscaleMode::WeightedMode && guide && guideStride > 0) {
         WMFResize(normalised.data(), rawW, rawH,
                   guide, dstW, dstH, guideStride,
-                  depth.data(), dstW, dstH, depthDilate, flipDepth);
+                  depth.data(), dstW, dstH);
     } else {
         BilinearResize(normalised.data(), rawW, rawH, depth.data(), dstW, dstH);
     }
@@ -2316,15 +2313,11 @@ void DepthEstimator::WMFResize(const float* src, int sw, int sh,
     constexpr int kBins = 16;
     const float scaleX = (float)sw / dw;
     const float scaleY = (float)sh / dh;
-    // Derived from depthDilate — see header comment: biasing which bin wins
-    // within a fixed tiny radius barely moves the edge, so reach
-    // (spatialSigma, radius) must grow with the slider too, not just bias.
-    const float spatialSigma = 1.2f + (float)depthDilate * 0.15f;  // 1.2..3.6
-    const float colourSigma  = 0.25f;   // full-RGB sum-of-squares distance space
+    const float spatialSigma = 1.2f;
+    const float colourSigma  = 0.25f;
     const float inv2sSq  = 1.0f / (2.0f * spatialSigma * spatialSigma);
     const float inv2cSq  = 1.0f / (2.0f * colourSigma  * colourSigma);
-    const int   radius   = 3 + depthDilate / 4;                     // 3..7
-    const float dilateBias = (float)depthDilate / 16.0f * 0.4f;     // 0..0.4
+    const int   radius   = 3;
     const float binWidth = 1.0f / (kBins - 1);
 
     for (int dy = 0; dy < dh; ++dy) {
@@ -2376,27 +2369,6 @@ void DepthEstimator::WMFResize(const float* src, int sw, int sh,
             for (int i = 1; i < kBins; ++i)
                 if (hist[i] > bestW) { bestW = hist[i]; bestBin = i; }
 
-            // dilateBias > 0: among bins at least as supported as
-            // bestW*(1-bias), prefer the bin closer to the foreground class
-            // — grows the foreground class natively instead of needing a
-            // separate post-hoc dilate pass (see jbu_cuda.cu's k_wmf for
-            // the GPU-side version of this same logic).
-            // Direction depends on flipDepth (see header comment): this
-            // runs BEFORE the caller applies the flip, so pre-flip
-            // "foreground" is the highest bin normally, but the lowest bin
-            // when polarity will be inverted afterward.
-            if (dilateBias > 0.0f) {
-                float thresh = bestW * (1.0f - dilateBias);
-                if (!flipDepth) {
-                    for (int i = kBins - 1; i > bestBin; --i) {
-                        if (hist[i] >= thresh) { bestBin = i; break; }
-                    }
-                } else {
-                    for (int i = 0; i < bestBin; ++i) {
-                        if (hist[i] >= thresh) { bestBin = i; break; }
-                    }
-                }
-            }
             float modeCenter = bestBin * binWidth;
 
             // Pass 2: refine using only samples within the winning bin —
