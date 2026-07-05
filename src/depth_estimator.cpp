@@ -970,6 +970,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     // and readback path; only the kernel(s) launched differ.
     const bool wantJBU = (upscaleMode == DepthUpscaleMode::JBU);
     const bool wantWMF = (upscaleMode == DepthUpscaleMode::WeightedMode);
+    const int  wmfDilateInset = cfg.wmfDilateInset;
     bool gpuUpscaleActive = false;
     {
         const bool needAlloc =
@@ -1082,7 +1083,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                 if (wantWMF)
                     wmf_dilate_cuda(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                                     s.d_depthHR[writeBuf], srcW, srcH,
-                                    depthDilate, depthEdgeThresh, flipDepth, 2, s.jbuStream);
+                                    depthDilate, depthEdgeThresh, flipDepth, wmfDilateInset, s.jbuStream);
                 else
                     gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                                s.d_depthHR[writeBuf], srcW, srcH,

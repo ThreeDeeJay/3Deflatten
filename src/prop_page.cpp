@@ -86,6 +86,7 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_DILATE_SLIDER,     TBM_SETRANGE, TRUE, MAKELPARAM(0, DILATE_MAX));
         SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
         SendDlgItemMessage(hwnd, IDC_DISCTHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
+        SendDlgItemMessage(hwnd, IDC_WMFINSET_SLIDER,   TBM_SETRANGE, TRUE, MAKELPARAM(0, 8));
         // Output Mode
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Side-by-Side (SBS)");
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Top-and-Bottom (TAB)");
@@ -138,7 +139,7 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         HWND hCtl = (HWND)lParam;
         int  id   = GetDlgCtrlID(hCtl);
         if (id==IDC_CONV_SLIDER || id==IDC_SEP_SLIDER || id==IDC_SMOOTH_SLIDER ||
-            id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER) {
+            id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER || id==IDC_WMFINSET_SLIDER) {
             ReadControls(hwnd);
             UpdateValueLabels(hwnd);
             PushConfig();   // real-time update while scrubbing
@@ -320,6 +321,8 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
         TBM_SETPOS, TRUE, EThreshToSlider(m_cfg.depthEdgeThresh));
     SendDlgItemMessage(hwnd, IDC_DISCTHRESH_SLIDER,
         TBM_SETPOS, TRUE, EThreshToSlider(m_cfg.discThresh));
+    SendDlgItemMessage(hwnd, IDC_WMFINSET_SLIDER,
+        TBM_SETPOS, TRUE, std::min(8, std::max(0, m_cfg.wmfDilateInset)));
     SendDlgItemMessage(hwnd, IDC_UPSCALE_COMBO, CB_SETCURSEL, (int)m_cfg.upscaleMode, 0);
 
     UpdateValueLabels(hwnd);
@@ -357,6 +360,8 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
         (int)SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER, TBM_GETPOS, 0, 0));
     m_cfg.discThresh = SliderToEThresh(
         (int)SendDlgItemMessage(hwnd, IDC_DISCTHRESH_SLIDER, TBM_GETPOS, 0, 0));
+    m_cfg.wmfDilateInset = std::min(8, std::max(0,
+        (int)SendDlgItemMessage(hwnd, IDC_WMFINSET_SLIDER, TBM_GETPOS, 0, 0)));
 }
 
 void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {
@@ -373,6 +378,8 @@ void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {
     SetDlgItemTextW(hwnd, IDC_EDGETHRESH_LABEL, buf);
     swprintf_s(buf, L"%.2f", m_cfg.discThresh);
     SetDlgItemTextW(hwnd, IDC_DISCTHRESH_LABEL, buf);
+    swprintf_s(buf, L"%d px", m_cfg.wmfDilateInset);
+    SetDlgItemTextW(hwnd, IDC_WMFINSET_LABEL, buf);
 }
 
 void C3DeflattenProp::RefreshStatus(HWND hwnd) {
