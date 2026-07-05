@@ -374,8 +374,11 @@ int gpu_dilate(const float* src, float* tmp, float* dst,
 }
 
 // ── WMF boundary-shift dilation ──────────────────────────────────────────────
+// inset: after finding the first qualifying foreground pixel at distance d,
+// sample from d+inset pixels deeper into the foreground instead of from d
+// itself. This skips the noisy edge-mixed zone at the boundary.
 __global__ void k_wmf_dilate_h(const float* __restrict__ in, float* __restrict__ out,
-                                 int w, int h, int radius, float edgeThresh, float ds)
+                                 int w, int h, int radius, float edgeThresh, float ds, int inset)
 {
     int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y;
     if (x>=w||y>=h) return;
@@ -384,14 +387,17 @@ __global__ void k_wmf_dilate_h(const float* __restrict__ in, float* __restrict__
         float vl=0,vr=0; bool gl=false,gr=false;
         if (x-d>=0) { vl=in[y*w+x-d]; gl=ds*(vl-c)>=edgeThresh; }
         if (x+d< w) { vr=in[y*w+x+d]; gr=ds*(vr-c)>=edgeThresh; }
-        if (gl&&gr){ r=(ds*vl>=ds*vr)?vl:vr; break; }
-        else if(gl){ r=vl; break; }
-        else if(gr){ r=vr; break; }
+        if (gl&&gr) {
+            int sl=max(0,   x-d-inset), sr=min(w-1, x+d+inset);
+            float vsl=in[y*w+sl], vsr=in[y*w+sr];
+            r=(ds*vsl>=ds*vsr)?vsl:vsr; break;
+        } else if(gl){ r=in[y*w+max(0,   x-d-inset)]; break; }
+          else if(gr){ r=in[y*w+min(w-1, x+d+inset)]; break; }
     }
     out[y*w+x]=r;
 }
 __global__ void k_wmf_dilate_v(const float* __restrict__ in, float* __restrict__ out,
-                                 int w, int h, int radius, float edgeThresh, float ds)
+                                 int w, int h, int radius, float edgeThresh, float ds, int inset)
 {
     int x=blockIdx.x*blockDim.x+threadIdx.x, y=blockIdx.y;
     if (x>=w||y>=h) return;
@@ -400,20 +406,23 @@ __global__ void k_wmf_dilate_v(const float* __restrict__ in, float* __restrict__
         float vt=0,vb=0; bool gt=false,gb=false;
         if (y-d>=0) { vt=in[(y-d)*w+x]; gt=ds*(vt-c)>=edgeThresh; }
         if (y+d< h) { vb=in[(y+d)*w+x]; gb=ds*(vb-c)>=edgeThresh; }
-        if (gt&&gb){ r=(ds*vt>=ds*vb)?vt:vb; break; }
-        else if(gt){ r=vt; break; }
-        else if(gb){ r=vb; break; }
+        if (gt&&gb) {
+            int st2=max(0,   y-d-inset), sb=min(h-1, y+d+inset);
+            float vst=in[st2*w+x], vsb=in[sb*w+x];
+            r=(ds*vst>=ds*vsb)?vst:vsb; break;
+        } else if(gt){ r=in[max(0,   y-d-inset)*w+x]; break; }
+          else if(gb){ r=in[min(h-1, y+d+inset)*w+x]; break; }
     }
     out[y*w+x]=r;
 }
 int wmf_dilate_cuda(const float* src, float* tmp, float* dst,
                      int w, int h, int radius, float edgeThresh,
-                     bool flipped, void* stream)
+                     bool flipped, int inset, void* stream)
 {
     cudaStream_t st=(cudaStream_t)stream;
     float ds=flipped?-1.f:1.f;
     dim3 block(256),grid((w+255)/256,h);
-    k_wmf_dilate_h<<<grid,block,0,st>>>(src,tmp,w,h,radius,edgeThresh,ds);
-    k_wmf_dilate_v<<<grid,block,0,st>>>(tmp,dst,w,h,radius,edgeThresh,ds);
+    k_wmf_dilate_h<<<grid,block,0,st>>>(src,tmp,w,h,radius,edgeThresh,ds,inset);
+    k_wmf_dilate_v<<<grid,block,0,st>>>(tmp,dst,w,h,radius,edgeThresh,ds,inset);
     return (int)cudaGetLastError();
 }

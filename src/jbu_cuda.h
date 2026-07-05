@@ -94,4 +94,4 @@ int gpu_dilate(const float* src, float* tmp, float* dst,
 // objects. flipped = same meaning as gpu_dilate's `flipped`.
 int wmf_dilate_cuda(const float* src, float* tmp, float* dst,
                      int w, int h, int radius, float edgeThresh,
-                     bool flipped, void* stream);
+                     bool flipped, int inset, void* stream);

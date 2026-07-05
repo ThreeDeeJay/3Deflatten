@@ -1082,7 +1082,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                 if (wantWMF)
                     wmf_dilate_cuda(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                                     s.d_depthHR[writeBuf], srcW, srcH,
-                                    depthDilate, depthEdgeThresh, flipDepth, s.jbuStream);
+                                    depthDilate, depthEdgeThresh, flipDepth, 2, s.jbuStream);
                 else
                     gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                                s.d_depthHR[writeBuf], srcW, srcH,
@@ -2157,7 +2157,7 @@ void DepthEstimator::PostprocessDepth(const float* raw,
 
 // ── WMFDilateDepth ───────────────────────────────────────────────────────────
 void DepthEstimator::WMFDilateDepth(std::vector<float>& depth, int w, int h,
-                                     int radius, float edgeThresh, bool flipDepth) {
+                                     int radius, float edgeThresh, bool flipDepth, int inset) {
     if (radius<=0||depth.empty()) return;
     std::vector<float> tmp(w*h);
     for (int y=0;y<h;++y) {
@@ -2168,8 +2168,10 @@ void DepthEstimator::WMFDilateDepth(std::vector<float>& depth, int w, int h,
                 float vl=0,vr=0; bool gl=false,gr=false;
                 if (x-d2>=0){vl=in[x-d2]; gl=flipDepth?(c-vl>=edgeThresh):(vl-c>=edgeThresh);}
                 if (x+d2< w){vr=in[x+d2]; gr=flipDepth?(c-vr>=edgeThresh):(vr-c>=edgeThresh);}
-                if (gl&&gr){r=flipDepth?(vl<vr?vl:vr):(vl>vr?vl:vr);break;}
-                else if(gl){r=vl;break;} else if(gr){r=vr;break;}
+                if (gl&&gr){float sl=in[std::max(0,x-d2-inset)],sr=in[std::min(w-1,x+d2+inset)];
+                    r=flipDepth?(sl<sr?sl:sr):(sl>sr?sl:sr);break;}
+                else if(gl){r=in[std::max(0,x-d2-inset)];break;}
+                else if(gr){r=in[std::min(w-1,x+d2+inset)];break;}
             }
             out[x]=r;
         }
@@ -2180,8 +2182,10 @@ void DepthEstimator::WMFDilateDepth(std::vector<float>& depth, int w, int h,
             float vt=0,vb=0; bool gt=false,gb=false;
             if (y-d2>=0){vt=tmp[(y-d2)*w+x]; gt=flipDepth?(c-vt>=edgeThresh):(vt-c>=edgeThresh);}
             if (y+d2< h){vb=tmp[(y+d2)*w+x]; gb=flipDepth?(c-vb>=edgeThresh):(vb-c>=edgeThresh);}
-            if (gt&&gb){r=flipDepth?(vt<vb?vt:vb):(vt>vb?vt:vb);break;}
-            else if(gt){r=vt;break;} else if(gb){r=vb;break;}
+            if (gt&&gb){float st2=tmp[std::max(0,y-d2-inset)*w+x],sb=tmp[std::min(h-1,y+d2+inset)*w+x];
+                r=flipDepth?(st2<sb?st2:sb):(st2>sb?st2:sb);break;}
+            else if(gt){r=tmp[std::max(0,y-d2-inset)*w+x];break;}
+            else if(gb){r=tmp[std::min(h-1,y+d2+inset)*w+x];break;}
         }
         depth[y*w+x]=r;
     }

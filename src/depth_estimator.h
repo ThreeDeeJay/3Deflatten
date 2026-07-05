@@ -92,7 +92,7 @@ private:
     //   gpu_dilate's `flipped` param) — otherwise the foreground class
     //   visually SHRINKS once flipped instead of expanding.
     void WMFDilateDepth(std::vector<float>& depth, int w, int h,
-                        int radius, float edgeThresh, bool flipDepth);
+                        int radius, float edgeThresh, bool flipDepth, int inset = 2);
     void WMFResize(const float* src, int sw, int sh,
                    const BYTE* guide, int gw, int gh, int guideStride,
                    float* dst, int dw, int dh);
