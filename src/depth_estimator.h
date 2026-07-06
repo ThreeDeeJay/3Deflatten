@@ -186,6 +186,7 @@ private:
                             bool isBGR, bool flipDepth, float smoothAlpha,
                             int depthDilate, float depthEdgeThresh,
                             DepthUpscaleMode upscaleMode,
+                            int wmfDilateInset,
                             DepthResult& result);
 #endif
 

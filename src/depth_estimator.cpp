@@ -970,7 +970,6 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     // and readback path; only the kernel(s) launched differ.
     const bool wantJBU = (upscaleMode == DepthUpscaleMode::JBU);
     const bool wantWMF = (upscaleMode == DepthUpscaleMode::WeightedMode);
-    const int  wmfDilateInset = cfg.wmfDilateInset;
     bool gpuUpscaleActive = false;
     {
         const bool needAlloc =
@@ -1923,7 +1922,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
     if (m_trtRtx)
         return EstimateTrtRtx(srcData, srcWidth, srcHeight, srcStride,
                               isBGR, flipDepth, smoothAlpha,
-                              depthDilate, depthEdgeThresh, upscaleMode, result);
+                              depthDilate, depthEdgeThresh, upscaleMode, cfg.wmfDilateInset, result);
 #endif
     if (!m_session) {
         LOG_ERR("Estimate: no ORT session and no native TRT session");
