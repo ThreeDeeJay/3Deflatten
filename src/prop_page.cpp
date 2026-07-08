@@ -139,7 +139,8 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         HWND hCtl = (HWND)lParam;
         int  id   = GetDlgCtrlID(hCtl);
         if (id==IDC_CONV_SLIDER || id==IDC_SEP_SLIDER || id==IDC_SMOOTH_SLIDER ||
-            id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER || id==IDC_WMFINSET_SLIDER) {
+            id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER ||
+            id==IDC_WMFINSET_SLIDER) {
             ReadControls(hwnd);
             UpdateValueLabels(hwnd);
             PushConfig();   // real-time update while scrubbing

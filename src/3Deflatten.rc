@@ -53,8 +53,8 @@ BEGIN
     COMBOBOX  IDC_MESHDIV_COMBO,                  194, 161,  94,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    // Depth Post-processing (Upscale algorithm + Dilation + Edge Threshold + Mesh Cut)
-    // Height 70 = 14 (upscale) + 14 (dilate) + 14 (thresh) + 14 (mesh cut) + 14 padding
+    // Depth Post-processing (Upscale + Dilation + Edge Threshold + Mesh Cut + WMF Inset)
+    // Height 84 = 5 rows * 14 + 14 padding
     GROUPBOX  "Depth Post-processing", -1,          4, 174, 290,  84
     LTEXT     "Upscale:", -1,                       10, 186,  40,  10
     COMBOBOX  IDC_UPSCALE_COMBO,                    52, 184, 232,  60,
@@ -71,10 +71,10 @@ BEGIN
     CONTROL   "", IDC_DISCTHRESH_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 230, 130,  12
     LTEXT     "0.10", IDC_DISCTHRESH_LABEL,        244, 230,  24,  10, SS_RIGHT
-    LTEXT     "WMF Dilate Inset (0-8 px):", -1,         10, 244, 100,  10
+    LTEXT     "WMF Dilate Inset (0-8 px):", -1,    10, 244, 110,  10
     CONTROL   "", IDC_WMFINSET_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 244, 130,  12
-    LTEXT     "2 px", IDC_WMFINSET_LABEL,             244, 244,  24,  10, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 120, 244, 120,  12
+    LTEXT     "2 px", IDC_WMFINSET_LABEL,          244, 244,  24,  10, SS_RIGHT
 
     // ONNX Model + DA3-Streaming checkbox
     GROUPBOX  "ONNX Model", -1,                     4, 264, 290,  58
