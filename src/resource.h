@@ -33,6 +33,8 @@
 #define IDC_UPSCALE_COMBO  1025   // Depth upscale algorithm: Bilinear / JBU / Weighted Mode
 #define IDC_DISCTHRESH_SLIDER 1026 // Mesh edge-cut threshold (gap creation)
 #define IDC_DISCTHRESH_LABEL  1027 // "0.10" label
+#define IDC_WMFINSET_SLIDER   1028 // WMF dilate inset (0-8 px)
+#define IDC_WMFINSET_LABEL    1029 // "2 px" label
 
 // ── Trackbar style constants (commctrl.h equivalents for rc.exe) ──────────────
 // rc.exe does not automatically include commctrl.h, so we define what we need.
