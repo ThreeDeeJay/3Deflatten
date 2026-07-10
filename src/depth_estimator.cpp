@@ -1082,7 +1082,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                 if (wantWMF)
                     wmf_dilate_cuda(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                                     s.d_depthHR[writeBuf], srcW, srcH,
-                                    depthDilate, depthEdgeThresh, flipDepth, wmfDilateInset, s.jbuStream);
+                                    depthDilate, depthEdgeThresh, flipDepth, cfg.wmfDilateInset, s.jbuStream);
                 else
                     gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                                s.d_depthHR[writeBuf], srcW, srcH,
@@ -1922,7 +1922,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
     if (m_trtRtx)
         return EstimateTrtRtx(srcData, srcWidth, srcHeight, srcStride,
                               isBGR, flipDepth, smoothAlpha,
-                              depthDilate, depthEdgeThresh, upscaleMode, cfg.wmfDilateInset, result);
+                              depthDilate, depthEdgeThresh, upscaleMode, result);
 #endif
     if (!m_session) {
         LOG_ERR("Estimate: no ORT session and no native TRT session");
