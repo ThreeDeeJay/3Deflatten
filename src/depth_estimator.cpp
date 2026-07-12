@@ -862,6 +862,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                                          float smoothAlpha, int depthDilate,
                                          float depthEdgeThresh,
                                          DepthUpscaleMode upscaleMode,
+                                         int wmfDilateInset,
                                          DepthResult& result) {
     auto& s = *m_trtRtx;
 
@@ -1913,6 +1914,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
                                   int   depthDilate,
                                   float depthEdgeThresh,
                                   DepthUpscaleMode upscaleMode,
+                                  int   wmfDilateInset,
                                   DepthResult& result) {
     if (!m_loaded) {
         LOG_ERR("Estimate called but model not loaded");
@@ -1922,7 +1924,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
     if (m_trtRtx)
         return EstimateTrtRtx(srcData, srcWidth, srcHeight, srcStride,
                               isBGR, flipDepth, smoothAlpha,
-                              depthDilate, depthEdgeThresh, upscaleMode, result);
+                              depthDilate, depthEdgeThresh, upscaleMode, wmfDilateInset, result);
 #endif
     if (!m_session) {
         LOG_ERR("Estimate: no ORT session and no native TRT session");

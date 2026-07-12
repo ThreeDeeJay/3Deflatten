@@ -46,6 +46,7 @@ public:
                      int         depthDilate,
                      float       depthEdgeThresh,
                      DepthUpscaleMode upscaleMode,
+                     int         wmfDilateInset,
                      DepthResult& result);
 
     bool         IsLoaded()     const { return m_loaded; }
@@ -186,6 +187,7 @@ private:
                             bool isBGR, bool flipDepth, float smoothAlpha,
                             int depthDilate, float depthEdgeThresh,
                             DepthUpscaleMode upscaleMode,
+                            int wmfDilateInset,
                             DepthResult& result);
 #endif
 

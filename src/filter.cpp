@@ -427,7 +427,7 @@ void C3DeflattenFilter::DepthWorkerThread() {
                                         cfg.depthSmooth,
                                         cfg.depthDilate,
                                         cfg.depthEdgeThresh,
-                                        cfg.upscaleMode, result);
+                                        cfg.upscaleMode, cfg.wmfDilateInset, result);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
 
