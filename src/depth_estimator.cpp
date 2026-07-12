@@ -1083,7 +1083,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                 if (wantWMF)
                     wmf_dilate_cuda(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                                     s.d_depthHR[writeBuf], srcW, srcH,
-                                    depthDilate, depthEdgeThresh, flipDepth, cfg.wmfDilateInset, s.jbuStream);
+                                    depthDilate, depthEdgeThresh, flipDepth, wmfDilateInset, s.jbuStream);
                 else
                     gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
                                s.d_depthHR[writeBuf], srcW, srcH,
