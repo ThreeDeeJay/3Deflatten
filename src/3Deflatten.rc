@@ -53,8 +53,8 @@ BEGIN
     COMBOBOX  IDC_MESHDIV_COMBO,                  194, 161,  94,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
-    // Depth Post-processing (Upscale + Dilation + Edge Threshold + Mesh Cut + WMF Inset)
-    // Height 84 = 5 rows * 14 + 14 padding
+    // Depth Post-processing (Upscale algorithm + Dilation + Edge Threshold + Mesh Cut)
+    // Height 70 = 14 (upscale) + 14 (dilate) + 14 (thresh) + 14 (mesh cut) + 14 padding
     GROUPBOX  "Depth Post-processing", -1,          4, 174, 290,  84
     LTEXT     "Upscale:", -1,                       10, 186,  40,  10
     COMBOBOX  IDC_UPSCALE_COMBO,                    52, 184, 232,  60,
