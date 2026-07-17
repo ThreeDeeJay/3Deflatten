@@ -7,7 +7,7 @@ BEGIN
     IDS_PROP_TITLE  "3Deflatten"
 END
 
-IDD_PROP_PAGE DIALOGEX 0, 0, 298, 358
+IDD_PROP_PAGE DIALOGEX 0, 0, 298, 444
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
@@ -88,10 +88,29 @@ BEGIN
                                                    10, 307, 278,  10
 
     // Apply row
-    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 326, 290, 14
+    // Mesh Inspector (debug) — translate viewport and rotate mesh
+    GROUPBOX  "Mesh Inspector (debug)", -1,              4, 326, 290,  70
+    LTEXT     "Translate X (-1..1):", -1,               10, 338,  80,  10
+    CONTROL   "", IDC_INSP_TX_SLIDER, "msctls_trackbar32",
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 338, 148,  12
+    LTEXT     "0.00", IDC_INSP_TX_LABEL,              244, 338,  32,  10, SS_RIGHT
+    LTEXT     "Translate Y (-1..1):", -1,               10, 352,  80,  10
+    CONTROL   "", IDC_INSP_TY_SLIDER, "msctls_trackbar32",
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 352, 148,  12
+    LTEXT     "0.00", IDC_INSP_TY_LABEL,              244, 352,  32,  10, SS_RIGHT
+    LTEXT     "Translate Z (-0.5..0.5):", -1,           10, 366,  80,  10
+    CONTROL   "", IDC_INSP_TZ_SLIDER, "msctls_trackbar32",
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 366, 148,  12
+    LTEXT     "0.00", IDC_INSP_TZ_LABEL,              244, 366,  32,  10, SS_RIGHT
+    LTEXT     "Rotate Y (-90..90 deg):", -1,            10, 380,  80,  10
+    CONTROL   "", IDC_INSP_RY_SLIDER, "msctls_trackbar32",
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 380, 148,  12
+    LTEXT     "0 deg", IDC_INSP_RY_LABEL,             244, 380,  32,  10, SS_RIGHT
+
+    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 400, 290, 14
 
     // Status
-    GROUPBOX  "Active Inference Status", -1,        4, 344, 290,  12
-    LTEXT     "", IDC_GPU_INFO,                    10, 348, 278,   6,
+    GROUPBOX  "Active Inference Status", -1,        4, 418, 290,  24
+    LTEXT     "", IDC_GPU_INFO,                    10, 428, 278,  12,
               SS_NOPREFIX | SS_ENDELLIPSIS
 END

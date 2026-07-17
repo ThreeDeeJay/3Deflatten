@@ -35,6 +35,14 @@
 #define IDC_DISCTHRESH_LABEL  1027 // "0.10" label
 #define IDC_WMFINSET_SLIDER   1028
 #define IDC_WMFINSET_LABEL    1029
+#define IDC_INSP_TX_SLIDER    1030
+#define IDC_INSP_TX_LABEL     1031
+#define IDC_INSP_TY_SLIDER    1032
+#define IDC_INSP_TY_LABEL     1033
+#define IDC_INSP_TZ_SLIDER    1034
+#define IDC_INSP_TZ_LABEL     1035
+#define IDC_INSP_RY_SLIDER    1036
+#define IDC_INSP_RY_LABEL     1037
 
 // ── Trackbar style constants (commctrl.h equivalents for rc.exe) ──────────────
 // rc.exe does not automatically include commctrl.h, so we define what we need.

@@ -23,6 +23,15 @@ static int   SmoothToSlider(float f)  { return (int)(f * SMOOTH_TICKS + 0.5f); }
 static float SliderToSmooth(int v)    { return (float)v / SMOOTH_TICKS; }
 static int   EThreshToSlider(float f) { return (int)(f * ETHRESH_TICKS + 0.5f); }
 static float SliderToEThresh(int v)   { return (float)v / ETHRESH_TICKS; }
+// Inspector sliders: 200 ticks for TX/TY, 100 for TZ, 180 for RY; center = 0
+static int   InspTXToSlider(float f)  { return std::min(200,std::max(0,(int)(f*100+100.5f))); }
+static float SliderToInspTX(int v)    { return (v - 100) * 0.01f; }
+static int   InspTYToSlider(float f)  { return std::min(200,std::max(0,(int)(f*100+100.5f))); }
+static float SliderToInspTY(int v)    { return (v - 100) * 0.01f; }
+static int   InspTZToSlider(float f)  { return std::min(100,std::max(0,(int)(f*100+50.5f))); }
+static float SliderToInspTZ(int v)    { return (v - 50) * 0.01f; }
+static int   InspRYToSlider(float f)  { return std::min(180,std::max(0,(int)(f+90.5f))); }
+static float SliderToInspRY(int v)    { return (float)(v - 90); }
 
 // ── CreateInstance ────────────────────────────────────────────────────────────
 // g_hInst is the DirectShow baseclasses global used by CBasePropertyPage::
@@ -87,6 +96,10 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
         SendDlgItemMessage(hwnd, IDC_DISCTHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
         SendDlgItemMessage(hwnd, IDC_WMFINSET_SLIDER,   TBM_SETRANGE, TRUE, MAKELPARAM(0, 8));
+        SendDlgItemMessage(hwnd, IDC_INSP_TX_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
+        SendDlgItemMessage(hwnd, IDC_INSP_TY_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
+        SendDlgItemMessage(hwnd, IDC_INSP_TZ_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+        SendDlgItemMessage(hwnd, IDC_INSP_RY_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 180));
         // Output Mode
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Side-by-Side (SBS)");
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Top-and-Bottom (TAB)");
@@ -140,7 +153,9 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         int  id   = GetDlgCtrlID(hCtl);
         if (id==IDC_CONV_SLIDER || id==IDC_SEP_SLIDER || id==IDC_SMOOTH_SLIDER ||
             id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER ||
-            id==IDC_WMFINSET_SLIDER) {
+            id==IDC_WMFINSET_SLIDER ||
+            id==IDC_INSP_TX_SLIDER || id==IDC_INSP_TY_SLIDER ||
+            id==IDC_INSP_TZ_SLIDER || id==IDC_INSP_RY_SLIDER) {
             ReadControls(hwnd);
             UpdateValueLabels(hwnd);
             PushConfig();   // real-time update while scrubbing
@@ -324,6 +339,10 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
         TBM_SETPOS, TRUE, EThreshToSlider(m_cfg.discThresh));
     SendDlgItemMessage(hwnd, IDC_WMFINSET_SLIDER,
         TBM_SETPOS, TRUE, std::min(8, std::max(0, m_cfg.wmfDilateInset)));
+    SendDlgItemMessage(hwnd, IDC_INSP_TX_SLIDER, TBM_SETPOS, TRUE, InspTXToSlider(m_cfg.inspectTransX));
+    SendDlgItemMessage(hwnd, IDC_INSP_TY_SLIDER, TBM_SETPOS, TRUE, InspTYToSlider(m_cfg.inspectTransY));
+    SendDlgItemMessage(hwnd, IDC_INSP_TZ_SLIDER, TBM_SETPOS, TRUE, InspTZToSlider(m_cfg.inspectTransZ));
+    SendDlgItemMessage(hwnd, IDC_INSP_RY_SLIDER, TBM_SETPOS, TRUE, InspRYToSlider(m_cfg.inspectRotY));
     SendDlgItemMessage(hwnd, IDC_UPSCALE_COMBO, CB_SETCURSEL, (int)m_cfg.upscaleMode, 0);
 
     UpdateValueLabels(hwnd);
@@ -363,6 +382,10 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
         (int)SendDlgItemMessage(hwnd, IDC_DISCTHRESH_SLIDER, TBM_GETPOS, 0, 0));
     m_cfg.wmfDilateInset = std::min(8, std::max(0,
         (int)SendDlgItemMessage(hwnd, IDC_WMFINSET_SLIDER, TBM_GETPOS, 0, 0)));
+    m_cfg.inspectTransX = SliderToInspTX((int)SendDlgItemMessage(hwnd, IDC_INSP_TX_SLIDER, TBM_GETPOS, 0, 0));
+    m_cfg.inspectTransY = SliderToInspTY((int)SendDlgItemMessage(hwnd, IDC_INSP_TY_SLIDER, TBM_GETPOS, 0, 0));
+    m_cfg.inspectTransZ = SliderToInspTZ((int)SendDlgItemMessage(hwnd, IDC_INSP_TZ_SLIDER, TBM_GETPOS, 0, 0));
+    m_cfg.inspectRotY   = SliderToInspRY((int)SendDlgItemMessage(hwnd, IDC_INSP_RY_SLIDER, TBM_GETPOS, 0, 0));
 }
 
 void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {
@@ -381,6 +404,10 @@ void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {
     SetDlgItemTextW(hwnd, IDC_DISCTHRESH_LABEL, buf);
     swprintf_s(buf, L"%d px", m_cfg.wmfDilateInset);
     SetDlgItemTextW(hwnd, IDC_WMFINSET_LABEL, buf);
+    swprintf_s(buf, L"%.2f", m_cfg.inspectTransX); SetDlgItemTextW(hwnd, IDC_INSP_TX_LABEL, buf);
+    swprintf_s(buf, L"%.2f", m_cfg.inspectTransY); SetDlgItemTextW(hwnd, IDC_INSP_TY_LABEL, buf);
+    swprintf_s(buf, L"%.2f", m_cfg.inspectTransZ); SetDlgItemTextW(hwnd, IDC_INSP_TZ_LABEL, buf);
+    swprintf_s(buf, L"%.0f", m_cfg.inspectRotY);   SetDlgItemTextW(hwnd, IDC_INSP_RY_LABEL, buf);
 }
 
 void C3DeflattenProp::RefreshStatus(HWND hwnd) {

@@ -31,10 +31,12 @@ cbuffer CBStereo : register(b0) {
     float  g_depthOffsetU;
     // row 3
     float  g_depthOffsetV;
-    float  g_discThresh;  // used by both the mesh GS edge-cull AND the warp
-                           // pass's background-search (see PS_StereoWarp)
-    float  g_eyeSign;     // unused in warp pass
+    float  g_discThresh;
+    float  g_eyeSign;
     float  g_pad1;
+    // row 4
+    float  g_inspectTransX; float g_inspectTransY;
+    float  g_inspectTransZ; float g_inspectRotY;
 };
 Texture2D<float4> g_srcTex   : register(t0);
 Texture2D<float>  g_depthTex : register(t1);
@@ -332,6 +334,8 @@ cbuffer CBStereo : register(b0) {
     float g_convergence; float g_separation; float g_flipDepth; int g_outputMode;
     float g_texelW; float g_texelH; int g_infillMode; float g_depthOffsetU;
     float g_depthOffsetV; float g_discThresh; float g_eyeSign; float g_pad1;
+    float g_inspectTransX; float g_inspectTransY;
+    float g_inspectTransZ; float g_inspectRotY;
 };
 Texture2D<float4> g_srcTex   : register(t0);
 Texture2D<float>  g_depthTex : register(t1);
@@ -824,6 +828,10 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
         cb->discThresh    = cfg.discThresh;
         cb->eyeSign       = 0.f;
         cb->pad1          = 0.f;
+        cb->inspectTransX = cfg.inspectTransX;
+        cb->inspectTransY = cfg.inspectTransY;
+        cb->inspectTransZ = cfg.inspectTransZ;
+        cb->inspectRotY   = cfg.inspectRotY * 3.14159f / 180.f;
         cbBase = *cb;   // save for mesh eye-sign updates
         m_ctx->Unmap(m_cb.Get(), 0);
     }

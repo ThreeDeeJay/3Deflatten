@@ -96,6 +96,11 @@ private:
         float discThresh;     // depth jump > this → cut mesh edge (default 0.05)
         float eyeSign;        // +1=left/top eye, −1=right/bottom (mesh pass)
         float pad1;
+        // row 4 — mesh inspector (all 0 = no effect)
+        float inspectTransX;
+        float inspectTransY;
+        float inspectTransZ;
+        float inspectRotY;    // radians
     };
 
     // ── Mesh reprojection + GS culling + UV-warp hole-fill (two-pass) ────────

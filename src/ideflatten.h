@@ -89,7 +89,13 @@ struct DeflattenConfig {
     int         depthDilate;   // foreground edge dilation radius in pixels (0=off, default 4)
     float       depthEdgeThresh; // depth discontinuity threshold for dilation [0,1] (default 0.20)
     DepthUpscaleMode upscaleMode; // Bilinear / JBU / WeightedMode (default Bilinear)
-    int         wmfDilateInset; // pixels to step inward from detected edge (default 2)
+    int         wmfDilateInset;
+    // Mesh inspector (debug): translate viewport and rotate mesh for visual inspection.
+    // All default 0 (no effect).
+    float       inspectTransX;  // NDC horizontal offset   [-1, 1]
+    float       inspectTransY;  // NDC vertical offset     [-1, 1]
+    float       inspectTransZ;  // depth offset            [-0.5, 0.5]
+    float       inspectRotY;    // mesh rotation, degrees  [-90, 90] // pixels to step inward from detected edge (default 2)
     float       discThresh;    // mesh edge-cut threshold: depth jump between adjacent
                                 // mesh vertices above this culls the triangle, creating a
                                 // gap filled by the UV-warp hole-fill pass (default 0.10)

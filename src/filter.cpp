@@ -125,6 +125,10 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.depthEdgeThresh  = getF(L"depthEdgeThresh", 0.20f);
     m_cfg.upscaleMode      = (DepthUpscaleMode)getI(L"upscaleMode", 0);
     m_cfg.wmfDilateInset   = getI(L"wmfDilateInset", 2);
+    m_cfg.inspectTransX    = getF(L"inspectTransX", 0.0f);
+    m_cfg.inspectTransY    = getF(L"inspectTransY", 0.0f);
+    m_cfg.inspectTransZ    = getF(L"inspectTransZ", 0.0f);
+    m_cfg.inspectRotY      = getF(L"inspectRotY",   0.0f);
     m_cfg.discThresh       = getF(L"discThresh", 0.10f);
 
     std::wstring mp = getStr(L"modelPath");
@@ -165,6 +169,10 @@ void C3DeflattenFilter::SaveIni() const {
     setF(L"depthEdgeThresh",   m_cfg.depthEdgeThresh);
     setI(L"upscaleMode",       (int)m_cfg.upscaleMode);
     setI(L"wmfDilateInset",    m_cfg.wmfDilateInset);
+    setF(L"inspectTransX",     m_cfg.inspectTransX);
+    setF(L"inspectTransY",     m_cfg.inspectTransY);
+    setF(L"inspectTransZ",     m_cfg.inspectTransZ);
+    setF(L"inspectRotY",       m_cfg.inspectRotY);
     setF(L"discThresh",        m_cfg.discThresh);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
 
@@ -196,6 +204,10 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.depthEdgeThresh  = 0.20f;
     m_cfg.upscaleMode      = DepthUpscaleMode::Bilinear;
     m_cfg.wmfDilateInset   = 2;
+    m_cfg.inspectTransX    = 0.0f;
+    m_cfg.inspectTransY    = 0.0f;
+    m_cfg.inspectTransZ    = 0.0f;
+    m_cfg.inspectRotY      = 0.0f;
     m_cfg.discThresh       = 0.10f;
     m_hadRealDepth    = false;
     m_skipEvery       = 1;
