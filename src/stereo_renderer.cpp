@@ -218,6 +218,9 @@ cbuffer CBStereo : register(b0) {
     float  g_discThresh;
     float  g_eyeSign;
     float  g_pad1;
+    // row 4 — mesh inspector
+    float  g_inspectTransX; float g_inspectTransY;
+    float  g_inspectTransZ; float g_inspectRotY;
 };
 Texture2D<float> g_depthTex : register(t1);
 SamplerState     g_sampler  : register(s0);
@@ -284,7 +287,15 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     // NDC Z: 1-depth so near (depth=1) → z=0 wins LESS z-test over far (depth=0) → z=1
     // Clamp so sky (depth=0 after normalisation) writes z=0.999 not z=1.0,
     // keeping it distinct from the DSV clear value the hole-fill tests against.
+    // Inspector Z: shift depth for inspection.
+    depth = saturate(depth + g_inspectTransZ);
     o.pos = float4(ndcX, ndcY, 1.0 - max(depth, 0.001), 1.0);
+    // Inspector translate + rotate around NDC origin.
+    float cosR = cos(g_inspectRotY), sinR = sin(g_inspectRotY);
+    float rx = o.pos.x * cosR - o.pos.y * sinR;
+    float ry = o.pos.x * sinR + o.pos.y * cosR;
+    o.pos.x = rx + g_inspectTransX;
+    o.pos.y = ry + g_inspectTransY;
     o.uv  = uv;   // UNCHANGED — PS always samples the original source pixel
     o.smoothDepth = smoothDepth;
     o.skirtBlend  = 0.0;
