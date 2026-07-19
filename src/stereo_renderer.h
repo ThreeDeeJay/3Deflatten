@@ -101,6 +101,10 @@ private:
         float inspectTransY;
         float inspectTransZ;
         float inspectRotY;    // radians
+        // row 5
+        float inspectRotX;    // radians
+        float inspectRotZ;    // radians
+        float pad2, pad3;
     };
 
     // ── Mesh reprojection + GS culling + UV-warp hole-fill (two-pass) ────────

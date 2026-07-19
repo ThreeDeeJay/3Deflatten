@@ -37,6 +37,9 @@ cbuffer CBStereo : register(b0) {
     // row 4
     float  g_inspectTransX; float g_inspectTransY;
     float  g_inspectTransZ; float g_inspectRotY;
+    // row 5
+    float  g_inspectRotX; float g_inspectRotZ;
+    float  g_pad2; float g_pad3;
 };
 Texture2D<float4> g_srcTex   : register(t0);
 Texture2D<float>  g_depthTex : register(t1);
@@ -218,9 +221,12 @@ cbuffer CBStereo : register(b0) {
     float  g_discThresh;
     float  g_eyeSign;
     float  g_pad1;
-    // row 4 — mesh inspector
+    // row 4 — mesh inspector translation + Y rotation
     float  g_inspectTransX; float g_inspectTransY;
     float  g_inspectTransZ; float g_inspectRotY;
+    // row 5 — mesh inspector X/Z rotation
+    float  g_inspectRotX; float g_inspectRotZ;
+    float  g_pad2; float g_pad3;
 };
 Texture2D<float> g_depthTex : register(t1);
 SamplerState     g_sampler  : register(s0);
@@ -238,6 +244,8 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     // Read depth with motion compensation
     float2 depUV = saturate(uv - float2(g_depthOffsetU, g_depthOffsetV));
     float  depth = g_depthTex.SampleLevel(g_sampler, depUV, 0).r;
+    // Z translate applied before disparity so it shifts stereo separation too.
+    depth = saturate(depth + g_inspectTransZ);
 
     // Spatially-averaged depth used ONLY by MeshGS's cut decision below —
     // NOT for disparity/geometry, which still uses the single-sample
@@ -287,15 +295,18 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     // NDC Z: 1-depth so near (depth=1) → z=0 wins LESS z-test over far (depth=0) → z=1
     // Clamp so sky (depth=0 after normalisation) writes z=0.999 not z=1.0,
     // keeping it distinct from the DSV clear value the hole-fill tests against.
-    // Inspector Z: shift depth for inspection.
-    depth = saturate(depth + g_inspectTransZ);
-    o.pos = float4(ndcX, ndcY, 1.0 - max(depth, 0.001), 1.0);
-    // Inspector translate + rotate around NDC origin.
-    float cosR = cos(g_inspectRotY), sinR = sin(g_inspectRotY);
-    float rx = o.pos.x * cosR - o.pos.y * sinR;
-    float ry = o.pos.x * sinR + o.pos.y * cosR;
-    o.pos.x = rx + g_inspectTransX;
-    o.pos.y = ry + g_inspectTransY;
+    // 3D inspector rotation + translation (Euler XYZ, radians, around NDC origin).
+    float3 p = float3(ndcX, ndcY, 1.0 - max(depth, 0.001));
+    // Pitch (X)
+    float cX=cos(g_inspectRotX), sX=sin(g_inspectRotX);
+    float3 px = float3(p.x, p.y*cX - p.z*sX, p.y*sX + p.z*cX);
+    // Yaw (Y)
+    float cY=cos(g_inspectRotY), sY=sin(g_inspectRotY);
+    float3 py = float3(px.x*cY + px.z*sY, px.y, -px.x*sY + px.z*cY);
+    // Roll (Z)
+    float cZ=cos(g_inspectRotZ), sZ=sin(g_inspectRotZ);
+    float3 pz = float3(py.x*cZ - py.y*sZ, py.x*sZ + py.y*cZ, py.z);
+    o.pos = float4(pz.x + g_inspectTransX, pz.y + g_inspectTransY, pz.z, 1.0);
     o.uv  = uv;   // UNCHANGED — PS always samples the original source pixel
     o.smoothDepth = smoothDepth;
     o.skirtBlend  = 0.0;
@@ -347,6 +358,8 @@ cbuffer CBStereo : register(b0) {
     float g_depthOffsetV; float g_discThresh; float g_eyeSign; float g_pad1;
     float g_inspectTransX; float g_inspectTransY;
     float g_inspectTransZ; float g_inspectRotY;
+    float g_inspectRotX; float g_inspectRotZ;
+    float g_pad2; float g_pad3;
 };
 Texture2D<float4> g_srcTex   : register(t0);
 Texture2D<float>  g_depthTex : register(t1);
@@ -595,7 +608,7 @@ HRESULT StereoRenderer::CreateShaders() {
         m_dev->CreateDepthStencilState(&dsd, &m_dsStateHoleFill);
     }
 
-    // Mesh rasterizer: no backface culling (triangle winding varies with depth)
+    // Mesh rasterizer: no backface culling, scissor enabled for per-eye clipping
     {
         D3D11_RASTERIZER_DESC mrd{};
         mrd.FillMode        = D3D11_FILL_SOLID;
@@ -889,7 +902,20 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
 
     int nIdx = (m_meshW - 1) * (m_meshH - 1) * 6;
 
+    // Per-eye scissor rects — prevents mesh from one eye bleeding into the other
+    // when the inspector translates/rotates the mesh across the SBS/TAB boundary.
+    UINT vpW = (UINT)m_outW, vpH = (UINT)m_outH;
+    D3D11_RECT rcLeft  = { 0,             0, (LONG)(vpW/2), (LONG)vpH }; // SBS left / TAB top
+    D3D11_RECT rcRight = { (LONG)(vpW/2), 0, (LONG)vpW,    (LONG)vpH }; // SBS right
+    D3D11_RECT rcTop   = { 0, 0,             (LONG)vpW, (LONG)(vpH/2) }; // TAB top
+    D3D11_RECT rcBot   = { 0, (LONG)(vpH/2), (LONG)vpW, (LONG)vpH    }; // TAB bottom
+    bool isSBS = (cbBase.outputMode == 0);
     auto drawEye = [&](float eyeSign) {
+        // Scissor: left/top eye to its own half; prevents cross-eye mesh bleed
+        if (isSBS)
+            m_ctx->RSSetScissorRects(1, eyeSign > 0 ? &rcLeft : &rcRight);
+        else
+            m_ctx->RSSetScissorRects(1, eyeSign > 0 ? &rcTop : &rcBot);
         D3D11_MAPPED_SUBRESOURCE mc{};
         if (SUCCEEDED(m_ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mc))) {
             auto* c = static_cast<CBStereo*>(mc.pData);
@@ -909,65 +935,8 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     { ID3D11ShaderResourceView* nsr[2]={nullptr,nullptr}; m_ctx->PSSetShaderResources(0,2,nsr); }
     m_ctx->OMSetDepthStencilState(nullptr, 0);
 
-    // ── Pass 2: UV-warp hole-fill ─────────────────────────────────────────────
-    // Draw a full-screen quad with depth-test EQUAL 1.0, no depth write.
-    // The PS (PS_StereoWarp) only executes for pixels still at depth 1.0 —
-    // exactly the gaps MeshGS left by culling discontinuity-straddling
-    // triangles. For each such pixel the PS computes the warp disparity, detects
-    // that it lands on foreground (depthJump > 0.10), and runs the selected
-    // g_infillMode search (Inner/Outer/Blend/EdgeClamp/Inpaint) to find and
-    // write the correct background colour. Covered pixels (mesh depth < 1.0)
-    // fail the EQUAL test and are skipped with no PS invocation (essentially
-    // free early-Z rejection on FL11.0 hardware like the RTX 2080 Ti).
-    // PS_StereoWarp determines which eye each pixel belongs to from its UV
-    // (uv.x < 0.5 for SBS, uv.y < 0.5 for TAB), so one Draw(4) covers both.
-    {
-        m_ctx->OMSetDepthStencilState(m_dsStateHoleFill.Get(), 0);
-        m_ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), m_dsv.Get());
-        m_ctx->RSSetState(m_raster.Get());
-        m_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-        m_ctx->IASetInputLayout(m_il.Get());
-        UINT wstride = sizeof(Vertex), woff = 0;
-        m_ctx->IASetVertexBuffers(0, 1, m_vb.GetAddressOf(), &wstride, &woff);
-        m_ctx->VSSetShader(m_vs.Get(), nullptr, 0);
-        m_ctx->PSSetShader(m_ps.Get(), nullptr, 0);
-        // Reset CB: eyeSign=0 (PS_StereoWarp derives eye from UV, not eyeSign).
-        D3D11_MAPPED_SUBRESOURCE mcw{};
-        if (SUCCEEDED(m_ctx->Map(m_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mcw))) {
-            *static_cast<CBStereo*>(mcw.pData) = cbBase;  // cbBase.eyeSign == 0
-            m_ctx->Unmap(m_cb.Get(), 0);
-        }
-        m_ctx->VSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
-        m_ctx->PSSetConstantBuffers(0, 1, m_cb.GetAddressOf());
-        // PS_StereoWarp uses t0=srcTex, t1=depthTex
-        m_ctx->PSSetShaderResources(0, 1, m_srcSRV.GetAddressOf());
-        m_ctx->PSSetShaderResources(1, 1, m_depthSRV.GetAddressOf());
-        m_ctx->PSSetSamplers(0, 1, m_sampler.GetAddressOf());
-        m_ctx->Draw(4, 0);
-        // Unbind PS SRVs to avoid binding hazards on the next mesh pass.
-        ID3D11ShaderResourceView* nullSRVs[2] = {nullptr, nullptr};
-        m_ctx->PSSetShaderResources(0, 2, nullSRVs);
-        m_ctx->OMSetDepthStencilState(nullptr, 0);
-    }
-
-    // ── Triple-buffered staging readback — guaranteed zero Map(READ) stall ───
-    // Frame N: CopyResource → staging[N%3]      (async, returns immediately)
-    //          Map          → staging[(N-2)%3]   (2 frames old — always GPU-complete)
-    // The 2-frame readback lag is 2/24 s ≈ 83 ms — imperceptible.
-    // First two frames: fall back to mapping the just-submitted buffer (stall once).
-    int cur  = m_stagingFrame % 3;
-    int read = (m_stagingFrame >= 2) ? (m_stagingFrame - 2) % 3 : cur;
-    m_ctx->CopyResource(m_stagingTex[cur].Get(), m_rtTex.Get());
-
-    D3D11_MAPPED_SUBRESOURCE ms;
-    if (SUCCEEDED(m_ctx->Map(m_stagingTex[read].Get(), 0, D3D11_MAP_READ, 0, &ms))) {
-        for (int y=0; y<dstH; ++y)
-            memcpy(dstFrame + y*dstStride,
-                   (const BYTE*)ms.pData + y*ms.RowPitch,
-                   dstW*4);
-        m_ctx->Unmap(m_stagingTex[read].Get(), 0);
-    }
-    ++m_stagingFrame;
+    // Pass 2 (UV-warp hole-fill) removed — skirt geometry in MeshGS
+    // is the sole fill mechanism for disoccluded areas.
 }
 
 void StereoRenderer::RenderCPU(const BYTE* src, int srcW, int srcH,
