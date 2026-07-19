@@ -904,12 +904,13 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
 
     // Per-eye scissor rects — prevents mesh from one eye bleeding into the other
     // when the inspector translates/rotates the mesh across the SBS/TAB boundary.
-    UINT vpW = (UINT)m_outW, vpH = (UINT)m_outH;
-    D3D11_RECT rcLeft  = { 0,             0, (LONG)(vpW/2), (LONG)vpH }; // SBS left / TAB top
-    D3D11_RECT rcRight = { (LONG)(vpW/2), 0, (LONG)vpW,    (LONG)vpH }; // SBS right
-    D3D11_RECT rcTop   = { 0, 0,             (LONG)vpW, (LONG)(vpH/2) }; // TAB top
-    D3D11_RECT rcBot   = { 0, (LONG)(vpH/2), (LONG)vpW, (LONG)vpH    }; // TAB bottom
     bool isSBS = (cbBase.outputMode == 0);
+    UINT vpW = isSBS ? (UINT)srcW * 2 : (UINT)srcW;
+    UINT vpH = isSBS ? (UINT)srcH     : (UINT)srcH * 2;
+    D3D11_RECT rcLeft  = { 0,              0, (LONG)(vpW/2), (LONG)vpH  };
+    D3D11_RECT rcRight = { (LONG)(vpW/2),  0, (LONG)vpW,    (LONG)vpH  };
+    D3D11_RECT rcTop   = { 0, 0,              (LONG)vpW,    (LONG)(vpH/2) };
+    D3D11_RECT rcBot   = { 0, (LONG)(vpH/2), (LONG)vpW,    (LONG)vpH   };
     auto drawEye = [&](float eyeSign) {
         // Scissor: left/top eye to its own half; prevents cross-eye mesh bleed
         if (isSBS)
