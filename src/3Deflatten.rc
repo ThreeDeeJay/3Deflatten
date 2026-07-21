@@ -7,7 +7,7 @@ BEGIN
     IDS_PROP_TITLE  "3Deflatten"
 END
 
-IDD_PROP_PAGE DIALOGEX 0, 0, 298, 472
+IDD_PROP_PAGE DIALOGEX 0, 0, 298, 444
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
@@ -89,7 +89,7 @@ BEGIN
 
     // Apply row
     // Mesh Inspector (debug) — translate viewport and rotate mesh
-    GROUPBOX  "Mesh Inspector (debug)", -1,              4, 326, 290,  98
+    GROUPBOX  "Mesh Inspector (debug)", -1,              4, 326, 290,  70
     LTEXT     "Translate X (-1..1):", -1,               10, 338,  80,  10
     CONTROL   "", IDC_INSP_TX_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 338, 148,  12
@@ -106,19 +106,11 @@ BEGIN
     CONTROL   "", IDC_INSP_RY_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 380, 148,  12
     LTEXT     "0 deg", IDC_INSP_RY_LABEL,             244, 380,  32,  10, SS_RIGHT
-    LTEXT     "Rotate X (-90..90 deg):", -1,            10, 394,  80,  10
-    CONTROL   "", IDC_INSP_RX_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 394, 148,  12
-    LTEXT     "0 deg", IDC_INSP_RX_LABEL,             244, 394,  32,  10, SS_RIGHT
-    LTEXT     "Rotate Z (-90..90 deg):", -1,            10, 408,  80,  10
-    CONTROL   "", IDC_INSP_RZ_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 408, 148,  12
-    LTEXT     "0 deg", IDC_INSP_RZ_LABEL,             244, 408,  32,  10, SS_RIGHT
 
-    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 428, 290, 14
+    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 400, 290, 14
 
     // Status
-    GROUPBOX  "Active Inference Status", -1,        4, 446, 290,  24
-    LTEXT     "", IDC_GPU_INFO,                    10, 456, 278,  12,
+    GROUPBOX  "Active Inference Status", -1,        4, 418, 290,  24
+    LTEXT     "", IDC_GPU_INFO,                    10, 428, 278,  12,
               SS_NOPREFIX | SS_ENDELLIPSIS
 END

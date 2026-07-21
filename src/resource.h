@@ -43,10 +43,6 @@
 #define IDC_INSP_TZ_LABEL     1035
 #define IDC_INSP_RY_SLIDER    1036
 #define IDC_INSP_RY_LABEL     1037
-#define IDC_INSP_RX_SLIDER    1038
-#define IDC_INSP_RX_LABEL     1039
-#define IDC_INSP_RZ_SLIDER    1040
-#define IDC_INSP_RZ_LABEL     1041
 
 // ── Trackbar style constants (commctrl.h equivalents for rc.exe) ──────────────
 // rc.exe does not automatically include commctrl.h, so we define what we need.

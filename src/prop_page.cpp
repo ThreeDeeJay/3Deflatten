@@ -100,8 +100,6 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_INSP_TY_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
         SendDlgItemMessage(hwnd, IDC_INSP_TZ_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
         SendDlgItemMessage(hwnd, IDC_INSP_RY_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 180));
-        SendDlgItemMessage(hwnd, IDC_INSP_RX_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 180));
-        SendDlgItemMessage(hwnd, IDC_INSP_RZ_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 180));
         // Output Mode
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Side-by-Side (SBS)");
         SendDlgItemMessage(hwnd, IDC_MODE_COMBO, CB_ADDSTRING, 0, (LPARAM)L"Top-and-Bottom (TAB)");
@@ -157,8 +155,7 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER ||
             id==IDC_WMFINSET_SLIDER ||
             id==IDC_INSP_TX_SLIDER || id==IDC_INSP_TY_SLIDER ||
-            id==IDC_INSP_TZ_SLIDER || id==IDC_INSP_RY_SLIDER ||
-            id==IDC_INSP_RX_SLIDER || id==IDC_INSP_RZ_SLIDER) {
+            id==IDC_INSP_TZ_SLIDER || id==IDC_INSP_RY_SLIDER) {
             ReadControls(hwnd);
             UpdateValueLabels(hwnd);
             PushConfig();   // real-time update while scrubbing
@@ -346,8 +343,6 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
     SendDlgItemMessage(hwnd, IDC_INSP_TY_SLIDER, TBM_SETPOS, TRUE, InspTYToSlider(m_cfg.inspectTransY));
     SendDlgItemMessage(hwnd, IDC_INSP_TZ_SLIDER, TBM_SETPOS, TRUE, InspTZToSlider(m_cfg.inspectTransZ));
     SendDlgItemMessage(hwnd, IDC_INSP_RY_SLIDER, TBM_SETPOS, TRUE, InspRYToSlider(m_cfg.inspectRotY));
-    SendDlgItemMessage(hwnd, IDC_INSP_RX_SLIDER, TBM_SETPOS, TRUE, InspRYToSlider(m_cfg.inspectRotX));
-    SendDlgItemMessage(hwnd, IDC_INSP_RZ_SLIDER, TBM_SETPOS, TRUE, InspRYToSlider(m_cfg.inspectRotZ));
     SendDlgItemMessage(hwnd, IDC_UPSCALE_COMBO, CB_SETCURSEL, (int)m_cfg.upscaleMode, 0);
 
     UpdateValueLabels(hwnd);
@@ -391,8 +386,6 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
     m_cfg.inspectTransY = SliderToInspTY((int)SendDlgItemMessage(hwnd, IDC_INSP_TY_SLIDER, TBM_GETPOS, 0, 0));
     m_cfg.inspectTransZ = SliderToInspTZ((int)SendDlgItemMessage(hwnd, IDC_INSP_TZ_SLIDER, TBM_GETPOS, 0, 0));
     m_cfg.inspectRotY   = SliderToInspRY((int)SendDlgItemMessage(hwnd, IDC_INSP_RY_SLIDER, TBM_GETPOS, 0, 0));
-    m_cfg.inspectRotX   = SliderToInspRY((int)SendDlgItemMessage(hwnd, IDC_INSP_RX_SLIDER, TBM_GETPOS, 0, 0));
-    m_cfg.inspectRotZ   = SliderToInspRY((int)SendDlgItemMessage(hwnd, IDC_INSP_RZ_SLIDER, TBM_GETPOS, 0, 0));
 }
 
 void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {
@@ -415,8 +408,6 @@ void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {
     swprintf_s(buf, L"%.2f", m_cfg.inspectTransY); SetDlgItemTextW(hwnd, IDC_INSP_TY_LABEL, buf);
     swprintf_s(buf, L"%.2f", m_cfg.inspectTransZ); SetDlgItemTextW(hwnd, IDC_INSP_TZ_LABEL, buf);
     swprintf_s(buf, L"%.0f", m_cfg.inspectRotY);   SetDlgItemTextW(hwnd, IDC_INSP_RY_LABEL, buf);
-    swprintf_s(buf, L"%.0f", m_cfg.inspectRotX);   SetDlgItemTextW(hwnd, IDC_INSP_RX_LABEL, buf);
-    swprintf_s(buf, L"%.0f", m_cfg.inspectRotZ);   SetDlgItemTextW(hwnd, IDC_INSP_RZ_LABEL, buf);
 }
 
 void C3DeflattenProp::RefreshStatus(HWND hwnd) {

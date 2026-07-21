@@ -95,9 +95,7 @@ struct DeflattenConfig {
     float       inspectTransX;  // NDC horizontal offset   [-1, 1]
     float       inspectTransY;  // NDC vertical offset     [-1, 1]
     float       inspectTransZ;  // depth offset            [-0.5, 0.5]
-    float       inspectRotY;    // mesh yaw,   degrees [-90, 90]
-    float       inspectRotX;    // mesh pitch, degrees [-90, 90]
-    float       inspectRotZ;    // mesh roll,  degrees [-90, 90] // pixels to step inward from detected edge (default 2)
+    float       inspectRotY;    // mesh rotation, degrees  [-90, 90] // pixels to step inward from detected edge (default 2)
     float       discThresh;    // mesh edge-cut threshold: depth jump between adjacent
                                 // mesh vertices above this culls the triangle, creating a
                                 // gap filled by the UV-warp hole-fill pass (default 0.10)

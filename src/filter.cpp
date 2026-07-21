@@ -129,8 +129,6 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.inspectTransY    = getF(L"inspectTransY", 0.0f);
     m_cfg.inspectTransZ    = getF(L"inspectTransZ", 0.0f);
     m_cfg.inspectRotY      = getF(L"inspectRotY",   0.0f);
-    m_cfg.inspectRotX      = getF(L"inspectRotX",   0.0f);
-    m_cfg.inspectRotZ      = getF(L"inspectRotZ",   0.0f);
     m_cfg.discThresh       = getF(L"discThresh", 0.10f);
 
     std::wstring mp = getStr(L"modelPath");
@@ -175,8 +173,6 @@ void C3DeflattenFilter::SaveIni() const {
     setF(L"inspectTransY",     m_cfg.inspectTransY);
     setF(L"inspectTransZ",     m_cfg.inspectTransZ);
     setF(L"inspectRotY",       m_cfg.inspectRotY);
-    setF(L"inspectRotX",       m_cfg.inspectRotX);
-    setF(L"inspectRotZ",       m_cfg.inspectRotZ);
     setF(L"discThresh",        m_cfg.discThresh);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
 
@@ -212,8 +208,6 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.inspectTransY    = 0.0f;
     m_cfg.inspectTransZ    = 0.0f;
     m_cfg.inspectRotY      = 0.0f;
-    m_cfg.inspectRotX      = 0.0f;
-    m_cfg.inspectRotZ      = 0.0f;
     m_cfg.discThresh       = 0.10f;
     m_hadRealDepth    = false;
     m_skipEvery       = 1;
