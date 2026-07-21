@@ -941,8 +941,22 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
     { ID3D11ShaderResourceView* nsr[2]={nullptr,nullptr}; m_ctx->PSSetShaderResources(0,2,nsr); }
     m_ctx->OMSetDepthStencilState(nullptr, 0);
 
-    // Pass 2 (UV-warp hole-fill) removed — skirt geometry in MeshGS
-    // is the sole fill mechanism for disoccluded areas.
+    // Pass 2 (UV-warp hole-fill) removed — skirt geometry is the sole fill.
+
+    // ── Triple-buffered staging readback ─────────────────────────────────────
+    int cur  = m_stagingFrame % 3;
+    int read = (m_stagingFrame >= 2) ? (m_stagingFrame - 2) % 3 : cur;
+    m_ctx->CopyResource(m_stagingTex[cur].Get(), m_rtTex.Get());
+
+    D3D11_MAPPED_SUBRESOURCE ms;
+    if (SUCCEEDED(m_ctx->Map(m_stagingTex[read].Get(), 0, D3D11_MAP_READ, 0, &ms))) {
+        for (int y=0; y<dstH; ++y)
+            memcpy(dstFrame + y*dstStride,
+                   (const BYTE*)ms.pData + y*ms.RowPitch,
+                   dstW*4);
+        m_ctx->Unmap(m_stagingTex[read].Get(), 0);
+    }
+    ++m_stagingFrame;
 }
 
 void StereoRenderer::RenderCPU(const BYTE* src, int srcW, int srcH,
