@@ -296,17 +296,17 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     // Clamp so sky (depth=0 after normalisation) writes z=0.999 not z=1.0,
     // keeping it distinct from the DSV clear value the hole-fill tests against.
     // 3D inspector rotation + translation (Euler XYZ, radians, around NDC origin).
-    float3 ndc = float3(ndcX, ndcY, 1.0 - max(depth, 0.001));
+    float3 p = float3(ndcX, ndcY, 1.0 - max(depth, 0.001));
     // Pitch (X)
     float cX=cos(g_inspectRotX), sX=sin(g_inspectRotX);
-    float3 rX = float3(ndc.x, ndc.y*cX - ndc.z*sX, ndc.y*sX + ndc.z*cX);
+    float3 px = float3(p.x, p.y*cX - p.z*sX, p.y*sX + p.z*cX);
     // Yaw (Y)
     float cY=cos(g_inspectRotY), sY=sin(g_inspectRotY);
-    float3 rY = float3(rX.x*cY + rX.z*sY, rX.y, -rX.x*sY + rX.z*cY);
+    float3 py = float3(px.x*cY + px.z*sY, px.y, -px.x*sY + px.z*cY);
     // Roll (Z)
     float cZ=cos(g_inspectRotZ), sZ=sin(g_inspectRotZ);
-    float3 rZ = float3(rY.x*cZ - rY.y*sZ, rY.x*sZ + rY.y*cZ, rY.z);
-    o.pos = float4(rZ.x + g_inspectTransX, rZ.y + g_inspectTransY, rZ.z, 1.0);
+    float3 pz = float3(py.x*cZ - py.y*sZ, py.x*sZ + py.y*cZ, py.z);
+    o.pos = float4(pz.x + g_inspectTransX, pz.y + g_inspectTransY, pz.z, 1.0);
     o.uv  = uv;   // UNCHANGED — PS always samples the original source pixel
     o.smoothDepth = smoothDepth;
     o.skirtBlend  = 0.0;
