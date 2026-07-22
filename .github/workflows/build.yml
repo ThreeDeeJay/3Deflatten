@@ -135,8 +135,7 @@ jobs:
 
     - name: Cleanup
       run: |
-        if (Test-Path build) { Remove-Item build -Recurse -Force }
-        cmake -A "x64" -B "build" -DCMAKE_BUILD_TYPE=Release ...
+        Remove-Item build -Recurse -Force
       shell: pwsh
 
     - name: Configure
