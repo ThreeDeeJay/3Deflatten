@@ -306,7 +306,7 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     // Roll (Z)
     float cZ=cos(g_inspectRotZ), sZ=sin(g_inspectRotZ);
     float3 pz = float3(py.x*cZ - py.y*sZ, py.x*sZ + py.y*cZ, py.z);
-    o.pos = float4(pz.x + g_inspectTransX, pz.y + g_inspectTransY, pz.z, 1.0);
+    o.pos = float4(pz.x + g_inspectTransX, pz.y + g_inspectTransY, clamp(pz.z, 0.001, 0.999), 1.0);
     o.uv  = uv;   // UNCHANGED — PS always samples the original source pixel
     o.smoothDepth = smoothDepth;
     o.skirtBlend  = 0.0;
