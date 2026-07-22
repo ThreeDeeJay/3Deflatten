@@ -637,6 +637,7 @@ HRESULT StereoRenderer::CreateShaders() {
         mrd.FillMode        = D3D11_FILL_SOLID;
         mrd.CullMode        = D3D11_CULL_NONE;
         mrd.DepthClipEnable = TRUE;
+        mrd.ScissorEnable   = TRUE;
         m_dev->CreateRasterizerState(&mrd, &m_meshRaster);
     }
 
@@ -879,6 +880,10 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
         cb->inspectTransY = cfg.inspectTransY;
         cb->inspectTransZ = cfg.inspectTransZ;
         cb->inspectRotY   = cfg.inspectRotY * 3.14159f / 180.f;
+        cb->inspectRotX   = cfg.inspectRotX * 3.14159f / 180.f;
+        cb->inspectRotZ   = cfg.inspectRotZ * 3.14159f / 180.f;
+        cb->pad2          = 0.f;
+        cb->pad3          = 0.f;
         cbBase = *cb;   // save for mesh eye-sign updates
         m_ctx->Unmap(m_cb.Get(), 0);
     }
