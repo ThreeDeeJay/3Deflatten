@@ -333,17 +333,40 @@ void MeshGS(triangle MeshOut v[3], inout TriangleStream<MeshOut> stream) {
         stream.Append(v[0]); stream.Append(v[1]); stream.Append(v[2]);
         stream.RestartStrip(); return;
     }
-    // Skirt: replace discontinuity triangle with background-extension geometry.
-    // Anchor = lowest smoothDepth vertex (background side). Other two keep
-    // their screen XY but inherit anchor depth/UV — fills the disocclusion
-    // gap at background depth with no residual gap by construction.
-    int bgIdx = (d0<=d1)?((d0<=d2)?0:2):((d1<=d2)?1:2);
-    int o1=(bgIdx+1)%3, o2=(bgIdx+2)%3;
-    MeshOut anchor=v[bgIdx]; anchor.skirtBlend=0.0;
-    MeshOut ext1=v[bgIdx]; ext1.pos.xy=v[o1].pos.xy; ext1.skirtBlend=1.0;
-    MeshOut ext2=v[bgIdx]; ext2.pos.xy=v[o2].pos.xy; ext2.skirtBlend=1.0;
-    stream.Append(anchor); stream.Append(ext1); stream.Append(ext2);
-    stream.RestartStrip();
+    // Classify each vertex as background (far, low depth) or foreground (near, high).
+    // Background vertices become anchors at their natural screen positions.
+    // Foreground vertex positions are inherited by the extension corners so
+    // the skirt triangle exactly covers the disoccluded gap — from the visible
+    // background edge all the way to where the foreground silhouette sits.
+    float dMid = (min(min(d0,d1),d2) + max(max(d0,d1),d2)) * 0.5;
+    bool bg0=(d0<dMid), bg1=(d1<dMid), bg2=(d2<dMid);
+    int bgCount = (bg0?1:0) + (bg1?1:0) + (bg2?1:0);
+    if (bgCount == 1) {
+        // 1 bg anchor, 2 fg extensions:
+        //   anchor stays at its real background position (correct background pixel).
+        //   ext1/ext2 take their respective foreground screen XY so the skirt
+        //   stretches from the background anchor to the full foreground silhouette.
+        int bi=bg0?0:(bg1?1:2), f1=(bi+1)%3, f2=(bi+2)%3;
+        MeshOut anc=v[bi]; anc.skirtBlend=0.0;
+        MeshOut e1=v[bi]; e1.pos.xy=v[f1].pos.xy; e1.skirtBlend=1.0;
+        MeshOut e2=v[bi]; e2.pos.xy=v[f2].pos.xy; e2.skirtBlend=1.0;
+        stream.Append(anc); stream.Append(e1); stream.Append(e2);
+        stream.RestartStrip();
+    } else {
+        // 2 bg anchors, 1 fg extension — the common case at silhouette edges.
+        // OLD bug: picked ONE bg vertex as sole anchor, making the other extension
+        // nearly degenerate (it pointed to the OTHER bg vertex, barely any coverage).
+        // FIX: keep BOTH bg vertices at their own natural positions (they're real
+        // background pixels), and point the single extension to the ONE foreground
+        // vertex's screen XY. This produces a proper non-degenerate triangle that
+        // covers the full gap from both background anchors to the foreground edge.
+        int fi=(!bg0)?0:((!bg1)?1:2), b1=(fi+1)%3, b2=(fi+2)%3;
+        MeshOut a1=v[b1]; a1.skirtBlend=0.0;
+        MeshOut a2=v[b2]; a2.skirtBlend=0.0;
+        MeshOut ex=v[b1]; ex.pos.xy=v[fi].pos.xy; ex.skirtBlend=1.0;
+        stream.Append(a1); stream.Append(a2); stream.Append(ex);
+        stream.RestartStrip();
+    }
 }
 )HLSL";
 
