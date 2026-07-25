@@ -192,6 +192,9 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         if (ctl==IDC_DEPTH_CHECK && note==BN_CLICKED) {
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
+        if (ctl==IDC_AUTOCROP_CHECK && note==BN_CLICKED) {
+            ReadControls(hwnd); PushConfig(); SetDirty(); break;
+        }
         if (ctl==IDC_UPSCALE_COMBO && note==CBN_SELCHANGE) {
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }

@@ -7,7 +7,7 @@ BEGIN
     IDS_PROP_TITLE  "3Deflatten"
 END
 
-IDD_PROP_PAGE DIALOGEX 0, 0, 298, 472
+IDD_PROP_PAGE DIALOGEX 0, 0, 298, 486
 STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
@@ -27,15 +27,16 @@ BEGIN
     LTEXT     "0.00", IDC_SMOOTH_LABEL,            256,  84,  32,  14, SS_RIGHT
 
     // Output (Mode + Flip + Depth overlay + Infill)
-    GROUPBOX  "Output",    -1,                      4, 102, 140,  66
+    GROUPBOX  "Output",    -1,                      4, 102, 140,  80
     LTEXT     "Mode:",     -1,                     10, 115,  28,  10
     COMBOBOX  IDC_MODE_COMBO,                      40, 113, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     AUTOCHECKBOX "Flip Depth",    IDC_FLIP_CHECK,  10, 129, 130,  12
     AUTOCHECKBOX "Show Depth Map (Right Shift)",
                                    IDC_DEPTH_CHECK, 10, 143, 130,  12
-    LTEXT     "Infill:",   -1,                     10, 159,  28,  10
-    COMBOBOX  IDC_INFILL_COMBO,                    40, 157, 100,  60,
+    AUTOCHECKBOX "Auto-crop black bars", IDC_AUTOCROP_CHECK, 10, 157, 128, 12
+    LTEXT     "Infill:",   -1,                     10, 173,  28,  10
+    COMBOBOX  IDC_INFILL_COMBO,                    40, 171, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
 
     // Inference (Runtime + Provider + Depth Dim + Mesh Div)
@@ -55,70 +56,70 @@ BEGIN
 
     // Depth Post-processing (Upscale algorithm + Dilation + Edge Threshold + Mesh Cut)
     // Height 70 = 14 (upscale) + 14 (dilate) + 14 (thresh) + 14 (mesh cut) + 14 padding
-    GROUPBOX  "Depth Post-processing", -1,          4, 174, 290,  84
-    LTEXT     "Upscale:", -1,                       10, 186,  40,  10
-    COMBOBOX  IDC_UPSCALE_COMBO,                    52, 184, 232,  60,
+    GROUPBOX  "Depth Post-processing", -1,          4, 188, 290,  84
+    LTEXT     "Upscale:", -1,                       10, 200,  40,  10
+    COMBOBOX  IDC_UPSCALE_COMBO,                    52, 198, 232,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT     "Edge Dilate (0-16 px):", -1,         10, 202, 100,  10
+    LTEXT     "Edge Dilate (0-16 px):", -1,         10, 244, 100,  10
     CONTROL   "", IDC_DILATE_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 202, 130,  12
-    LTEXT     "4 px", IDC_DILATE_LABEL,            244, 202,  24,  10, SS_RIGHT
-    LTEXT     "Edge Threshold (0-1):",  -1,         10, 216, 100,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 244, 130,  12
+    LTEXT     "4 px", IDC_DILATE_LABEL,            244, 258,  24,  10, SS_RIGHT
+    LTEXT     "Edge Threshold (0-1):",  -1,         10, 244, 100,  10
     CONTROL   "", IDC_EDGETHRESH_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 216, 130,  12
-    LTEXT     "0.20", IDC_EDGETHRESH_LABEL,        244, 216,  24,  10, SS_RIGHT
-    LTEXT     "Mesh Cut Thresh (0-1):", -1,         10, 230, 100,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 244, 130,  12
+    LTEXT     "0.20", IDC_EDGETHRESH_LABEL,        244, 258,  24,  10, SS_RIGHT
+    LTEXT     "Mesh Cut Thresh (0-1):", -1,         10, 244, 100,  10
     CONTROL   "", IDC_DISCTHRESH_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 230, 130,  12
-    LTEXT     "0.10", IDC_DISCTHRESH_LABEL,        244, 230,  24,  10, SS_RIGHT
-    LTEXT     "WMF Dilate Inset (0-8 px):", -1,    10, 244, 110,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 244, 130,  12
+    LTEXT     "0.10", IDC_DISCTHRESH_LABEL,        244, 258,  24,  10, SS_RIGHT
+    LTEXT     "WMF Dilate Inset (0-8 px):", -1,    10, 258, 110,  10
     CONTROL   "", IDC_WMFINSET_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 120, 244, 120,  12
-    LTEXT     "2 px", IDC_WMFINSET_LABEL,          244, 244,  24,  10, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 120, 258, 120,  12
+    LTEXT     "2 px", IDC_WMFINSET_LABEL,          244, 258,  24,  10, SS_RIGHT
 
     // ONNX Model + DA3-Streaming checkbox
-    GROUPBOX  "ONNX Model", -1,                     4, 264, 290,  58
-    LTEXT     "File:",     -1,                     10, 278,  20,  10
-    COMBOBOX  IDC_MODEL_COMBO,                     32, 276, 200,  80,
+    GROUPBOX  "ONNX Model", -1,                     4, 278, 290,  58
+    LTEXT     "File:",     -1,                     10, 292,  20,  10
+    COMBOBOX  IDC_MODEL_COMBO,                     32, 290, 200,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON "Reload",   IDC_RELOAD_BTN,        236, 274,  52,  14
+    PUSHBUTTON "Reload",   IDC_RELOAD_BTN,        236, 288,  52,  14
     AUTOCHECKBOX "DA3-Streaming  (temporal alignment, uses da3-small.onnx)",
-              IDC_STREAM_CHECK,                    10, 293, 278,  12
+              IDC_STREAM_CHECK,                    10, 307, 278,  12
     LTEXT     "Switching model or provider takes effect after Reload.", -1,
-                                                   10, 307, 278,  10
+                                                   10, 321, 278,  10
 
     // Apply row
     // Mesh Inspector (debug) — translate viewport and rotate mesh
-    GROUPBOX  "Mesh Inspector (debug)", -1,              4, 326, 290,  98
-    LTEXT     "Translate X (-1..1):", -1,               10, 338,  80,  10
+    GROUPBOX  "Mesh Inspector (debug)", -1,              4, 340, 290,  98
+    LTEXT     "Translate X (-1..1):", -1,               10, 422,  80,  10
     CONTROL   "", IDC_INSP_TX_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 338, 148,  12
-    LTEXT     "0.00", IDC_INSP_TX_LABEL,              244, 338,  32,  10, SS_RIGHT
-    LTEXT     "Translate Y (-1..1):", -1,               10, 352,  80,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 422, 148,  12
+    LTEXT     "0.00", IDC_INSP_TX_LABEL,              244, 422,  32,  10, SS_RIGHT
+    LTEXT     "Translate Y (-1..1):", -1,               10, 422,  80,  10
     CONTROL   "", IDC_INSP_TY_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 352, 148,  12
-    LTEXT     "0.00", IDC_INSP_TY_LABEL,              244, 352,  32,  10, SS_RIGHT
-    LTEXT     "Translate Z (-0.5..0.5):", -1,           10, 366,  80,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 422, 148,  12
+    LTEXT     "0.00", IDC_INSP_TY_LABEL,              244, 422,  32,  10, SS_RIGHT
+    LTEXT     "Translate Z (-0.5..0.5):", -1,           10, 422,  80,  10
     CONTROL   "", IDC_INSP_TZ_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 366, 148,  12
-    LTEXT     "0.00", IDC_INSP_TZ_LABEL,              244, 366,  32,  10, SS_RIGHT
-    LTEXT     "Rotate Y (-90..90 deg):", -1,            10, 380,  80,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 422, 148,  12
+    LTEXT     "0.00", IDC_INSP_TZ_LABEL,              244, 422,  32,  10, SS_RIGHT
+    LTEXT     "Rotate Y (-90..90 deg):", -1,            10, 422,  80,  10
     CONTROL   "", IDC_INSP_RY_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 380, 148,  12
-    LTEXT     "0 deg", IDC_INSP_RY_LABEL,             244, 380,  32,  10, SS_RIGHT
-    LTEXT     "Rotate X (-90..90 deg):", -1,            10, 394,  80,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 422, 148,  12
+    LTEXT     "0 deg", IDC_INSP_RY_LABEL,             244, 422,  32,  10, SS_RIGHT
+    LTEXT     "Rotate X (-90..90 deg):", -1,            10, 422,  80,  10
     CONTROL   "", IDC_INSP_RX_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 394, 148,  12
-    LTEXT     "0 deg", IDC_INSP_RX_LABEL,             244, 394,  32,  10, SS_RIGHT
-    LTEXT     "Rotate Z (-90..90 deg):", -1,            10, 408,  80,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 422, 148,  12
+    LTEXT     "0 deg", IDC_INSP_RX_LABEL,             244, 422,  32,  10, SS_RIGHT
+    LTEXT     "Rotate Z (-90..90 deg):", -1,            10, 422,  80,  10
     CONTROL   "", IDC_INSP_RZ_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 408, 148,  12
-    LTEXT     "0 deg", IDC_INSP_RZ_LABEL,             244, 408,  32,  10, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 422, 148,  12
+    LTEXT     "0 deg", IDC_INSP_RZ_LABEL,             244, 422,  32,  10, SS_RIGHT
 
-    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 428, 290, 14
+    PUSHBUTTON "Apply All + Reload", IDC_APPLY_BTN,  4, 442, 290, 14
 
     // Status
-    GROUPBOX  "Active Inference Status", -1,        4, 446, 290,  24
-    LTEXT     "", IDC_GPU_INFO,                    10, 456, 278,  12,
+    GROUPBOX  "Active Inference Status", -1,        4, 460, 290,  24
+    LTEXT     "", IDC_GPU_INFO,                    10, 470, 278,  12,
               SS_NOPREFIX | SS_ENDELLIPSIS
 END

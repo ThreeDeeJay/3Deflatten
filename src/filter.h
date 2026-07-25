@@ -96,6 +96,10 @@ private:
     std::vector<uint8_t> m_prevLumaSmall; // previous frame luma, downsampled
     int                  m_lumaSmW = 0, m_lumaSmH = 0;
     float                m_accumDx = 0.f, m_accumDy = 0.f;
+    // Black bar crop (cached, re-detected periodically)
+    int                  m_cropLeft = 0, m_cropTop = 0;
+    int                  m_cropRight = 0, m_cropBottom = 0;
+    int                  m_cropDetectCounter = 0; // counts down; re-detect when <= 0
 
     // Estimate global 2D translation between luma images using Lucas-Kanade.
     // Returns (dx, dy) in SOURCE-RESOLUTION pixels. smallW/H: downsampled dims.

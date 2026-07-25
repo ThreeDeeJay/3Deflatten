@@ -131,6 +131,7 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.inspectRotY      = getF(L"inspectRotY",   0.0f);
     m_cfg.inspectRotX      = getF(L"inspectRotX",   0.0f);
     m_cfg.inspectRotZ      = getF(L"inspectRotZ",   0.0f);
+    m_cfg.autoCropBlackBars = getI(L"autoCropBlackBars", 1) ? TRUE : FALSE;
     m_cfg.discThresh       = getF(L"discThresh", 0.10f);
 
     std::wstring mp = getStr(L"modelPath");
@@ -177,6 +178,7 @@ void C3DeflattenFilter::SaveIni() const {
     setF(L"inspectRotY",       m_cfg.inspectRotY);
     setF(L"inspectRotX",       m_cfg.inspectRotX);
     setF(L"inspectRotZ",       m_cfg.inspectRotZ);
+    setI(L"autoCropBlackBars", m_cfg.autoCropBlackBars ? 1 : 0);
     setF(L"discThresh",        m_cfg.discThresh);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
 
@@ -214,6 +216,7 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.inspectRotY      = 0.0f;
     m_cfg.inspectRotX      = 0.0f;
     m_cfg.inspectRotZ      = 0.0f;
+    m_cfg.autoCropBlackBars = TRUE;
     m_cfg.discThresh       = 0.10f;
     m_hadRealDepth    = false;
     m_skipEvery       = 1;
@@ -413,6 +416,34 @@ void C3DeflattenFilter::HotkeyThread() {
         for (int i = 0; i < 3 && !m_hotkeyStop.load(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+}
+
+// ── Black bar detection ───────────────────────────────────────────────────────
+// Scans the BGRA frame to find the innermost rows/columns that are NOT
+// entirely black (max channel value <= threshold). Sampling every 8 pixels
+// per row/column keeps this fast even at 1920×1080.
+static void DetectBlackBars(const BYTE* bgra, int w, int h, int stride,
+                              int& outLeft, int& outTop, int& outRight, int& outBottom,
+                              int threshold = 16) {
+    outLeft = 0; outTop = 0; outRight = w - 1; outBottom = h - 1;
+    auto rowBlack = [&](int y) {
+        for (int x = 0; x < w; x += 8) {
+            const BYTE* p = bgra + y * stride + x * 4;
+            if (p[0] > threshold || p[1] > threshold || p[2] > threshold) return false;
+        }
+        return true;
+    };
+    auto colBlack = [&](int x, int yFrom, int yTo) {
+        for (int y = yFrom; y <= yTo; y += 8) {
+            const BYTE* p = bgra + y * stride + x * 4;
+            if (p[0] > threshold || p[1] > threshold || p[2] > threshold) return false;
+        }
+        return true;
+    };
+    for (int y = 0;   y < h / 2; ++y)  { if (!rowBlack(y))              { outTop    = y;   break; } }
+    for (int y = h-1; y > h / 2; --y)  { if (!rowBlack(y))              { outBottom = y;   break; } }
+    for (int x = 0;   x < w / 2; ++x)  { if (!colBlack(x, outTop, outBottom)) { outLeft   = x;   break; } }
+    for (int x = w-1; x > w / 2; --x)  { if (!colBlack(x, outTop, outBottom)) { outRight  = x;   break; } }
 }
 
 void C3DeflattenFilter::DepthWorkerThread() {
