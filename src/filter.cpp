@@ -354,7 +354,7 @@ HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
     if (!bmi) return E_FAIL;
     int outW, outH;
     OutputDimensions(bmi->biWidth, abs((int)bmi->biHeight), outW, outH);
-    pProps->cBuffers=1; pProps->cbBuffer=outW*outH*4;
+    pProps->cBuffers=12; pProps->cbBuffer=outW*outH*4;
     pProps->cbAlign=1;  pProps->cbPrefix=0;
     ALLOCATOR_PROPERTIES actual;
     HRESULT hr = pAlloc->SetProperties(pProps, &actual);
