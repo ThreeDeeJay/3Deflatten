@@ -324,6 +324,8 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
                        m_cfg.flipDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_SETCHECK,
                        m_cfg.showDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessage(hwnd, IDC_AUTOCROP_CHECK, BM_SETCHECK,
+                       m_cfg.autoCropBlackBars ? BST_CHECKED : BST_UNCHECKED, 0);
 
     // Show/hide Provider row based on runtime
     bool isTrtRtx = (m_cfg.inferenceRuntime != InferenceRuntime::OnnxRuntime);
@@ -367,6 +369,8 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
     m_cfg.flipDepth   = (SendDlgItemMessage(hwnd, IDC_FLIP_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
     m_cfg.showDepth   = (SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                        ? TRUE : FALSE;
+    m_cfg.autoCropBlackBars = (SendDlgItemMessage(hwnd, IDC_AUTOCROP_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
     m_cfg.inferenceRuntime = (InferenceRuntime)std::min(2,
         std::max(0, (int)SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_GETCURSEL, 0, 0)));

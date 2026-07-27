@@ -105,6 +105,8 @@ private:
         float inspectRotX;    // radians
         float inspectRotZ;    // radians
         float pad2, pad3;
+        // row 6 — crop UV bounds for black bar mesh clipping [0,1]
+        float cropUVL, cropUVT, cropUVR, cropUVB;
     };
 
     // ── Mesh reprojection + GS culling + UV-warp hole-fill (two-pass) ────────

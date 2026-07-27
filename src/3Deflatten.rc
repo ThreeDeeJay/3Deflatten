@@ -28,7 +28,7 @@ BEGIN
 
     // Output (Mode + Flip + Depth overlay + Auto-crop + Infill)
     // h=80: 14 header + 12 mode + 14 flip + 14 depth + 14 autocrop + 14 infill + 12 padding
-    GROUPBOX  "Output",    -1,                      4, 102, 140,  80
+    GROUPBOX  "Output",    -1,                      4, 102, 140,  84
     LTEXT     "Mode:",     -1,                     10, 115,  28,  10
     COMBOBOX  IDC_MODE_COMBO,                      40, 113, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
