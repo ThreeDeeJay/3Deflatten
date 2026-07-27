@@ -30,7 +30,7 @@
 #define IDC_DILATE_LABEL   1022   // "4 px" label
 #define IDC_EDGETHRESH_SLIDER 1023 // Edge contrast threshold
 #define IDC_EDGETHRESH_LABEL  1024 // "0.20" label
-#define IDC_AUTOCROP_CHECK 1024   // Auto-crop black bars
+#define IDC_AUTOCROP_CHECK 1042   // Auto-crop black bars
 #define IDC_UPSCALE_COMBO  1025   // Depth upscale algorithm: Bilinear / JBU / Weighted Mode
 #define IDC_DISCTHRESH_SLIDER 1026 // Mesh edge-cut threshold (gap creation)
 #define IDC_DISCTHRESH_LABEL  1027 // "0.10" label
