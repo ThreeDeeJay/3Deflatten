@@ -109,30 +109,31 @@ void C3DeflattenFilter::LoadIni() {
         return buf;
     };
 
-    m_cfg.convergence  = getF(L"convergence", 0.250f);
-    m_cfg.separation   = getF(L"separation",  0.050f);
-    m_cfg.depthSmooth  = getF(L"depthSmooth", 0.0f);
-    m_cfg.outputMode   = (OutputMode)getI(L"outputMode",  (int)OutputMode::SideBySide);
-    m_cfg.gpuProvider  = (GPUProvider)getI(L"gpuProvider", (int)GPUProvider::Auto);
-    m_cfg.flipDepth    = getI(L"flipDepth", 0) ? TRUE : FALSE;
-    m_cfg.infillMode   = (InfillMode)getI(L"infillMode", (int)InfillMode::Outer);
-    m_cfg.showDepth    = getI(L"showDepth", 0) ? TRUE : FALSE;
-    m_cfg.depthViewKey = getI(L"depthViewKey", 161);  // 161 = VK_RSHIFT
-    m_cfg.inferenceRuntime = (InferenceRuntime)getI(L"inferenceRuntime", 0);
-    m_cfg.depthMaxDim      = getI(L"depthMaxDim", 0);
-    m_cfg.meshDiv          = getI(L"meshDiv", 2);
-    m_cfg.depthDilate      = getI(L"depthDilate", 4);
-    m_cfg.depthEdgeThresh  = getF(L"depthEdgeThresh", 0.20f);
-    m_cfg.upscaleMode      = (DepthUpscaleMode)getI(L"upscaleMode", 0);
-    m_cfg.wmfDilateInset   = getI(L"wmfDilateInset", 2);
-    m_cfg.inspectTransX    = getF(L"inspectTransX", 0.0f);
-    m_cfg.inspectTransY    = getF(L"inspectTransY", 0.0f);
-    m_cfg.inspectTransZ    = getF(L"inspectTransZ", 0.0f);
-    m_cfg.inspectRotY      = getF(L"inspectRotY",   0.0f);
-    m_cfg.inspectRotX      = getF(L"inspectRotX",   0.0f);
-    m_cfg.inspectRotZ      = getF(L"inspectRotZ",   0.0f);
+    m_cfg.convergence       = getF(L"convergence", 0.250f);
+    m_cfg.separation        = getF(L"separation",  0.050f);
+    m_cfg.depthSmooth       = getF(L"depthSmooth", 0.0f);
+    m_cfg.outputMode        = (OutputMode)getI(L"outputMode",  (int)OutputMode::SideBySide);
+    m_cfg.gpuProvider       = (GPUProvider)getI(L"gpuProvider", (int)GPUProvider::Auto);
+    m_cfg.flipDepth         = getI(L"flipDepth", 0) ? TRUE : FALSE;
+    m_cfg.infillMode        = (InfillMode)getI(L"infillMode", (int)InfillMode::Outer);
+    m_cfg.showDepth         = getI(L"showDepth", 0) ? TRUE : FALSE;
+    m_cfg.depthViewKey      = getI(L"depthViewKey", 161);  // 161 = VK_RSHIFT
+    m_cfg.inferenceRuntime  = (InferenceRuntime)getI(L"inferenceRuntime", 0);
+    m_cfg.depthMaxDim       = getI(L"depthMaxDim", 0);
+    m_cfg.meshDiv           = getI(L"meshDiv", 2);
+    m_cfg.depthDilate       = getI(L"depthDilate", 4);
+    m_cfg.depthEdgeThresh   = getF(L"depthEdgeThresh", 0.20f);
+    m_cfg.upscaleMode       = (DepthUpscaleMode)getI(L"upscaleMode", 0);
+    m_cfg.wmfDilateInset    = getI(L"wmfDilateInset", 2);
+    m_cfg.inspectTransX     = getF(L"inspectTransX", 0.0f);
+    m_cfg.inspectTransY     = getF(L"inspectTransY", 0.0f);
+    m_cfg.inspectTransZ     = getF(L"inspectTransZ", 0.0f);
+    m_cfg.inspectRotY       = getF(L"inspectRotY",   0.0f);
+    m_cfg.inspectRotX       = getF(L"inspectRotX",   0.0f);
+    m_cfg.inspectRotZ       = getF(L"inspectRotZ",   0.0f);
+    m_cfg.outputBuffers     = getI(L"outputBuffers", 8);
     m_cfg.autoCropBlackBars = getI(L"autoCropBlackBars", 1) ? TRUE : FALSE;
-    m_cfg.discThresh       = getF(L"discThresh", 0.10f);
+    m_cfg.discThresh        = getF(L"discThresh", 0.10f);
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
@@ -178,6 +179,7 @@ void C3DeflattenFilter::SaveIni() const {
     setF(L"inspectRotY",       m_cfg.inspectRotY);
     setF(L"inspectRotX",       m_cfg.inspectRotX);
     setF(L"inspectRotZ",       m_cfg.inspectRotZ);
+    setI(L"outputBuffers",     m_cfg.outputBuffers);
     setI(L"autoCropBlackBars", m_cfg.autoCropBlackBars ? 1 : 0);
     setF(L"discThresh",        m_cfg.discThresh);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
@@ -216,6 +218,7 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.inspectRotY      = 0.0f;
     m_cfg.inspectRotX      = 0.0f;
     m_cfg.inspectRotZ      = 0.0f;
+    m_cfg.outputBuffers     = 8;
     m_cfg.autoCropBlackBars = TRUE;
     m_cfg.cropLeft   = 0;
     m_cfg.cropTop    = 0;
@@ -358,7 +361,13 @@ HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
     if (!bmi) return E_FAIL;
     int outW, outH;
     OutputDimensions(bmi->biWidth, abs((int)bmi->biHeight), outW, outH);
-    pProps->cBuffers=1; pProps->cbBuffer=outW*outH*4;
+    // Request the configured number of output buffers so the downstream
+    // renderer can queue frames ahead of their presentation time, preventing
+    // frame drops when depth inference or rendering takes variable time.
+    CAutoLock lk(&m_csConfig);
+    int wantBufs = std::max(1, m_cfg.outputBuffers);
+    pProps->cBuffers  = std::max((long)wantBufs, pProps->cBuffers);
+    pProps->cbBuffer  = outW*outH*4;
     pProps->cbAlign=1;  pProps->cbPrefix=0;
     ALLOCATOR_PROPERTIES actual;
     HRESULT hr = pAlloc->SetProperties(pProps, &actual);

@@ -94,6 +94,7 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_SMOOTH_SLIDER,     TBM_SETRANGE, TRUE, MAKELPARAM(0, SMOOTH_TICKS));
         SendDlgItemMessage(hwnd, IDC_DILATE_SLIDER,     TBM_SETRANGE, TRUE, MAKELPARAM(0, DILATE_MAX));
         SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
+        SendDlgItemMessage(hwnd, IDC_OUTBUFS_SLIDER,    TBM_SETRANGE, TRUE, MAKELPARAM(1, 60));
         SendDlgItemMessage(hwnd, IDC_DISCTHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
         SendDlgItemMessage(hwnd, IDC_WMFINSET_SLIDER,   TBM_SETRANGE, TRUE, MAKELPARAM(0, 8));
         SendDlgItemMessage(hwnd, IDC_INSP_TX_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
@@ -324,6 +325,8 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
                        m_cfg.flipDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_SETCHECK,
                        m_cfg.showDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessage(hwnd, IDC_OUTBUFS_SLIDER, TBM_SETPOS, TRUE,
+                       std::min(60, std::max(1, m_cfg.outputBuffers)));
     SendDlgItemMessage(hwnd, IDC_AUTOCROP_CHECK, BM_SETCHECK,
                        m_cfg.autoCropBlackBars ? BST_CHECKED : BST_UNCHECKED, 0);
 
@@ -370,6 +373,8 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
                         ? TRUE : FALSE;
     m_cfg.showDepth   = (SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
+    m_cfg.outputBuffers = std::min(60, std::max(1,
+                        (int)SendDlgItemMessage(hwnd, IDC_OUTBUFS_SLIDER, TBM_GETPOS, 0, 0)));
     m_cfg.autoCropBlackBars = (SendDlgItemMessage(hwnd, IDC_AUTOCROP_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
     m_cfg.inferenceRuntime = (InferenceRuntime)std::min(2,
@@ -410,6 +415,8 @@ void C3DeflattenProp::UpdateValueLabels(HWND hwnd) {
     SetDlgItemTextW(hwnd, IDC_SEP_LABEL, buf);
     swprintf_s(buf, L"%.2f", m_cfg.depthSmooth);
     SetDlgItemTextW(hwnd, IDC_SMOOTH_LABEL, buf);
+    swprintf_s(buf, L"%d", m_cfg.outputBuffers);
+    SetDlgItemTextW(hwnd, IDC_OUTBUFS_LABEL, buf);
     swprintf_s(buf, L"%d px", m_cfg.depthDilate);
     SetDlgItemTextW(hwnd, IDC_DILATE_LABEL, buf);
     swprintf_s(buf, L"%.2f", m_cfg.depthEdgeThresh);

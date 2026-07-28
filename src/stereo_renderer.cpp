@@ -257,8 +257,10 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     // geometry is generated there, saving GPU work on invisible pixels.
     if (uv.x < g_cropUVL || uv.x > g_cropUVR ||
         uv.y < g_cropUVT || uv.y > g_cropUVB) {
-        o.pos        = float4(10.0, 10.0, 0.5, 1.0);  // off-screen
-        o.smoothDepth = 0.0; o.skirtBlend = 0.0;
+        o.pos         = float4(10.0, 10.0, 0.5, 1.0);
+        o.uv          = uv;          // must initialize all output semantics
+        o.smoothDepth = 0.0;
+        o.skirtBlend  = 0.0;
         return o;
     }
 
