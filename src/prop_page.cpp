@@ -155,7 +155,7 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         HWND hCtl = (HWND)lParam;
         int  id   = GetDlgCtrlID(hCtl);
         if (id==IDC_CONV_SLIDER || id==IDC_SEP_SLIDER || id==IDC_SMOOTH_SLIDER ||
-            id==IDC_OUTBUFS_SLIDER || id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER ||
+            id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER ||
             id==IDC_WMFINSET_SLIDER ||
             id==IDC_INSP_TX_SLIDER || id==IDC_INSP_TY_SLIDER ||
             id==IDC_INSP_TZ_SLIDER || id==IDC_INSP_RY_SLIDER ||
@@ -325,6 +325,10 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
                        m_cfg.flipDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_SETCHECK,
                        m_cfg.showDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessage(hwnd, IDC_OUTBUFS_SLIDER, TBM_SETPOS, TRUE,
+                       std::min(60, std::max(1, m_cfg.outputBuffers)));
+    SendDlgItemMessage(hwnd, IDC_AUTOCROP_CHECK, BM_SETCHECK,
+                       m_cfg.autoCropBlackBars ? BST_CHECKED : BST_UNCHECKED, 0);
 
     // Show/hide Provider row based on runtime
     bool isTrtRtx = (m_cfg.inferenceRuntime != InferenceRuntime::OnnxRuntime);
@@ -368,6 +372,10 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
     m_cfg.flipDepth   = (SendDlgItemMessage(hwnd, IDC_FLIP_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
     m_cfg.showDepth   = (SendDlgItemMessage(hwnd, IDC_DEPTH_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
+                        ? TRUE : FALSE;
+    m_cfg.outputBuffers = std::min(60, std::max(1,
+                        (int)SendDlgItemMessage(hwnd, IDC_OUTBUFS_SLIDER, TBM_GETPOS, 0, 0)));
+    m_cfg.autoCropBlackBars = (SendDlgItemMessage(hwnd, IDC_AUTOCROP_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
                         ? TRUE : FALSE;
     m_cfg.inferenceRuntime = (InferenceRuntime)std::min(2,
         std::max(0, (int)SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_GETCURSEL, 0, 0)));

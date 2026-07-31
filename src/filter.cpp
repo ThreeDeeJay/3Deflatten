@@ -109,31 +109,31 @@ void C3DeflattenFilter::LoadIni() {
         return buf;
     };
 
-    m_cfg.convergence  = getF(L"convergence", 0.250f);
-    m_cfg.separation   = getF(L"separation",  0.050f);
-    m_cfg.depthSmooth  = getF(L"depthSmooth", 0.0f);
-    m_cfg.outputMode   = (OutputMode)getI(L"outputMode",  (int)OutputMode::SideBySide);
-    m_cfg.gpuProvider  = (GPUProvider)getI(L"gpuProvider", (int)GPUProvider::Auto);
-    m_cfg.flipDepth    = getI(L"flipDepth", 0) ? TRUE : FALSE;
-    m_cfg.infillMode   = (InfillMode)getI(L"infillMode", (int)InfillMode::Outer);
-    m_cfg.showDepth    = getI(L"showDepth", 0) ? TRUE : FALSE;
-    m_cfg.depthViewKey = getI(L"depthViewKey", 161);  // 161 = VK_RSHIFT
-    m_cfg.inferenceRuntime = (InferenceRuntime)getI(L"inferenceRuntime", 0);
-    m_cfg.depthMaxDim      = getI(L"depthMaxDim", 0);
-    m_cfg.meshDiv          = getI(L"meshDiv", 2);
-    m_cfg.depthDilate      = getI(L"depthDilate", 4);
-    m_cfg.depthEdgeThresh  = getF(L"depthEdgeThresh", 0.20f);
-    m_cfg.upscaleMode      = (DepthUpscaleMode)getI(L"upscaleMode", 0);
-    m_cfg.wmfDilateInset   = getI(L"wmfDilateInset", 2);
-    m_cfg.inspectTransX    = getF(L"inspectTransX", 0.0f);
-    m_cfg.inspectTransY    = getF(L"inspectTransY", 0.0f);
-    m_cfg.inspectTransZ    = getF(L"inspectTransZ", 0.0f);
-    m_cfg.inspectRotY      = getF(L"inspectRotY",   0.0f);
-    m_cfg.inspectRotX      = getF(L"inspectRotX",   0.0f);
-    m_cfg.inspectRotZ      = getF(L"inspectRotZ",   0.0f);
+    m_cfg.convergence       = getF(L"convergence", 0.250f);
+    m_cfg.separation        = getF(L"separation",  0.050f);
+    m_cfg.depthSmooth       = getF(L"depthSmooth", 0.0f);
+    m_cfg.outputMode        = (OutputMode)getI(L"outputMode",  (int)OutputMode::SideBySide);
+    m_cfg.gpuProvider       = (GPUProvider)getI(L"gpuProvider", (int)GPUProvider::Auto);
+    m_cfg.flipDepth         = getI(L"flipDepth", 0) ? TRUE : FALSE;
+    m_cfg.infillMode        = (InfillMode)getI(L"infillMode", (int)InfillMode::Outer);
+    m_cfg.showDepth         = getI(L"showDepth", 0) ? TRUE : FALSE;
+    m_cfg.depthViewKey      = getI(L"depthViewKey", 161);  // 161 = VK_RSHIFT
+    m_cfg.inferenceRuntime  = (InferenceRuntime)getI(L"inferenceRuntime", 0);
+    m_cfg.depthMaxDim       = getI(L"depthMaxDim", 0);
+    m_cfg.meshDiv           = getI(L"meshDiv", 2);
+    m_cfg.depthDilate       = getI(L"depthDilate", 4);
+    m_cfg.depthEdgeThresh   = getF(L"depthEdgeThresh", 0.20f);
+    m_cfg.upscaleMode       = (DepthUpscaleMode)getI(L"upscaleMode", 0);
+    m_cfg.wmfDilateInset    = getI(L"wmfDilateInset", 2);
+    m_cfg.inspectTransX     = getF(L"inspectTransX", 0.0f);
+    m_cfg.inspectTransY     = getF(L"inspectTransY", 0.0f);
+    m_cfg.inspectTransZ     = getF(L"inspectTransZ", 0.0f);
+    m_cfg.inspectRotY       = getF(L"inspectRotY",   0.0f);
+    m_cfg.inspectRotX       = getF(L"inspectRotX",   0.0f);
+    m_cfg.inspectRotZ       = getF(L"inspectRotZ",   0.0f);
     m_cfg.outputBuffers     = getI(L"outputBuffers", 8);
     m_cfg.autoCropBlackBars = getI(L"autoCropBlackBars", 1) ? TRUE : FALSE;
-    m_cfg.discThresh       = getF(L"discThresh", 0.10f);
+    m_cfg.discThresh        = getF(L"discThresh", 0.10f);
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
@@ -220,6 +220,10 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.inspectRotZ      = 0.0f;
     m_cfg.outputBuffers     = 8;
     m_cfg.autoCropBlackBars = TRUE;
+    m_cfg.cropLeft   = 0;
+    m_cfg.cropTop    = 0;
+    m_cfg.cropRight  = 0;
+    m_cfg.cropBottom = 0;
     m_cfg.discThresh       = 0.10f;
     m_hadRealDepth    = false;
     m_skipEvery       = 1;
@@ -477,9 +481,29 @@ void C3DeflattenFilter::DepthWorkerThread() {
         DeflattenConfig cfg;
         { CAutoLock lk(&m_csConfig); cfg = m_cfg; }
 
+        // Black bar crop: pass only the visible content to the depth model
+        // so inference isn\'t wasted on black pixels. The cropped depth is
+        // then embedded back into a full-frame buffer (0 = far for bars).
+        int cL = 0, cT = 0, cW = w, cH = h;
+        if (cfg.autoCropBlackBars) {
+            if (--m_cropDetectCounter <= 0) {
+                DetectBlackBars(bgra.data(), w, h, w*4,
+                                m_cropLeft, m_cropTop, m_cropRight, m_cropBottom);
+                m_cropDetectCounter = 60;
+                // Share detected bounds with render thread for mesh UV clipping
+                CAutoLock cfgLk(&m_csConfig);
+                m_cfg.cropLeft   = m_cropLeft;
+                m_cfg.cropTop    = m_cropTop;
+                m_cfg.cropRight  = (m_cropRight  > 0) ? m_cropRight  : w - 1;
+                m_cfg.cropBottom = (m_cropBottom > 0) ? m_cropBottom : h - 1;
+            }
+            cL = m_cropLeft; cT = m_cropTop;
+            cW = ((m_cropRight  > 0) ? m_cropRight  : w-1) - cL + 1;
+            cH = ((m_cropBottom > 0) ? m_cropBottom : h-1) - cT + 1;
+        }
         DepthResult result;
         auto t0 = std::chrono::steady_clock::now();
-        HRESULT hr = m_depth->Estimate(bgra.data(), w, h, w*4,
+        HRESULT hr = m_depth->Estimate(bgra.data() + cT*(w*4) + cL*4, cW, cH, w*4,
                                         true /*isBGR*/,
                                         cfg.flipDepth == TRUE,
                                         cfg.depthSmooth,
@@ -489,6 +513,17 @@ void C3DeflattenFilter::DepthWorkerThread() {
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
 
+        // Embed cropped depth into full-frame buffer
+        if (SUCCEEDED(hr) && (cW < w || cH < h)) {
+            std::vector<float> full((size_t)w * h, 0.0f);
+            for (int row = 0; row < result.height; ++row)
+                std::copy(result.data.begin() + row * result.width,
+                          result.data.begin() + row * result.width + result.width,
+                          full.begin() + (size_t)(cT + row) * w + cL);
+            result.data  = std::move(full);
+            result.width = w;
+            result.height = h;
+        }
         if (SUCCEEDED(hr)) {
             std::lock_guard<std::mutex> lk(m_cacheMtx);
             m_cachedDepth = std::move(result.data);
