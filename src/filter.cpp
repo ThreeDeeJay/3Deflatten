@@ -131,9 +131,13 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.inspectRotY       = getF(L"inspectRotY",   0.0f);
     m_cfg.inspectRotX       = getF(L"inspectRotX",   0.0f);
     m_cfg.inspectRotZ       = getF(L"inspectRotZ",   0.0f);
-    m_cfg.outputBuffers     = getI(L"outputBuffers", 8);
-    m_cfg.autoCropBlackBars = getI(L"autoCropBlackBars", 1) ? TRUE : FALSE;
+    m_cfg.outputBuffers     = std::min(60, std::max(1, getI(L"outputBuffers", 8)));
     m_cfg.discThresh        = getF(L"discThresh", 0.10f);
+    m_cfg.autoCropBlackBars = getI(L"autoCropBlackBars", 1) ? TRUE : FALSE;
+    m_cfg.cropLeft          = 0
+    m_cfg.cropTop           = 0
+    m_cfg.cropRight         = 0
+    m_cfg.cropBottom        = 0
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
@@ -364,9 +368,7 @@ HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
     // Request the configured number of output buffers so the downstream
     // renderer can queue frames ahead of their presentation time, preventing
     // frame drops when depth inference or rendering takes variable time.
-    CAutoLock lk(&m_csConfig);
-    int wantBufs = std::max(1, m_cfg.outputBuffers);
-    pProps->cBuffers  = std::max((long)wantBufs, pProps->cBuffers);
+    pProps->cBuffers  = std::max(1, m_cfg.outputBuffers);
     pProps->cbBuffer  = outW*outH*4;
     pProps->cbAlign=1;  pProps->cbPrefix=0;
     ALLOCATOR_PROPERTIES actual;
