@@ -93,7 +93,7 @@ BEGIN
     LTEXT     "Switching model or provider takes effect after Reload.", -1,
                                                    10, 335, 278,  10
 
-    // Mesh Inspector (debug) — y=340, h=98 = 14 header + 6 rows*14 + 0 padding
+    // Mesh — y=354, h=98 = 14 header + 6 rows*14 + 0 padding
     GROUPBOX  "Mesh", -1,              4, 354, 290,  98
     LTEXT     "Translate X (-1..1):", -1,               10, 366,  80,  10
     CONTROL   "", IDC_INSP_TX_SLIDER, "msctls_trackbar32",
