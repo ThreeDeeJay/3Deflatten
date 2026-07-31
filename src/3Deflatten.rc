@@ -12,7 +12,7 @@ STYLE DS_SETFONT | DS_CONTROL | WS_CHILD
 FONT 8, "MS Shell Dlg", 400, 0, 1
 BEGIN
     // Stereo Parameters
-    GROUPBOX  "Stereo Parameters", -1,              4,   2, 290,  94
+    GROUPBOX  "Stereo Parameters", -1,              4,   2, 290,  98
     LTEXT     "Convergence (screen-plane depth, 0-1):", -1, 10, 14, 200, 10
     CONTROL   "", IDC_CONV_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  24, 242,  14
@@ -39,8 +39,8 @@ BEGIN
                                IDC_AUTOCROP_CHECK,  10, 157, 128,  12
     LTEXT     "Buffers:", -1,           10, 173,  72,  10
     CONTROL   "", IDC_OUTBUFS_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  14, 173, 60,  12
-    LTEXT     "8", IDC_OUTBUFS_LABEL,             188, 173,  16,  10, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  34, 173, 60,  12
+    LTEXT     "8", IDC_OUTBUFS_LABEL,             88, 173,  16,  10, SS_RIGHT
     LTEXT     "Infill:",   -1,                     10, 187,  28,  10
     COMBOBOX  IDC_INFILL_COMBO,                    40, 185, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
@@ -94,7 +94,7 @@ BEGIN
                                                    10, 335, 278,  10
 
     // Mesh Inspector (debug) — y=340, h=98 = 14 header + 6 rows*14 + 0 padding
-    GROUPBOX  "Mesh Inspector (debug)", -1,              4, 354, 290,  98
+    GROUPBOX  "Mesh", -1,              4, 354, 290,  98
     LTEXT     "Translate X (-1..1):", -1,               10, 366,  80,  10
     CONTROL   "", IDC_INSP_TX_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 366, 148,  12
@@ -109,8 +109,8 @@ BEGIN
     LTEXT     "0.00", IDC_INSP_TZ_LABEL,              244, 394,  32,  10, SS_RIGHT
     LTEXT     "Rotate Y (-90..90 deg):", -1,            10, 408,  80,  10
     CONTROL   "", IDC_INSP_RY_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 310, 148,  12
-    LTEXT     "0 deg", IDC_INSP_RY_LABEL,             244, 310,  32,  10, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 408, 148,  12
+    LTEXT     "0 deg", IDC_INSP_RY_LABEL,             244, 408,  32,  10, SS_RIGHT
     LTEXT     "Rotate X (-90..90 deg):", -1,            10, 422,  80,  10
     CONTROL   "", IDC_INSP_RX_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 422, 148,  12
