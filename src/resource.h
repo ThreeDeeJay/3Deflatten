@@ -47,8 +47,8 @@
 #define IDC_INSP_RX_LABEL     1039
 #define IDC_INSP_RZ_SLIDER    1040
 #define IDC_INSP_RZ_LABEL     1041
-#define IDC_AUTOCROP_CHECK    1042 // Auto-crop black bars
-#define IDC_OUTBUFS_SLIDER    1043 // Output frame buffer count
+#define IDC_AUTOCROP_CHECK    1042
+#define IDC_OUTBUFS_SLIDER    1043
 #define IDC_OUTBUFS_LABEL     1044
 
 // ── Trackbar style constants (commctrl.h equivalents for rc.exe) ──────────────
