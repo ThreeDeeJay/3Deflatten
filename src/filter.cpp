@@ -134,10 +134,10 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.outputBuffers     = std::min(60, std::max(1, getI(L"outputBuffers", 8)));
     m_cfg.discThresh        = getF(L"discThresh", 0.10f);
     m_cfg.autoCropBlackBars = getI(L"autoCropBlackBars", 1) ? TRUE : FALSE;
-    m_cfg.cropLeft          = 0
-    m_cfg.cropTop           = 0
-    m_cfg.cropRight         = 0
-    m_cfg.cropBottom        = 0
+    m_cfg.cropLeft          = 0;
+    m_cfg.cropTop           = 0;
+    m_cfg.cropRight         = 0;
+    m_cfg.cropBottom        = 0;
 
     std::wstring mp = getStr(L"modelPath");
     if (!mp.empty()) m_modelPath = mp;
