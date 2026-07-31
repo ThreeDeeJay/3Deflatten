@@ -37,9 +37,9 @@ BEGIN
                                    IDC_DEPTH_CHECK, 10, 143, 130,  12
     AUTOCHECKBOX "Auto-crop black bars",
                                IDC_AUTOCROP_CHECK,  10, 157, 128,  12
-    LTEXT     "Out buffers (1-60):", -1,           10, 173,  72,  10
+    LTEXT     "Buffers:", -1,           10, 173,  72,  10
     CONTROL   "", IDC_OUTBUFS_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  84, 173, 100,  12
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  14, 173, 60,  12
     LTEXT     "8", IDC_OUTBUFS_LABEL,             188, 173,  16,  10, SS_RIGHT
     LTEXT     "Infill:",   -1,                     10, 187,  28,  10
     COMBOBOX  IDC_INFILL_COMBO,                    40, 185, 100,  60,
@@ -107,7 +107,7 @@ BEGIN
     CONTROL   "", IDC_INSP_TZ_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 394, 148,  12
     LTEXT     "0.00", IDC_INSP_TZ_LABEL,              244, 394,  32,  10, SS_RIGHT
-    LTEXT     "Rotate Y (-90..90 deg):", -1,            10, 310,  80,  10
+    LTEXT     "Rotate Y (-90..90 deg):", -1,            10, 408,  80,  10
     CONTROL   "", IDC_INSP_RY_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,      92, 310, 148,  12
     LTEXT     "0 deg", IDC_INSP_RY_LABEL,             244, 310,  32,  10, SS_RIGHT
