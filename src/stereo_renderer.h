@@ -105,7 +105,7 @@ private:
         float inspectRotX;    // radians
         float inspectRotZ;    // radians
         float pad2, pad3;
-        // row 6 — crop UV bounds [0,1]; 0/1 = no crop
+        // row 6 — crop UV bounds for black bar mesh clipping [0,1]
         float cropUVL, cropUVT, cropUVR, cropUVB;
     };
 

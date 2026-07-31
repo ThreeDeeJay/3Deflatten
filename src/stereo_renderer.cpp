@@ -40,9 +40,6 @@ cbuffer CBStereo : register(b0) {
     // row 5
     float  g_inspectRotX; float g_inspectRotZ;
     float  g_pad2; float g_pad3;
-    // row 6
-    float  g_cropUVL; float g_cropUVT;
-    float  g_cropUVR; float g_cropUVB;
 };
 Texture2D<float4> g_srcTex   : register(t0);
 Texture2D<float>  g_depthTex : register(t1);
@@ -230,9 +227,6 @@ cbuffer CBStereo : register(b0) {
     // row 5 — mesh inspector X/Z rotation
     float  g_inspectRotX; float g_inspectRotZ;
     float  g_pad2; float g_pad3;
-    // row 6 — crop UV bounds for black bar mesh clipping [0,1]
-    float  g_cropUVL; float g_cropUVT;
-    float  g_cropUVR; float g_cropUVB;
 };
 Texture2D<float> g_depthTex : register(t1);
 SamplerState     g_sampler  : register(s0);
@@ -252,14 +246,6 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     float  depth = g_depthTex.SampleLevel(g_sampler, depUV, 0).r;
     // Z translate applied before disparity so it shifts stereo separation too.
     depth = saturate(depth + g_inspectTransZ);
-
-    // Clip vertices in black bar regions off-screen (no mesh on black pixels).
-    if (uv.x < g_cropUVL || uv.x > g_cropUVR ||
-        uv.y < g_cropUVT || uv.y > g_cropUVB) {
-        o.pos = float4(10.0, 10.0, 0.5, 1.0);
-        o.uv = uv; o.smoothDepth = 0.0; o.skirtBlend = 0.0;
-        return o;
-    }
 
     // Spatially-averaged depth used ONLY by MeshGS's cut decision below —
     // NOT for disparity/geometry, which still uses the single-sample
@@ -310,10 +296,10 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
     // Clamp so sky (depth=0 after normalisation) writes z=0.999 not z=1.0,
     // keeping it distinct from the DSV clear value the hole-fill tests against.
     // 3D inspector rotation + translation (Euler XYZ, radians, around NDC origin).
-    float3 ndc3 = float3(ndcX, ndcY, 1.0 - max(depth, 0.001));
+    float3 p = float3(ndcX, ndcY, 1.0 - max(depth, 0.001));
     // Pitch (X)
     float cX=cos(g_inspectRotX), sX=sin(g_inspectRotX);
-    float3 px = float3(ndc3.x, ndc3.y*cX - ndc3.z*sX, ndc3.y*sX + ndc3.z*cX);
+    float3 px = float3(p.x, p.y*cX - p.z*sX, p.y*sX + p.z*cX);
     // Yaw (Y)
     float cY=cos(g_inspectRotY), sY=sin(g_inspectRotY);
     float3 py = float3(px.x*cY + px.z*sY, px.y, -px.x*sY + px.z*cY);
@@ -397,8 +383,6 @@ cbuffer CBStereo : register(b0) {
     float g_inspectTransZ; float g_inspectRotY;
     float g_inspectRotX; float g_inspectRotZ;
     float g_pad2; float g_pad3;
-    float g_cropUVL; float g_cropUVT;
-    float g_cropUVR; float g_cropUVB;
 };
 Texture2D<float4> g_srcTex   : register(t0);
 Texture2D<float>  g_depthTex : register(t1);
@@ -900,10 +884,6 @@ void StereoRenderer::RenderGPU(const BYTE* srcFrame, int srcW, int srcH,
         cb->inspectRotZ   = cfg.inspectRotZ * 3.14159f / 180.f;
         cb->pad2          = 0.f;
         cb->pad3          = 0.f;
-        cb->cropUVL = (cfg.cropRight  > 0 && srcW > 0) ? (float)cfg.cropLeft   / srcW : 0.0f;
-        cb->cropUVT = (cfg.cropBottom > 0 && srcH > 0) ? (float)cfg.cropTop    / srcH : 0.0f;
-        cb->cropUVR = (cfg.cropRight  > 0 && srcW > 0) ? (float)cfg.cropRight  / srcW : 1.0f;
-        cb->cropUVB = (cfg.cropBottom > 0 && srcH > 0) ? (float)cfg.cropBottom / srcH : 1.0f;
         cbBase = *cb;   // save for mesh eye-sign updates
         m_ctx->Unmap(m_cb.Get(), 0);
     }
