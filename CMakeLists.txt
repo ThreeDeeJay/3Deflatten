@@ -22,6 +22,13 @@ set(WINSDK_LIB_DIR "$ENV{WindowsSdkDir}Lib/$ENV{WindowsSDKVersion}/um/${ARCH_SUF
 set(WINSDK_INC_DIR "$ENV{WindowsSdkDir}Include/$ENV{WindowsSDKVersion}"
     CACHE PATH "Windows SDK include root")
 
+# ── Clean up stale git state in FetchContent cache ─────────────────────────
+execute_process(
+  COMMAND git clean -fd
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/_deps/win_classic_samples-src"
+  ERROR_QUIET OUTPUT_QUIET
+)
+
 # ── DirectShow base classes ───────────────────────────────────────────────────
 FetchContent_Declare(win_classic_samples
     GIT_REPOSITORY https://github.com/microsoft/Windows-classic-samples.git
