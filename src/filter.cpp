@@ -223,6 +223,9 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.inspectRotX      = 0.0f;
     m_cfg.inspectRotZ      = 0.0f;
     m_cfg.outputBuffers     = 8;
+    m_bFirstFrame          = true;
+    m_rtFrameDur           = 0;
+    m_rtNextOut            = 0;
     m_cfg.autoCropBlackBars = TRUE;
     m_cfg.cropLeft   = 0;
     m_cfg.cropTop    = 0;
@@ -357,6 +360,14 @@ HRESULT C3DeflattenFilter::CheckTransform(const CMediaType* pmtIn,
     return S_OK;
 }
 
+// Reset the timestamp pre-advance state so seeks/segments start cleanly.
+HRESULT C3DeflattenFilter::NewSegment(REFERENCE_TIME tStart, REFERENCE_TIME tStop, double dRate) {
+    m_bFirstFrame = true;
+    m_rtFrameDur  = 0;   // re-detect from first frame\'s timestamps
+    m_rtNextOut   = 0;
+    return __super::NewSegment(tStart, tStop, dRate);
+}
+
 HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
                                              ALLOCATOR_PROPERTIES* pProps) {
     ASSERT(m_pInput->IsConnected());
@@ -365,9 +376,9 @@ HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
     if (!bmi) return E_FAIL;
     int outW, outH;
     OutputDimensions(bmi->biWidth, abs((int)bmi->biHeight), outW, outH);
-    // Request the configured number of output buffers so the downstream
-    // renderer can queue frames ahead of their presentation time, preventing
-    // frame drops when depth inference or rendering takes variable time.
+    // Request outputBuffers buffers so the renderer can pre-queue frames.
+    // DO NOT take m_csConfig here — DecideBufferSize may be called while
+    // the filter state lock is held, causing a deadlock with CAutoLock.
     pProps->cBuffers  = std::max(1, m_cfg.outputBuffers);
     pProps->cbBuffer  = outW*outH*4;
     pProps->cbAlign=1;  pProps->cbPrefix=0;
@@ -934,9 +945,42 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
 
     pOut->SetActualDataLength(needed);
 
-    REFERENCE_TIME tStart, tStop;
-    if (SUCCEEDED(pIn->GetTime(&tStart, &tStop)))
-        pOut->SetTime(&tStart, &tStop);
+    // ── Timestamp pre-advancement: force downstream queue ─────────────────
+    // Deliver frames with timestamps N*frameDuration ahead of their actual
+    // presentation time so the renderer queues cfg.outputBuffers frames
+    // rather than presenting each one immediately on arrival.
+    // Technique adapted from HopperRender's DeliverToRenderer.
+    {
+        REFERENCE_TIME tStart = 0, tStop = 0;
+        bool gotTime = SUCCEEDED(pIn->GetTime(&tStart, &tStop));
+        if (gotTime) {
+            // Detect or refresh frame duration from live timestamps
+            if (tStop > tStart) m_rtFrameDur = tStop - tStart;
+            // Fall back to media type AvgTimePerFrame if not yet known
+            if (m_rtFrameDur <= 0 && m_pInput && m_pInput->IsConnected()) {
+                CMediaType mt; m_pInput->ConnectionMediaType(&mt);
+                if (mt.formattype == FORMAT_VideoInfo &&
+                    mt.FormatLength() >= sizeof(VIDEOINFOHEADER)) {
+                    auto* vih = reinterpret_cast<const VIDEOINFOHEADER*>(mt.Format());
+                    if (vih->AvgTimePerFrame > 0)
+                        m_rtFrameDur = vih->AvgTimePerFrame;
+                }
+            }
+            if (m_rtFrameDur > 0 && cfg.outputBuffers > 1) {
+                if (m_bFirstFrame) {
+                    // Pre-advance: first output timestamp is N frames ahead
+                    m_rtNextOut   = tStart + (REFERENCE_TIME)cfg.outputBuffers * m_rtFrameDur;
+                    m_bFirstFrame = false;
+                }
+                REFERENCE_TIME rtOut    = m_rtNextOut;
+                REFERENCE_TIME rtOutEnd = rtOut + m_rtFrameDur;
+                pOut->SetTime(&rtOut, &rtOutEnd);
+                m_rtNextOut += m_rtFrameDur;
+            } else {
+                pOut->SetTime(&tStart, &tStop);   // outputBuffers<=1: passthrough
+            }
+        }
+    }
     pOut->SetSyncPoint(TRUE);
     pOut->SetDiscontinuity(pIn->IsDiscontinuity() == S_OK);
 

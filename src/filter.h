@@ -34,6 +34,7 @@ public:
                            const CMediaType* pmtOut) override;
     HRESULT DecideBufferSize(IMemAllocator* pAlloc,
                              ALLOCATOR_PROPERTIES* pProps) override;
+    HRESULT NewSegment(REFERENCE_TIME tStart, REFERENCE_TIME tStop, double dRate) override;
     HRESULT Transform(IMediaSample* pIn, IMediaSample* pOut) override;
     HRESULT StartStreaming() override;
     HRESULT StopStreaming()  override;
@@ -100,6 +101,10 @@ private:
     int                  m_cropLeft = 0, m_cropTop = 0;
     int                  m_cropRight = 0, m_cropBottom = 0;
     int                  m_cropDetectCounter = 0; // counts down; re-detect when <= 0
+    // Output timestamp pre-advancement (forces downstream to queue N frames)
+    REFERENCE_TIME       m_rtNextOut   = 0;   // running output presentation time
+    REFERENCE_TIME       m_rtFrameDur  = 0;   // per-frame duration in 100-ns units
+    bool                 m_bFirstFrame = true;// reset by NewSegment / seek
 
     // Estimate global 2D translation between luma images using Lucas-Kanade.
     // Returns (dx, dy) in SOURCE-RESOLUTION pixels. smallW/H: downsampled dims.
