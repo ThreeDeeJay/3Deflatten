@@ -483,7 +483,16 @@ void C3DeflattenFilter::DepthWorkerThread() {
             std::unique_lock<std::mutex> lk(m_pendMtx);
             m_pendCV.wait(lk, [this]{ return m_pendReady || m_pendStop; });
             if (m_pendStop) break;
-            bgra.swap(m_pendBGRA);
+            // Copy from the ring slot on this worker thread — the Transform() thread
+        // already wrote the frame there and won't overwrite it until kRingSize
+        // more frames pass (safe at any practical frame rate).
+        {
+            const size_t sz = (size_t)h * w * 4;
+            if (bgra.size() != sz) bgra.resize(sz);
+            const auto& rslot = m_ring[slot];
+            if (rslot.bgra.size() >= sz)
+                memcpy(bgra.data(), rslot.bgra.data(), sz);
+        }
             w    = m_pendW;
             h    = m_pendH;
             slot = m_pendSlot;
@@ -799,9 +808,9 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         bool shouldPost = (m_skipCounter >= m_skipEvery);
         if (shouldPost) {
             m_skipCounter = 0;
-            const size_t bgraBytes = (size_t)m_inH * rgbaStride;
-            if (m_pendBGRA.size() != bgraBytes) m_pendBGRA.resize(bgraBytes);
-            memcpy(m_pendBGRA.data(), rgbaPtr, bgraBytes);
+            // Ring slot already holds the BGRA data (copied above for rendering).
+            // Signal the depth worker with just the slot index — it copies on its
+            // own thread so Transform() stays uniformly timed every frame.
             {
                 std::lock_guard<std::mutex> lk(m_pendMtx);
                 m_pendW     = m_inW;
