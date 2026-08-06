@@ -133,6 +133,16 @@ jobs:
         7z x "onnxruntime.zip"
         move "Win64" "onnxruntime\lib"
 
+    - name: Clean FetchContent
+      shell: pwsh
+      run: |
+        if (Test-Path "build\_deps\win_classic_samples-src\.git") {
+          cd "build\_deps\win_classic_samples-src"
+          git reset --hard HEAD
+          git clean -fd
+        }
+      continue-on-error: true
+
     - name: Configure
       run: >
         cmake
