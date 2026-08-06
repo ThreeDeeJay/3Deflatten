@@ -1080,14 +1080,12 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
             // flip with the wrong polarity makes foreground edges visually
             // SHRINK instead of expand once flipped.
             if (depthDilate > 0) {
-                if (wantWMF)
-                    wmf_dilate_cuda(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
-                                    s.d_depthHR[writeBuf], srcW, srcH,
-                                    depthDilate, depthEdgeThresh, flipDepth, wmfDilateInset, s.jbuStream);
-                else
-                    gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
-                               s.d_depthHR[writeBuf], srcW, srcH,
-                               depthDilate, depthEdgeThresh, flipDepth, s.jbuStream);
+                // All modes use the same separable max-dilation (gpu_dilate).
+                // wmf_dilate_cuda's nearest-neighbour boundary shift produced
+                // no cleaner result than the standard max-filter, so retired.
+                gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
+                           s.d_depthHR[writeBuf], srcW, srcH,
+                           depthDilate, depthEdgeThresh, flipDepth, s.jbuStream);
             }
             cudaMemcpyAsync(s.h_jbuOut[writeBuf], s.d_depthHR[writeBuf],
                             (size_t)srcW * srcH * sizeof(float),
@@ -2025,7 +2023,7 @@ HRESULT DepthEstimator::Estimate(const BYTE* srcData,
         // Edge dilation: expand foreground (high-depth) pixels outward to fill
         // the thin background halo at silhouette edges. Skipped for WMF —
         // its own internal bias (above) already grows the foreground natively.
-        if (depthDilate > 0 && upscaleMode != DepthUpscaleMode::WeightedMode)
+        if (depthDilate > 0)
             DilateDepth(out, srcWidth, srcHeight, depthDilate, depthEdgeThresh);
 
         // Temporal smoothing.  Disabled when DA3-Streaming is active because:
@@ -2152,7 +2150,7 @@ void DepthEstimator::PostprocessDepth(const float* raw,
     // Skipped for WMF — its own internal bias (derived from depthDilate
     // inside WMFResize) already grows the foreground natively within its
     // RGB-guided neighbourhood.
-    if (depthDilate > 0 && upscaleMode != DepthUpscaleMode::WeightedMode)
+    if (depthDilate > 0)
         DilateDepth(depth, dstW, dstH, depthDilate, depthEdgeThresh);
 }
 
