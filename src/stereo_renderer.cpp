@@ -342,6 +342,16 @@ MeshOut MeshVS(float2 uv : TEXCOORD) {
 // don't trigger spurious cuts regardless of how g_discThresh is set.
 [maxvertexcount(3)]
 void MeshGS(triangle MeshOut v[3], inout TriangleStream<MeshOut> stream) {
+    // Cull any triangle that has a vertex in the black bar (crop) region.
+    // MeshVS pushes those vertices off-screen, but mixed on/off-screen
+    // triangles at the boundary still get emitted, creating stretched
+    // degenerate geometry. Checking the source UV (unchanged by MeshVS)
+    // against the crop bounds catches boundary triangles cleanly.
+    [unroll] for (int k = 0; k < 3; ++k) {
+        if (v[k].uv.x < g_cropUVL || v[k].uv.x > g_cropUVR ||
+            v[k].uv.y < g_cropUVT || v[k].uv.y > g_cropUVB) return;
+    }
+
     float d0=v[0].smoothDepth, d1=v[1].smoothDepth, d2=v[2].smoothDepth;
     float maxDiff = max(max(abs(d0-d1),abs(d1-d2)),abs(d0-d2));
     if (maxDiff <= g_discThresh) {
