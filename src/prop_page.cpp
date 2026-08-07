@@ -95,6 +95,7 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         SendDlgItemMessage(hwnd, IDC_DILATE_SLIDER,     TBM_SETRANGE, TRUE, MAKELPARAM(0, DILATE_MAX));
         SendDlgItemMessage(hwnd, IDC_EDGETHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
         SendDlgItemMessage(hwnd, IDC_OUTBUFS_SLIDER,    TBM_SETRANGE, TRUE, MAKELPARAM(1, 60));
+        SendDlgItemMessage(hwnd, IDC_AUTOCROP_SLIDER,   TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
         SendDlgItemMessage(hwnd, IDC_DISCTHRESH_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, ETHRESH_TICKS));
         SendDlgItemMessage(hwnd, IDC_WMFINSET_SLIDER,   TBM_SETRANGE, TRUE, MAKELPARAM(0, 8));
         SendDlgItemMessage(hwnd, IDC_INSP_TX_SLIDER, TBM_SETRANGE, TRUE, MAKELPARAM(0, 200));
@@ -155,7 +156,7 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
         HWND hCtl = (HWND)lParam;
         int  id   = GetDlgCtrlID(hCtl);
         if (id==IDC_CONV_SLIDER || id==IDC_SEP_SLIDER || id==IDC_SMOOTH_SLIDER ||
-            id==IDC_OUTBUFS_SLIDER || id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER ||
+            id==IDC_OUTBUFS_SLIDER || id==IDC_AUTOCROP_SLIDER || id==IDC_DILATE_SLIDER || id==IDC_EDGETHRESH_SLIDER || id==IDC_DISCTHRESH_SLIDER ||
             id==IDC_WMFINSET_SLIDER ||
             id==IDC_INSP_TX_SLIDER || id==IDC_INSP_TY_SLIDER ||
             id==IDC_INSP_TZ_SLIDER || id==IDC_INSP_RY_SLIDER ||
@@ -191,9 +192,6 @@ INT_PTR C3DeflattenProp::OnReceiveMessage(HWND hwnd, UINT msg,
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_DEPTH_CHECK && note==BN_CLICKED) {
-            ReadControls(hwnd); PushConfig(); SetDirty(); break;
-        }
-        if (ctl==IDC_AUTOCROP_CHECK && note==BN_CLICKED) {
             ReadControls(hwnd); PushConfig(); SetDirty(); break;
         }
         if (ctl==IDC_UPSCALE_COMBO && note==CBN_SELCHANGE) {

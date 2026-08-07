@@ -99,7 +99,8 @@ struct DeflattenConfig {
     float       inspectRotX;    // mesh pitch, degrees [-90, 90]
     float       inspectRotZ;    // mesh roll,  degrees [-90, 90] // pixels to step inward from detected edge (default 2)
     int         outputBuffers;  // output allocator buffer count requested [1,60] default 8
-    BOOL        autoCropBlackBars; // detect and crop black bars before depth estimation
+    int         autoCropThreshold; // auto-crop: 0=off, 1-100 = threshold % of #FFFFFF
+                                   // (1=black only, 6≈default 16/255, 100=any pixel)
     int         cropLeft, cropTop, cropRight, cropBottom; // Detected crop region (pixels). Set by depth worker after bar detection; not user-configurable. Renderer uses these for mesh UV clipping.
     float       discThresh;    // mesh edge-cut threshold: depth jump between adjacent
                                 // mesh vertices above this culls the triangle, creating a

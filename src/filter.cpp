@@ -133,7 +133,7 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.inspectRotZ       = getF(L"inspectRotZ",   0.0f);
     m_cfg.outputBuffers     = std::min(60, std::max(1, getI(L"outputBuffers", 8)));
     m_cfg.discThresh        = getF(L"discThresh", 0.10f);
-    m_cfg.autoCropBlackBars = getI(L"autoCropBlackBars", 1) ? TRUE : FALSE;
+    m_cfg.autoCropThreshold = std::min(100, std::max(0, getI(L"autoCropThreshold", 6)));
     m_cfg.cropLeft          = 0;
     m_cfg.cropTop           = 0;
     m_cfg.cropRight         = 0;
@@ -184,7 +184,7 @@ void C3DeflattenFilter::SaveIni() const {
     setF(L"inspectRotX",       m_cfg.inspectRotX);
     setF(L"inspectRotZ",       m_cfg.inspectRotZ);
     setI(L"outputBuffers",     m_cfg.outputBuffers);
-    setI(L"autoCropBlackBars", m_cfg.autoCropBlackBars ? 1 : 0);
+    setI(L"autoCropThreshold", m_cfg.autoCropThreshold);
     setF(L"discThresh",        m_cfg.discThresh);
     WritePrivateProfileStringW(s, L"modelPath", m_modelPath.c_str(), p);
 
@@ -226,7 +226,7 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_bFirstFrame          = true;
     m_rtFrameDur           = 0;
     m_rtNextOut            = 0;
-    m_cfg.autoCropBlackBars = TRUE;
+    m_cfg.autoCropThreshold = 6; // ≈16/255*100; detects near-black bars
     m_cfg.cropLeft   = 0;
     m_cfg.cropTop    = 0;
     m_cfg.cropRight  = 0;
@@ -498,10 +498,12 @@ void C3DeflattenFilter::DepthWorkerThread() {
         // so inference isn\'t wasted on black pixels. The cropped depth is
         // then embedded back into a full-frame buffer (0 = far for bars).
         int cL = 0, cT = 0, cW = w, cH = h;
-        if (cfg.autoCropBlackBars) {
+        if (cfg.autoCropThreshold > 0) {
             if (--m_cropDetectCounter <= 0) {
+                // Convert 0-100 percentage to 0-255 pixel threshold
+                int thr = cfg.autoCropThreshold * 255 / 100;
                 DetectBlackBars(bgra.data(), w, h, w*4,
-                                m_cropLeft, m_cropTop, m_cropRight, m_cropBottom);
+                                m_cropLeft, m_cropTop, m_cropRight, m_cropBottom, thr);
                 m_cropDetectCounter = 60;
                 // Share detected bounds with render thread for mesh UV clipping
                 CAutoLock cfgLk(&m_csConfig);
