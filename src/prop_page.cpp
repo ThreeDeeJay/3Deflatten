@@ -372,8 +372,8 @@ void C3DeflattenProp::ReadControls(HWND hwnd) {
                         ? TRUE : FALSE;
     m_cfg.outputBuffers = std::min(60, std::max(1,
                         (int)SendDlgItemMessage(hwnd, IDC_OUTBUFS_SLIDER, TBM_GETPOS, 0, 0)));
-    m_cfg.autoCropBlackBars = (SendDlgItemMessage(hwnd, IDC_AUTOCROP_CHECK, BM_GETCHECK, 0, 0) == BST_CHECKED)
-                        ? TRUE : FALSE;
+    m_cfg.autoCropThreshold = std::min(100,std::max(0,
+                        (int)SendDlgItemMessage(hwnd, IDC_AUTOCROP_SLIDER, TBM_GETPOS, 0, 0)));
     m_cfg.inferenceRuntime = (InferenceRuntime)std::min(2,
         std::max(0, (int)SendDlgItemMessage(hwnd, IDC_RUNTIME_COMBO, CB_GETCURSEL, 0, 0)));
     // depthMaxDim: index 0=Auto(0), 1=518, 2=756, 3=1022
