@@ -35,8 +35,10 @@ BEGIN
     AUTOCHECKBOX "Flip Depth",    IDC_FLIP_CHECK,  10, 129, 130,  12
     AUTOCHECKBOX "Show Depth Map (Right Shift)",
                                    IDC_DEPTH_CHECK, 10, 143, 130,  12
-    AUTOCHECKBOX "Auto-crop black bars",
-                               IDC_AUTOCROP_CHECK,  10, 157, 128,  12
+    LTEXT     "Auto-crop threshold (0=off, 1-100%):", -1, 10, 157, 128, 10
+    CONTROL   "", IDC_AUTOCROP_SLIDER, "msctls_trackbar32",
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 140, 157,  90,  12
+    LTEXT     "6 %", IDC_AUTOCROP_LABEL,            234, 157,  22,  10, SS_RIGHT
     LTEXT     "Buffers:", -1,           10, 173,  72,  10
     CONTROL   "", IDC_OUTBUFS_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  34, 173, 60,  12
