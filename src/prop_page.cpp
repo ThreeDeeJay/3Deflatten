@@ -325,8 +325,7 @@ void C3DeflattenProp::PopulateControls(HWND hwnd) {
                        m_cfg.showDepth  ? BST_CHECKED : BST_UNCHECKED, 0);
     SendDlgItemMessage(hwnd, IDC_OUTBUFS_SLIDER, TBM_SETPOS, TRUE,
                        std::min(60, std::max(1, m_cfg.outputBuffers)));
-    SendDlgItemMessage(hwnd, IDC_AUTOCROP_CHECK, BM_SETCHECK,
-                       m_cfg.autoCropBlackBars ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessage(hwnd, IDC_AUTOCROP_SLIDER, TBM_SETPOS, TRUE, std::min(100,std::max(0,m_cfg.autoCropThreshold)));
 
     // Show/hide Provider row based on runtime
     bool isTrtRtx = (m_cfg.inferenceRuntime != InferenceRuntime::OnnxRuntime);
