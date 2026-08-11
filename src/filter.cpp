@@ -131,6 +131,7 @@ void C3DeflattenFilter::LoadIni() {
     m_cfg.inspectRotY       = getF(L"inspectRotY",   0.0f);
     m_cfg.inspectRotX       = getF(L"inspectRotX",   0.0f);
     m_cfg.inspectRotZ       = getF(L"inspectRotZ",   0.0f);
+    m_cfg.inputBuffers      = std::min(16, std::max(1, getI(L"inputBuffers",  2)));
     m_cfg.outputBuffers     = std::min(60, std::max(1, getI(L"outputBuffers", 8)));
     m_cfg.discThresh        = getF(L"discThresh", 0.10f);
     m_cfg.autoCropThreshold = std::min(100, std::max(0, getI(L"autoCropThreshold", 6)));
@@ -183,6 +184,7 @@ void C3DeflattenFilter::SaveIni() const {
     setF(L"inspectRotY",       m_cfg.inspectRotY);
     setF(L"inspectRotX",       m_cfg.inspectRotX);
     setF(L"inspectRotZ",       m_cfg.inspectRotZ);
+    setI(L"inputBuffers",      m_cfg.inputBuffers);
     setI(L"outputBuffers",     m_cfg.outputBuffers);
     setI(L"autoCropThreshold", m_cfg.autoCropThreshold);
     setF(L"discThresh",        m_cfg.discThresh);
@@ -196,6 +198,20 @@ CUnknown* WINAPI C3DeflattenFilter::CreateInstance(LPUNKNOWN pUnk, HRESULT* phr)
     LOG_INFO("CreateInstance");
     return new C3DeflattenFilter(pUnk, phr);
 }
+
+// ── Custom input pin: expose GetAllocatorRequirements ───────────────────────
+class CDeflattenInputPin : public CTransformInputPin {
+public:
+    CDeflattenInputPin(CTransformFilter* pTf, CCritSec* pLock, HRESULT* phr, LPCWSTR name)
+        : CTransformInputPin(NAME("CDeflattenInput"), pTf, pLock, phr, name) {}
+    STDMETHODIMP GetAllocatorRequirements(ALLOCATOR_PROPERTIES* pProps) override {
+        if (!pProps) return E_POINTER;
+        int n = static_cast<C3DeflattenFilter*>(m_pTransformFilter)->GetInputBuffers();
+        pProps->cBuffers = std::max(1, n);
+        pProps->cbBuffer = pProps->cbAlign = 1; pProps->cbPrefix = 0;
+        return S_OK;
+    }
+};
 
 C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     : CTransformFilter(L"3Deflatten", pUnk, CLSID_3Deflatten)
@@ -222,6 +238,7 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     m_cfg.inspectRotY      = 0.0f;
     m_cfg.inspectRotX      = 0.0f;
     m_cfg.inspectRotZ      = 0.0f;
+    m_cfg.inputBuffers      = 2;
     m_cfg.outputBuffers     = 8;
     m_bFirstFrame          = true;
     m_rtFrameDur           = 0;
@@ -366,6 +383,18 @@ HRESULT C3DeflattenFilter::NewSegment(REFERENCE_TIME tStart, REFERENCE_TIME tSto
     m_rtFrameDur  = 0;   // re-detect from first frame\'s timestamps
     m_rtNextOut   = 0;
     return __super::NewSegment(tStart, tStop, dRate);
+}
+
+CBasePin* C3DeflattenFilter::GetPin(int n) {
+    HRESULT hr = S_OK;
+    if (n == 0) {
+        if (!m_pInput) {
+            m_pInput = new CDeflattenInputPin(this, &m_csFilter, &hr, L"Input");
+            if (FAILED(hr)) { delete m_pInput; m_pInput = nullptr; }
+        }
+        return m_pInput;
+    }
+    return CTransformFilter::GetPin(n);
 }
 
 HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,

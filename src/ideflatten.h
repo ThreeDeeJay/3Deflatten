@@ -98,6 +98,7 @@ struct DeflattenConfig {
     float       inspectRotY;    // mesh yaw,   degrees [-90, 90]
     float       inspectRotX;    // mesh pitch, degrees [-90, 90]
     float       inspectRotZ;    // mesh roll,  degrees [-90, 90] // pixels to step inward from detected edge (default 2)
+    int         inputBuffers;   // input allocator buffer count [1,16] default 2
     int         outputBuffers;  // output allocator buffer count requested [1,60] default 8
     int         autoCropThreshold; // auto-crop: 0=off, 1-100 = threshold % of #FFFFFF
                                    // (1=black only, 6≈default 16/255, 100=any pixel)

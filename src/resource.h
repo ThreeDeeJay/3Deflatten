@@ -49,6 +49,8 @@
 #define IDC_INSP_RZ_LABEL     1041
 #define IDC_AUTOCROP_SLIDER   1042 // Auto-crop threshold (0-100 %)
 #define IDC_AUTOCROP_LABEL    1045 // "6 %" value label // Auto-crop black bars
+#define IDC_INBUFS_SLIDER     1046
+#define IDC_INBUFS_LABEL      1047 // "6 %" value label // Auto-crop black bars
 #define IDC_OUTBUFS_SLIDER    1043 // Output frame buffer count
 #define IDC_OUTBUFS_LABEL     1044
 
