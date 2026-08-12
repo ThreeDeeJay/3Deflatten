@@ -206,9 +206,8 @@ public:
         : CTransformInputPin(NAME("CDeflattenInput"), pTf, pLock, phr, name) {}
     STDMETHODIMP GetAllocatorRequirements(ALLOCATOR_PROPERTIES* pProps) override {
         if (!pProps) return E_POINTER;
-        int n = static_cast<C3DeflattenFilter*>(m_pTransformFilter)->GetInputBuffers();
-        pProps->cBuffers = std::max(1, n);
-        pProps->cbBuffer = pProps->cbAlign = 1; pProps->cbPrefix = 0;
+        pProps->cBuffers = std::max(1, static_cast<C3DeflattenFilter*>(m_pTransformFilter)->GetInputBuffers());
+        pProps->cbBuffer = 0; pProps->cbAlign = 1; pProps->cbPrefix = 0;
         return S_OK;
     }
 };
