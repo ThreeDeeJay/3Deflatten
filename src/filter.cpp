@@ -213,18 +213,6 @@ public:
     }
 };
 
-class CDeflattenInputPin : public CTransformInputPin {
-public:
-    CDeflattenInputPin(CTransformFilter* pTf, CCritSec* pLock, HRESULT* phr, LPCWSTR name)
-        : CTransformInputPin(NAME("CDeflattenInput"), pTf, pLock, phr, name) {}
-    STDMETHODIMP GetAllocatorRequirements(ALLOCATOR_PROPERTIES* pProps) override {
-        if (!pProps) return E_POINTER;
-        pProps->cBuffers = std::max(1, static_cast<C3DeflattenFilter*>(m_pTransformFilter)->GetInputBuffers());
-        pProps->cbBuffer = 0; pProps->cbAlign = 1; pProps->cbPrefix = 0;
-        return S_OK;
-    }
-};
-
 C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     : CTransformFilter(L"3Deflatten", pUnk, CLSID_3Deflatten)
 {
