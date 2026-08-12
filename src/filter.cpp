@@ -213,6 +213,18 @@ public:
     }
 };
 
+class CDeflattenInputPin : public CTransformInputPin {
+public:
+    CDeflattenInputPin(CTransformFilter* pTf, CCritSec* pLock, HRESULT* phr, LPCWSTR name)
+        : CTransformInputPin(NAME("CDeflattenInput"), pTf, pLock, phr, name) {}
+    STDMETHODIMP GetAllocatorRequirements(ALLOCATOR_PROPERTIES* pProps) override {
+        if (!pProps) return E_POINTER;
+        pProps->cBuffers = std::max(1, static_cast<C3DeflattenFilter*>(m_pTransformFilter)->GetInputBuffers());
+        pProps->cbBuffer = 0; pProps->cbAlign = 1; pProps->cbPrefix = 0;
+        return S_OK;
+    }
+};
+
 C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     : CTransformFilter(L"3Deflatten", pUnk, CLSID_3Deflatten)
 {
@@ -397,6 +409,17 @@ CBasePin* C3DeflattenFilter::GetPin(int n) {
     return CTransformFilter::GetPin(n);
 }
 
+CBasePin* C3DeflattenFilter::GetPin(int n) {
+    HRESULT hr = S_OK;
+    if (n == 0) {
+        if (!m_pInput) {
+            m_pInput = new CDeflattenInputPin(this, &m_csFilter, &hr, L"Input");
+            if (FAILED(hr)) { delete m_pInput; m_pInput = nullptr; }
+        }
+        return m_pInput;
+    }
+    return CTransformFilter::GetPin(n);
+}
 HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
                                              ALLOCATOR_PROPERTIES* pProps) {
     ASSERT(m_pInput->IsConnected());

@@ -34,6 +34,8 @@ public:
                            const CMediaType* pmtOut) override;
     HRESULT DecideBufferSize(IMemAllocator* pAlloc,
                              ALLOCATOR_PROPERTIES* pProps) override;
+    CBasePin* GetPin(int n) override;
+    int GetInputBuffers() const { CAutoLock lk(const_cast<CCritSec*>(&m_csConfig)); return m_cfg.inputBuffers; }
     HRESULT NewSegment(REFERENCE_TIME tStart, REFERENCE_TIME tStop, double dRate) override;
     HRESULT Transform(IMediaSample* pIn, IMediaSample* pOut) override;
     HRESULT StartStreaming() override;
