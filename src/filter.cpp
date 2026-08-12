@@ -386,14 +386,23 @@ HRESULT C3DeflattenFilter::NewSegment(REFERENCE_TIME tStart, REFERENCE_TIME tSto
 
 CBasePin* C3DeflattenFilter::GetPin(int n) {
     HRESULT hr = S_OK;
-    if (n == 0) {
-        if (!m_pInput) {
-            m_pInput = new CDeflattenInputPin(this, &hr, L"Input");
-            if (FAILED(hr)) { delete m_pInput; m_pInput = nullptr; }
+    // Mirror base class behaviour but substitute our custom input pin.
+    // IMPORTANT: base class creates BOTH pins together (when m_pInput==NULL);
+    // creating only the input pin here would leave m_pOutput==NULL and freeze.
+    if (m_pInput == nullptr) {
+        m_pInput = new CDeflattenInputPin(this, &hr, L"Input");
+        if (FAILED(hr) || !m_pInput) { delete m_pInput; m_pInput = nullptr; return nullptr; }
+        m_pOutput = new CTransformOutputPin(
+            NAME("Transform output pin"), this, &hr, L"Output");
+        if (FAILED(hr) || !m_pOutput) {
+            delete m_pInput;  m_pInput  = nullptr;
+            delete m_pOutput; m_pOutput = nullptr;
+            return nullptr;
         }
-        return m_pInput;
     }
-    return CTransformFilter::GetPin(n);
+    if (n == 0) return m_pInput;
+    if (n == 1) return m_pOutput;
+    return nullptr;
 }
 
 HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
