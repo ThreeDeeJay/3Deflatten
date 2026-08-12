@@ -396,17 +396,6 @@ CBasePin* C3DeflattenFilter::GetPin(int n) {
     return CTransformFilter::GetPin(n);
 }
 
-CBasePin* C3DeflattenFilter::GetPin(int n) {
-    HRESULT hr = S_OK;
-    if (n == 0) {
-        if (!m_pInput) {
-            m_pInput = new CDeflattenInputPin(this, &m_csFilter, &hr, L"Input");
-            if (FAILED(hr)) { delete m_pInput; m_pInput = nullptr; }
-        }
-        return m_pInput;
-    }
-    return CTransformFilter::GetPin(n);
-}
 HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
                                              ALLOCATOR_PROPERTIES* pProps) {
     ASSERT(m_pInput->IsConnected());
