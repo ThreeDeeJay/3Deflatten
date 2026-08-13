@@ -21,7 +21,7 @@ BEGIN
     CONTROL   "", IDC_SEP_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  54, 242,  14
     LTEXT     "0.050", IDC_SEP_LABEL,              256,  54,  32,  14, SS_RIGHT
-    LTEXT     "Temporal Smoothing (0=off; disabled when streaming):", -1, 10, 74, 200, 10
+    LTEXT     "Temporal Smoothing:", -1, 10, 74, 200, 10
     CONTROL   "", IDC_SMOOTH_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  10,  84, 242,  14
     LTEXT     "0.00", IDC_SMOOTH_LABEL,            256,  84,  32,  14, SS_RIGHT
@@ -33,20 +33,20 @@ BEGIN
     COMBOBOX  IDC_MODE_COMBO,                      40, 113, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     AUTOCHECKBOX "Flip Depth",    IDC_FLIP_CHECK,  10, 129, 130,  12
-    AUTOCHECKBOX "Show Depth Map (Right Shift)",
+    AUTOCHECKBOX "Show Depth Map (Right Ctrl)",
                                    IDC_DEPTH_CHECK, 10, 143, 130,  12
-    LTEXT     "Auto-crop threshold (0=off, 1-100%):", -1, 10, 157, 128, 10
+    LTEXT     "Auto-crop threshold (0=off, 1-100%):", -1, 10, 157, 62, 10
     CONTROL   "", IDC_AUTOCROP_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 140, 157,  90,  12
-    LTEXT     "6 %", IDC_AUTOCROP_LABEL,            234, 157,  22,  10, SS_RIGHT
-    LTEXT     "In buf:",  -1,                       10, 173,  28,  10
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 71, 156, 50, 13
+    LTEXT     "6 %", IDC_AUTOCROP_LABEL,            123, 158, 16, 9, SS_RIGHT
+    LTEXT     "Buffer:",  -1,                       10, 173,  21,  10
     CONTROL   "", IDC_INBUFS_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  40, 173,  38,  12
-    LTEXT     "2",  IDC_INBUFS_LABEL,               82, 173,  12,  10, SS_RIGHT
+    LTEXT     "2",  IDC_INBUFS_LABEL,               75, 174,   6,  10, SS_RIGHT
     LTEXT     "Out buf:", -1,                        96, 173,  34,  10
     CONTROL   "", IDC_OUTBUFS_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  34, 173, 60,  12
-    LTEXT     "8", IDC_OUTBUFS_LABEL,             88, 173,  16,  10, SS_RIGHT
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE,  81, 172, 50, 12
+    LTEXT     "8", IDC_OUTBUFS_LABEL,             131, 173, 7, 10, SS_RIGHT
     LTEXT     "Infill:",   -1,                     10, 187,  28,  10
     COMBOBOX  IDC_INFILL_COMBO,                    40, 185, 100,  60,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
@@ -83,9 +83,9 @@ BEGIN
     CONTROL   "", IDC_DISCTHRESH_SLIDER, "msctls_trackbar32",
               TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 258, 130,  12
     LTEXT     "0.10", IDC_DISCTHRESH_LABEL,        244, 258,  24,  10, SS_RIGHT
-    LTEXT     "WMF Dilate Inset (0-8 px):", -1,    10, 272, 110,  10
+    LTEXT     "WMF Dilate Inset:", -1,    10, 272, 110,  10
     CONTROL   "", IDC_WMFINSET_SLIDER, "msctls_trackbar32",
-              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 120, 272, 120,  12
+              TBS_NOTICKS | WS_CHILD | WS_VISIBLE, 110, 272, 130, 12
     LTEXT     "2 px", IDC_WMFINSET_LABEL,          244, 272,  24,  10, SS_RIGHT
 
     // ONNX Model + DA3-Streaming checkbox
@@ -94,7 +94,7 @@ BEGIN
     COMBOBOX  IDC_MODEL_COMBO,                     32, 304, 200,  80,
               CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     PUSHBUTTON "Reload",   IDC_RELOAD_BTN,        236, 302,  52,  14
-    AUTOCHECKBOX "DA3-Streaming  (temporal alignment, uses da3-small.onnx)",
+    AUTOCHECKBOX "Temporal Alignment Streaming",
               IDC_STREAM_CHECK,                    10, 321, 278,  12
     LTEXT     "Switching model or provider takes effect after Reload.", -1,
                                                    10, 335, 278,  10
