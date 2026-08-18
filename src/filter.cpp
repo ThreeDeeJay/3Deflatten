@@ -202,8 +202,8 @@ CUnknown* WINAPI C3DeflattenFilter::CreateInstance(LPUNKNOWN pUnk, HRESULT* phr)
 // ── Custom input pin: expose GetAllocatorRequirements ───────────────────────
 class CDeflattenInputPin : public CTransformInputPin {
 public:
-    CDeflattenInputPin(CTransformFilter* pTf, HRESULT* phr, LPCWSTR name)
-        : CTransformInputPin(NAME("CDeflattenInput"), pTf, phr, name) {}
+    CDeflattenInputPin(CTransformFilter* pTf, CCritSec* pLock, HRESULT* phr, LPCWSTR name)
+        : CTransformInputPin(NAME("CDeflattenInput"), pTf, pLock, phr, name) {}
     STDMETHODIMP GetAllocatorRequirements(ALLOCATOR_PROPERTIES* pProps) override {
         if (!pProps) return E_POINTER;
         pProps->cBuffers = std::max(1, static_cast<C3DeflattenFilter*>(m_pTransformFilter)->GetInputBuffers());
@@ -386,23 +386,14 @@ HRESULT C3DeflattenFilter::NewSegment(REFERENCE_TIME tStart, REFERENCE_TIME tSto
 
 CBasePin* C3DeflattenFilter::GetPin(int n) {
     HRESULT hr = S_OK;
-    // Mirror base class behaviour but substitute our custom input pin.
-    // IMPORTANT: base class creates BOTH pins together (when m_pInput==NULL);
-    // creating only the input pin here would leave m_pOutput==NULL and freeze.
-    if (m_pInput == nullptr) {
-        m_pInput = new CDeflattenInputPin(this, &hr, L"Input");
-        if (FAILED(hr) || !m_pInput) { delete m_pInput; m_pInput = nullptr; return nullptr; }
-        m_pOutput = new CTransformOutputPin(
-            NAME("Transform output pin"), this, &hr, L"Output");
-        if (FAILED(hr) || !m_pOutput) {
-            delete m_pInput;  m_pInput  = nullptr;
-            delete m_pOutput; m_pOutput = nullptr;
-            return nullptr;
+    if (n == 0) {
+        if (!m_pInput) {
+            m_pInput = new CDeflattenInputPin(this, &m_csFilter, &hr, L"Input");
+            if (FAILED(hr)) { delete m_pInput; m_pInput = nullptr; }
         }
+        return m_pInput;
     }
-    if (n == 0) return m_pInput;
-    if (n == 1) return m_pOutput;
-    return nullptr;
+    return CTransformFilter::GetPin(n);
 }
 
 HRESULT C3DeflattenFilter::DecideBufferSize(IMemAllocator* pAlloc,
@@ -432,6 +423,9 @@ void C3DeflattenFilter::StartDepthThread() {
     m_cacheReady = false;
     m_depthThread = std::thread([this]{ DepthWorkerThread(); });
     LOG_INFO("Depth worker thread started");
+    // Lazy-init FRUC interpolator on the depth worker thread (needs CUDA ctx)
+    // so it shares the same device context as the inference engine.
+    bool frucTriedInit = false;
 }
 
 void C3DeflattenFilter::StopDepthThread() {

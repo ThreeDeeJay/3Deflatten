@@ -323,6 +323,8 @@ struct DepthEstimator::TrtRtxSession {
 
     // Per-slot pinned host readback
     float*   h_output[NBUF]    = {};   // model-res readback (non-JBU path)
+    float*   h_rawNorm[NBUF]   = {};   // normalised LR depth [mw×mh] for FRUC
+    float*   d_rawNorm[NBUF]   = {};   // device scratch for LR normalisation
     float*   h_jbuOut[NBUF]    = {};   // full-res readback  (JBU path, lazy-alloc)
 
     // Per-slot JBU device buffers (lazy-allocated on first JBU call per slot)
@@ -350,7 +352,8 @@ struct DepthEstimator::TrtRtxSession {
     int bufMW[NBUF]     = {}, bufMH[NBUF]     = {}; // model output dims
     int bufSrcW[NBUF]   = {}, bufSrcH[NBUF]   = {}; // source video dims
     int bufStride[NBUF] = {};                         // source stride
-    bool bufJBU[NBUF]   = {};                         // was JBU used for this slot?
+    bool bufJBU[NBUF]     = {};
+    bool bufRawNorm[NBUF] = {};                         // was JBU used for this slot?
 
     // Pipeline state
     int  pipeIdx   = 0;     // monotonically increasing frame counter
@@ -2647,6 +2650,14 @@ HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
         result.data   = std::move(depth);
         result.width  = srcW;
         result.height = srcH;
+        // Populate raw LR depth for FRUC (when available)
+        if (s.bufRawNorm[readBuf] && s.h_rawNorm[readBuf]) {
+            result.rawData.assign(s.h_rawNorm[readBuf],
+                                  s.h_rawNorm[readBuf] + mw*mh);
+            result.rawWidth  = mw;
+            result.rawHeight = mh;
+            s.bufRawNorm[readBuf] = false;
+        }
         return S_OK;
 
     } catch (const Ort::Exception& e) {

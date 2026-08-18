@@ -16,6 +16,10 @@
 #include "ideflatten.h"
 
 struct DepthResult {
+    // Raw normalised LR depth at model output resolution (populated by
+    // EstimateTrtRtx when m_skipEvery > 1) for FRUC interpolation.
+    std::vector<float> rawData;
+    int rawWidth = 0, rawHeight = 0;
     std::vector<float> data;   // row-major float depth [0,1], size = w*h
     int width;
     int height;
