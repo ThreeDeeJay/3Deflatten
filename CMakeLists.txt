@@ -598,7 +598,7 @@ if(ORT_BACKEND STREQUAL "Unified")
         target_link_libraries(3Deflatten PRIVATE CUDA::cudart)
     endif()
     if(TARGET jbu_cuda_obj)
-        target_link_libraries(3Deflatten PRIVATE $<TARGET_OBJECTS:fruc_interp>
+        target_link_libraries(3Deflatten PRIVATE $<TARGET_OBJECTS:fruc_cuda_obj>
     $<TARGET_OBJECTS:jbu_cuda_obj>)
     endif()
 endif()
