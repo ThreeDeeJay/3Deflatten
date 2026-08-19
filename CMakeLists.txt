@@ -495,6 +495,7 @@ set(SOURCES
     "${BASECLASSES_DIR}/dllentry.cpp"
     src/depth_estimator.cpp
     src/stereo_renderer.cpp
+    src/fruc_interp.cpp
     src/logger.cpp
     src/prop_page.cpp
     src/3Deflatten.rc
@@ -505,6 +506,7 @@ set(HEADERS
     src/depth_estimator.h src/stereo_renderer.h
     src/logger.h src/prop_page.h src/resource.h
     src/jbu_cuda.h
+    src/fruc_interp.h
 )
 
 # Unified backend compiles the CUDA JBU kernel into a separate OBJECT library
@@ -514,8 +516,10 @@ set(HEADERS
 if(ORT_BACKEND STREQUAL "Unified")
     enable_language(CUDA)
     add_library(jbu_cuda_obj OBJECT src/jbu_cuda.cu)
+    add_library(fruc_cuda_obj OBJECT src/fruc_interp.cu)
     set_target_properties(jbu_cuda_obj PROPERTIES CUDA_ARCHITECTURES "75;86;89")
     target_include_directories(jbu_cuda_obj PRIVATE src)
+    target_include_directories(fruc_cuda_obj PRIVATE src)
     message(STATUS "CUDA JBU: jbu_cuda_obj OBJECT library added (SM 75/86/89)")
 endif()
 
