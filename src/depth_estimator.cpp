@@ -1153,6 +1153,14 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     result.data   = std::move(out);
     result.width  = rsrcW;
     result.height = rsrcH;
+    // Populate normalised LR depth for FRUC depth interpolation
+    if (s.bufRawNorm[writeBuf] && s.h_rawNorm[writeBuf]) {
+        result.rawData.assign(s.h_rawNorm[writeBuf],
+                              s.h_rawNorm[writeBuf] + (size_t)rmw*rmh);
+        result.rawWidth  = rmw;
+        result.rawHeight = rmh;
+        s.bufRawNorm[writeBuf] = false;
+    }
     return S_OK;
 }
 
@@ -2650,14 +2658,6 @@ HRESULT DepthEstimator::EstimateStreaming(const BYTE* srcData,
         result.data   = std::move(depth);
         result.width  = srcW;
         result.height = srcH;
-        // Populate raw LR depth for FRUC (when available)
-        if (s.bufRawNorm[readBuf] && s.h_rawNorm[readBuf]) {
-            result.rawData.assign(s.h_rawNorm[readBuf],
-                                  s.h_rawNorm[readBuf] + mw*mh);
-            result.rawWidth  = mw;
-            result.rawHeight = mh;
-            s.bufRawNorm[readBuf] = false;
-        }
         return S_OK;
 
     } catch (const Ort::Exception& e) {

@@ -202,8 +202,8 @@ CUnknown* WINAPI C3DeflattenFilter::CreateInstance(LPUNKNOWN pUnk, HRESULT* phr)
 // ── Custom input pin: expose GetAllocatorRequirements ───────────────────────
 class CDeflattenInputPin : public CTransformInputPin {
 public:
-    CDeflattenInputPin(CTransformFilter* pTf, CCritSec* pLock, HRESULT* phr, LPCWSTR name)
-        : CTransformInputPin(NAME("CDeflattenInput"), pTf, pLock, phr, name) {}
+    CDeflattenInputPin(CTransformFilter* pTf, HRESULT* phr, LPCWSTR name)
+        : CTransformInputPin(NAME("CDeflattenInput"), pTf, phr, name) {}
     STDMETHODIMP GetAllocatorRequirements(ALLOCATOR_PROPERTIES* pProps) override {
         if (!pProps) return E_POINTER;
         pProps->cBuffers = std::max(1, static_cast<C3DeflattenFilter*>(m_pTransformFilter)->GetInputBuffers());
@@ -388,7 +388,7 @@ CBasePin* C3DeflattenFilter::GetPin(int n) {
     HRESULT hr = S_OK;
     if (n == 0) {
         if (!m_pInput) {
-            m_pInput = new CDeflattenInputPin(this, &m_csFilter, &hr, L"Input");
+            m_pInput = new CDeflattenInputPin(this, &hr, L"Input");
             if (FAILED(hr)) { delete m_pInput; m_pInput = nullptr; }
         }
         return m_pInput;
