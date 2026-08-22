@@ -5,7 +5,6 @@
 #include <cstring>
 #include <algorithm>
 #ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #define LOAD_LIB(n)    LoadLibraryA(n)
 #define GET_PROC(h,n)  (void*)GetProcAddress((HMODULE)(h),n)
