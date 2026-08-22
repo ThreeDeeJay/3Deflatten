@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "filter.h"
+#include "fruc_interp.h"  // full type needed only here
 #include "prop_page.h"
 #include "guids.h"
 #include <dvdmedia.h>
@@ -272,6 +273,7 @@ C3DeflattenFilter::C3DeflattenFilter(LPUNKNOWN pUnk, HRESULT* phr)
     if (phr) *phr = S_OK;
 }
 C3DeflattenFilter::~C3DeflattenFilter() {
+    delete m_frucInterp; m_frucInterp = nullptr;
     StopDepthThread();
     LOG_INFO("C3DeflattenFilter destroyed  frames=", m_frameCount);
 }

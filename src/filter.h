@@ -2,7 +2,7 @@
 // 3Deflatten – main DirectShow CTransformFilter
 #pragma once
 #include <condition_variable>
-#include "fruc_interp.h"
+class FRUCDepthInterp; // defined in fruc_interp.h
 #include <streams.h>
 #include <memory>
 #include <vector>
@@ -10,6 +10,7 @@
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
+class FRUCDepthInterp; // defined in fruc_interp.h
 #include "ideflatten.h"
 #include "depth_estimator.h"
 #include "stereo_renderer.h"
@@ -134,7 +135,7 @@ private:
     std::mutex              m_depthReadyMtx;
     std::condition_variable m_depthReadyCV;
 
-    std::unique_ptr<class FRUCDepthInterp> m_frucInterp;
+    FRUCDepthInterp*   m_frucInterp = nullptr; // owned; deleted in destructor
     std::vector<float>  m_prevRawDepth;     // LR depth from previous inference
     int                 m_prevRawW = 0, m_prevRawH = 0;
     int                 m_prevInferFrameNo = -1;
