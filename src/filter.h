@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 3Deflatten – main DirectShow CTransformFilter
 #pragma once
-#include <condition_variable>
-class FRUCDepthInterp; // defined in fruc_interp.h
 #include <streams.h>
 #include <memory>
 #include <vector>
@@ -10,7 +8,6 @@ class FRUCDepthInterp; // defined in fruc_interp.h
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
-class FRUCDepthInterp; // defined in fruc_interp.h
 #include "ideflatten.h"
 #include "depth_estimator.h"
 #include "stereo_renderer.h"
@@ -121,25 +118,6 @@ private:
     // Adaptive frame skipping: when inference is slower than the video frame rate,
     // skip posting frames to the worker so we always infer the LATEST frame rather
     // than a frame that will never be displayed.
-    // ── FRUC depth interpolation ──────────────────────────────────────────
-    // Per-frame depth ready slots: depth worker (and FRUC thread) signals
-    // each slot when that frame's depth is ready; Transform() waits on it.
-    struct DepthReadySlot {
-        int               frameNo = -1;
-        std::vector<float> depth;
-        int w=0, h=0;
-        bool              ready   = false;
-    };
-    static constexpr int kDepthSlots = 32; // must exceed max(S-1)
-    DepthReadySlot          m_depthReadySlots[kDepthSlots];
-    std::mutex              m_depthReadyMtx;
-    std::condition_variable m_depthReadyCV;
-
-    FRUCDepthInterp*   m_frucInterp = nullptr; // owned; deleted in destructor
-    std::vector<float>  m_prevRawDepth;     // LR depth from previous inference
-    int                 m_prevRawW = 0, m_prevRawH = 0;
-    int                 m_prevInferFrameNo = -1;
-
     // m_skipEvery = 1 → infer every frame; 2 → every other; 3 → every third, etc.
     int                m_skipEvery    = 1;      // updated each time worker returns
     int                m_skipCounter  = 0;      // counts Transform() calls for skip logic
