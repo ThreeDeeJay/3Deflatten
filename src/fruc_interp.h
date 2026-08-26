@@ -1,92 +1,105 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// fruc_interp.h — NvFRUC-based depth map interpolation for 3Deflatten.
+// fruc_interp.h — NvOFFRUC depth-map frame interpolation.
 //
-// Dynamically loads NvFRUC.dll at runtime; no compile-time NvFRUC SDK dependency.
-// Falls back silently (no interpolation) if the DLL is not present or the GPU
-// does not have hardware optical flow cores (Maxwell or older).
+// Uses NvOFFRUC.dll (NvOFFRUC SDK) loaded at runtime from the filter's own
+// directory — no compile-time dependency on any NVIDIA SDK.  All CUDA memory
+// management uses the CUDA Driver API (nvcuda.dll) loaded dynamically, so
+// there are zero static DLL imports for CUDA in this module; it cannot cause
+// a DLL-loader stall even when cudart is not on PATH.
 //
-// Architecture
-// ─────────────
-// When m_skipEvery > 1 (inference slower than source FPS), the depth worker
-// creates S-1 = m_skipEvery-1 FRUC instances, one per interpolated frame.
-// Each instance runs on NVOFA dedicated silicon, which is independent from the
-// CUDA cores used by TRT inference — so interpolation and the next inference
-// run simultaneously on different hardware.
-//
-// Depth encoding
-// ──────────────
-// FRUC requires NV12 or ARGB surfaces.  We use ARGB with 16-bit precision:
-//   • B = 0, G = low8(depth_u16), R = high8(depth_u16), A = 0xFF
-//   • depth_u16 = round(clamp(depth, 0,1) * 65535)
-// This encodes depth losslessly at ~0.0015 % precision, far better than 8-bit
-// (0.4 %), without colour information that could confuse motion estimation.
-//
-// Future reuse for RGB interpolation
-// ────────────────────────────────────
-// Swap the source frames from LR-depth ARGB to RGB ARGB — the FRUC pipeline
-// and the bidirectional warping are identical.
+// Lifetime: created lazily on the depth-worker thread after the first
+// successful inference (CUDA context already exists by then).  Destroyed when
+// the filter is torn down.  Safe to call Interpolate() from any thread.
 #pragma once
 #include <vector>
 #include <cstdint>
-#include <cuda_runtime.h>
-
-struct NvFRUC_Slot; // defined in fruc_interp.cpp
+#include <string>
+#include <memory>
 
 class FRUCDepthInterp {
 public:
     FRUCDepthInterp();
     ~FRUCDepthInterp();
 
-    // Initialise for given depth-map dimensions.
-    // maxInterp: maximum number of simultaneously needed interpolated frames
-    //            (= max expected m_skipEvery - 1; typically 1-7).
-    // Returns true if NvFRUC.dll was found and the GPU supports NvOFA.
-    bool Init(int depthW, int depthH, int maxInterp = 7);
+    // Init for given LR depth dimensions.  Loads NvOFFRUC.dll + nvcuda.dll
+    // from dllDir (Win64 folder).  maxInterp = max m_skipEvery-1 (typically ≤7).
+    // Returns true only if both DLLs load and GPU supports NVOFA.
+    bool Init(int w, int h, int maxInterp, const std::wstring& dllDir);
 
-    // Reconfigure slot count (cheap if numInterp ≤ already allocated).
-    // Called whenever m_skipEvery changes.
-    bool SetInterpCount(int numInterp);
+    // Reconfigure slot count when m_skipEvery changes (cheap if numInterp ≤ alloc'd).
+    void SetInterpCount(int numInterp);
 
-    // Interpolate numInterp frames between prevDepth[0..W*H-1] and currDepth.
-    // Both inputs must be in [0,1].  Blocking — intended to be called from a
-    // detached worker thread so inference continues on the inference stream.
-    // Returns numInterp depth maps in temporal order (t = 1/S, 2/S, …, (S-1)/S).
+    // Generate numInterp frames between prevDepth[w*h] and currDepth[w*h] (values
+    // in [0,1]).  Blocking: intended for a detached worker thread so inference
+    // continues on NVOFA hardware in parallel with CUDA cores.
+    // Returns numInterp float[w*h] maps in temporal order.
     std::vector<std::vector<float>> Interpolate(
         const float* prevDepth, const float* currDepth, int numInterp);
 
     bool IsAvailable() const { return m_ready; }
-    int  W()           const { return m_w; }
-    int  H()           const { return m_h; }
+    int  W() const { return m_w; }
+    int  H() const { return m_h; }
 
 private:
-    bool LoadFRUC();
-    bool AllocateSlots(int count);
-    void FreeSlots();
-    void FreeShared();
+    // Internal helpers (implemented in fruc_interp.cpp)
+    bool LoadNvOFFRUC(const std::wstring& dir);
+    bool LoadCUDA(const std::wstring& dir);
+    bool AllocBuffers();
+    void FreeBuffers();
+    bool CreateSlot(int idx);
+    void DestroySlot(int idx);
 
-    bool m_ready = false;
+    // ── CUDA Driver API function pointers (from nvcuda.dll) ─────────────────
+    void* m_hCUDA = nullptr;   // HMODULE nvcuda.dll
+    typedef unsigned long long CUdeviceptr_t;
+    typedef int (*PFN_cuInit)(unsigned int);
+    typedef int (*PFN_cuMemAlloc)(CUdeviceptr_t*, size_t);
+    typedef int (*PFN_cuMemFree)(CUdeviceptr_t);
+    typedef int (*PFN_cuMemcpyHtoD)(CUdeviceptr_t, const void*, size_t);
+    typedef int (*PFN_cuMemcpyDtoH)(void*, CUdeviceptr_t, size_t);
+    PFN_cuInit      m_cuInit      = nullptr;
+    PFN_cuMemAlloc  m_cuMemAlloc  = nullptr;
+    PFN_cuMemFree   m_cuMemFree   = nullptr;
+    PFN_cuMemcpyHtoD m_cuHtoD     = nullptr;
+    PFN_cuMemcpyDtoH m_cuDtoH     = nullptr;
+
+    // ── NvOFFRUC function pointers (from NvOFFRUC.dll) ──────────────────────
+    void* m_hFRUC = nullptr;   // HMODULE NvOFFRUC.dll
+    typedef void* NvOFFRUCHandle;
+    typedef int (*PFN_Create)(void*, NvOFFRUCHandle*);
+    typedef int (*PFN_RegRes)(NvOFFRUCHandle, void*);
+    typedef int (*PFN_Process)(NvOFFRUCHandle, void*, void*);
+    typedef int (*PFN_UnregRes)(NvOFFRUCHandle, void*);
+    typedef int (*PFN_Destroy)(NvOFFRUCHandle);
+    PFN_Create   m_fnCreate   = nullptr;
+    PFN_RegRes   m_fnRegRes   = nullptr;
+    PFN_Process  m_fnProcess  = nullptr;
+    PFN_UnregRes m_fnUnregRes = nullptr;
+    PFN_Destroy  m_fnDestroy  = nullptr;
+
+    // ── Per-interpolated-frame slot ──────────────────────────────────────────
+    struct Slot {
+        NvOFFRUCHandle hFRUC   = nullptr;
+        CUdeviceptr_t  d_out   = 0;      // ARGB output device buffer
+        void*          h_out   = nullptr; // host readback (malloc)
+        bool           regOk   = false;
+        void*          res[3]  = {};      // ptrs registered with FRUC: [out, prev, curr]
+    };
+
+    // Shared ARGB device buffers (written once per batch, read by all slots)
+    CUdeviceptr_t  m_d_prev = 0;
+    CUdeviceptr_t  m_d_curr = 0;
+    size_t         m_argbBytes = 0;
+
+    std::vector<Slot> m_slots;
     int  m_w = 0, m_h = 0;
-    int  m_activeSlots = 0;
-
-    // DLL function pointers (cast to the real types in .cpp)
-    void* m_hDLL       = nullptr;
-    void* m_fnCreate   = nullptr;
-    void* m_fnRegRes   = nullptr;
-    void* m_fnProcess  = nullptr;
-    void* m_fnUnregRes = nullptr;
-    void* m_fnDestroy  = nullptr;
-
-    // One slot per interpolated frame
-    std::vector<NvFRUC_Slot*> m_slots;
-
-    // Shared ARGB device buffers (uploaded once per batch, read by every slot)
-    uint8_t* m_d_prevARGB = nullptr; // device: W*H*4
-    uint8_t* m_d_currARGB = nullptr;
-    size_t   m_argbBytes  = 0;
-
-    cudaStream_t m_uploadStream = nullptr;
+    bool m_ready = false;
 };
 
-// CUDA kernel wrappers (compiled in fruc_interp.cu)
-void depth_to_argb_cuda(const float*   d_depth, uint8_t* d_argb, int n, cudaStream_t s);
-void argb_to_depth_cuda(const uint8_t* d_argb,  float*   d_depth, int n, cudaStream_t s);
+// CUDA kernel wrappers — defined in fruc_interp.cu (compiled with nvcc).
+// These are the ONLY symbols that link against the CUDA runtime; everything
+// else in fruc_interp.cpp uses the Driver API loaded at runtime.
+void fruc_depth_to_argb(const float*   d_depth,
+                         uint8_t* d_argb, int n, void* cuStream);
+void fruc_argb_to_depth(const uint8_t* d_argb,
+                         float*   d_depth, int n, void* cuStream);
