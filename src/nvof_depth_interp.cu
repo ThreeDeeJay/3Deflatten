@@ -5,6 +5,7 @@
 #include "nvof_depth_interp.h"
 #include "logger.h"
 #include <cuda_runtime.h>
+#include <cuda.h>  // Driver API: CUcontext, CUdeviceptr, cuCtxGetCurrent
 #include <algorithm>
 #include <cmath>
 #include <cstring>
