@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "depth_estimator.h"
+#ifdef ORT_ENABLE_TRTRTX
+#include "nvof_depth_interp.h"
+#endif
 #include "logger.h"
 #include <algorithm>
 #include <cmath>
@@ -380,7 +383,26 @@ struct DepthEstimator::TrtRtxSession {
     HMODULE hParser = nullptr;
 
     ~TrtRtxSession() { Destroy(); }
+    // ── NvOF state ──────────────────────────────────────────────────────────
+    NvOFState*   nvof           = nullptr;  // opaque; null=unavailable
+    cudaStream_t ofStream       = nullptr;  // NvOF+warp stream
+    cudaEvent_t  guideUpDone    = nullptr;  // jbuStream→ofStream: guide upload done
+    cudaEvent_t  ofDone         = nullptr;  // ofStream→CPU: NvOF+warp done
+    static constexpr int MAX_OF = 8;        // max interpolated frames (S-1)
+    float* d_warpBuf[MAX_OF]    = {};       // warp output [mw*mh] per slot
+    float* h_warpBuf[MAX_OF]    = {};       // pinned host copy
+    bool  nvofHasPrev           = false;    // set after first inference
+    int   nvofPrevSlot          = 0;        // writeBuf of previous iteration
+    int   nvofPrevFrameNo       = -1;       // global frame number of prev inference
+
     void Destroy() {
+        // NvOF cleanup (before CUDA streams, which NvOF uses internally)
+        if (nvof) { nvof_destroy(nvof); nvof=nullptr; }
+        for(int i=0;i<MAX_OF;i++){if(d_warpBuf[i])cudaFree(d_warpBuf[i]);d_warpBuf[i]=nullptr;}
+        for(int i=0;i<MAX_OF;i++){if(h_warpBuf[i])cudaFreeHost(h_warpBuf[i]);h_warpBuf[i]=nullptr;}
+        if(ofDone)   {cudaEventDestroy(ofDone);    ofDone=nullptr;}
+        if(guideUpDone){cudaEventDestroy(guideUpDone);guideUpDone=nullptr;}
+        if(ofStream) {cudaStreamDestroy(ofStream); ofStream=nullptr;}
         context.reset();
         engine.reset();
         runtime.reset();
@@ -843,6 +865,22 @@ HRESULT DepthEstimator::FinishTrtBuild() {
     m_modelInputW  = s.modelW;
     m_modelInputH  = s.modelH;
 
+    // ── NvOF initialisation (lazy, on worker thread where CUDA ctx exists) ───
+    cudaStreamCreate(&s.ofStream);
+    cudaEventCreateWithFlags(&s.guideUpDone, cudaEventDisableTiming);
+    cudaEventCreateWithFlags(&s.ofDone,      cudaEventDisableTiming);
+    for (int i=0;i<s.MAX_OF;i++) {
+        cudaMalloc(&s.d_warpBuf[i], (size_t)dmd*dmd*sizeof(float));
+        cudaMallocHost(&s.h_warpBuf[i], (size_t)dmd*dmd*sizeof(float));
+    }
+    // Try loading NvOF from the DLL directory (Win64 folder)
+    {
+        std::wstring dllDir(s.pendingOnnxPath.begin(), s.pendingOnnxPath.end());
+        auto sl=dllDir.rfind('\\'); if(sl!=std::wstring::npos) dllDir.resize(sl);
+        s.nvof = nvof_create(s.modelW, s.modelH, s.MAX_OF, dllDir);
+        if (s.nvof) LOG_INFO("NvOF: interpolation enabled at ",s.modelW,"x",s.modelH);
+        else         LOG_INFO("NvOF: not available — depth repeat fallback");
+    }
     s.needsBuild = false;
     LOG_INFO("TRT: FinishTrtBuild complete  precision=", usedPrecision,
              "  dims=", s.modelW, "x", s.modelH, "  F=", F,
@@ -948,6 +986,29 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     }
     // Signal: jbuStream may start once inference is done
     cudaEventRecord(s.inferDone[writeBuf], s.inferStream);
+    // ofStream: wait for guide upload (jbuStream) and inference (inferStream),
+    // then prepare NvOF slot. Both waits are GPU-side — CPU is not stalled.
+    if (s.nvof && nvof_available(s.nvof)) {
+        cudaStreamWaitEvent(s.ofStream, s.guideUpDone, 0);
+        cudaStreamWaitEvent(s.ofStream, s.inferDone[writeBuf], 0);
+        nvof_prepare_slot(s.nvof, writeBuf,
+                          s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
+                          d_outSlice, nullptr, mw, mh, s.ofStream);
+        if (s.nvofHasPrev) {
+            nvof_execute(s.nvof, s.nvofPrevSlot, writeBuf, s.ofStream);
+            // Warp for each interpolated frame between prevInfer and thisInfer
+            int nInterp = std::min(s.pipeIdx, s.MAX_OF);
+            for (int k=1; k<=nInterp; ++k) {
+                float t = (float)k / (float)(nInterp+1);
+                nvof_warp(s.nvof, s.nvofPrevSlot, writeBuf,
+                          s.d_warpBuf[k-1], t, s.ofStream);
+                cudaMemcpyAsync(s.h_warpBuf[k-1], s.d_warpBuf[k-1],
+                                (size_t)mw*mh*sizeof(float),
+                                cudaMemcpyDeviceToHost, s.ofStream);
+            }
+        }
+        cudaEventRecord(s.ofDone, s.ofStream);
+    }
 
     // ── jbuStream waits for inferDone (GPU-side, no CPU stall) ───────────────
     cudaStreamWaitEvent(s.jbuStream, s.inferDone[writeBuf], 0);
@@ -1021,6 +1082,8 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
                 cudaMemcpyAsync(s.d_guideBGRA[writeBuf], srcData,
                                 (size_t)srcH * srcStride,
                                 cudaMemcpyHostToDevice, s.jbuStream);
+                // Signal ofStream that guideBGRA[writeBuf] is ready
+                cudaEventRecord(s.guideUpDone, s.jbuStream);
             }
 
             // sigma_s=1.2 (LR-space spatial), sigma_c=0.25 (full-RGB sum-of-
@@ -1150,6 +1213,19 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     result.data   = std::move(out);
     result.width  = rsrcW;
     result.height = rsrcH;
+    result.prevInferFrameNo = s.nvofPrevFrameNo;
+    // Collect interpolated LR depths from NvOF warp (if available)
+    if (s.nvof && nvof_available(s.nvof) && s.nvofHasPrev) {
+        int nInterp = std::min(s.pipeIdx, s.MAX_OF); // pipeIdx≥1 here
+        result.interpData.resize(nInterp);
+        for (int k=0; k<nInterp; ++k) {
+            auto& fr = result.interpData[k];
+            fr.depth.assign(s.h_warpBuf[k], s.h_warpBuf[k]+(size_t)mw*mh);
+            fr.rawW=mw; fr.rawH=mh;
+        }
+    }
+    // Update NvOF state for next iteration
+    s.nvofHasPrev = true; s.nvofPrevSlot = writeBuf;
     return S_OK;
 }
 

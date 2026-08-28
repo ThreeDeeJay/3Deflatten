@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 3Deflatten – main DirectShow CTransformFilter
 #pragma once
+#include <condition_variable>
 #include <streams.h>
 #include <memory>
 #include <vector>
@@ -119,6 +120,21 @@ private:
     // skip posting frames to the worker so we always infer the LATEST frame rather
     // than a frame that will never be displayed.
     // m_skipEvery = 1 → infer every frame; 2 → every other; 3 → every third, etc.
+    // ── NvOF per-frame depth-ready slots ─────────────────────────────────────
+    // Depth worker signals each slot after it generates (real or interpolated)
+    // depth for a specific frame. Transform() for skip frames waits here.
+    struct DepthReadySlot {
+        int               frameNo = -1;
+        std::vector<float> depth;
+        int               w=0, h=0;
+        bool              ready = false;
+    };
+    static constexpr int kDepthSlots = 32;
+    DepthReadySlot          m_depthReadySlots[kDepthSlots];
+    std::mutex              m_depthReadyMtx;
+    std::condition_variable m_depthReadyCV;
+    int                     m_prevInferFrameNo = -1; // for slot signaling
+
     int                m_skipEvery    = 1;      // updated each time worker returns
     int                m_skipCounter  = 0;      // counts Transform() calls for skip logic
     double             m_avgInferMs   = 0.0;    // exponential moving average of inference ms

@@ -513,8 +513,9 @@ set(HEADERS
 # all of its ORT/TRT/baseclasses include paths).
 if(ORT_BACKEND STREQUAL "Unified")
     enable_language(CUDA)
-    add_library(jbu_cuda_obj OBJECT src/jbu_cuda.cu)
+    add_library(jbu_cuda_obj OBJECT src/jbu_cuda.cu src/nvof_depth_interp.cu)
     set_target_properties(jbu_cuda_obj PROPERTIES CUDA_ARCHITECTURES "75;86;89")
+    message(STATUS "NvOF depth interpolation: nvof_depth_interp.cu in jbu_cuda_obj (runtime-loaded nvofapi64.dll)")
     target_include_directories(jbu_cuda_obj PRIVATE src)
     message(STATUS "CUDA JBU: jbu_cuda_obj OBJECT library added (SM 75/86/89)")
 endif()

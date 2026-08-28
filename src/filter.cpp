@@ -585,6 +585,54 @@ void C3DeflattenFilter::DepthWorkerThread() {
             m_cacheReady  = true;
             m_lastInferMs = (double)ms;
             LOG_DBG("Depth worker: inference done in ", ms, " ms");
+            // Signal per-frame depth slots for interpolated frames + inference frame
+            {
+                // Inference frame itself (use upscaled cached depth)
+                std::vector<float> cached;
+                { std::lock_guard<std::mutex> cl(m_cacheMtx); cached=m_cachedDepth; }
+                if (!cached.empty() && slot >= 0 && slot < kRingSize) {
+                    int thisFrame = m_ring[slot].frameNo;
+                    {
+                        std::lock_guard<std::mutex> lk(m_depthReadyMtx);
+                        auto& sl = m_depthReadySlots[thisFrame % kDepthSlots];
+                        sl.frameNo=thisFrame; sl.depth=cached;
+                        sl.w=result.width; sl.h=result.height; sl.ready=true;
+                    }
+                    m_depthReadyCV.notify_all();
+                    // Interpolated frames (NvOF): bilinear upsample each LR frame
+                    if (!result.interpData.empty() && result.prevInferFrameNo >= 0) {
+                        int S = (int)result.interpData.size() + 1; // skipEvery
+                        for (int k=0;k<(int)result.interpData.size();k++) {
+                            auto& fr = result.interpData[k];
+                            if (fr.depth.empty()) continue;
+                            // Bilinear upsample from raw LR to render resolution
+                            std::vector<float> up(result.width*result.height);
+                            float sx=(float)fr.rawW/result.width,sy=(float)fr.rawH/result.height;
+                            for(int dy=0;dy<result.height;++dy){
+                              float fy=(dy+.5f)*sy-.5f;
+                              int y0=std::max(0,std::min((int)fy,fr.rawH-1)),y1=std::min(y0+1,fr.rawH-1);
+                              float ty=std::max(0.f,fy-y0);
+                              for(int dx=0;dx<result.width;++dx){
+                                float fx=(dx+.5f)*sx-.5f;
+                                int x0=std::max(0,std::min((int)fx,fr.rawW-1)),x1=std::min(x0+1,fr.rawW-1);
+                                float tx=std::max(0.f,fx-x0);
+                                up[dy*result.width+dx]=(1-tx)*(1-ty)*fr.depth[y0*fr.rawW+x0]
+                                  +tx*(1-ty)*fr.depth[y0*fr.rawW+x1]
+                                  +(1-tx)*ty*fr.depth[y1*fr.rawW+x0]+tx*ty*fr.depth[y1*fr.rawW+x1];
+                              }}
+                            int fn = result.prevInferFrameNo + k + 1;
+                            {
+                                std::lock_guard<std::mutex> lk(m_depthReadyMtx);
+                                auto& isl = m_depthReadySlots[fn % kDepthSlots];
+                                isl.frameNo=fn; isl.depth=std::move(up);
+                                isl.w=result.width; isl.h=result.height; isl.ready=true;
+                            }
+                            m_depthReadyCV.notify_all();
+                        }
+                    }
+                    m_prevInferFrameNo = (slot>=0&&slot<kRingSize) ? m_ring[slot].frameNo : -1;
+                }
+            }
         } else if (hr == E_PENDING) {
             // TRT engine build just finished — no depth this frame, next will produce it.
             LOG_INFO("Depth worker: TRT engine build complete; depth begins next frame.");
@@ -924,6 +972,20 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
             m_depthRender.assign(depthN, 0.5f);
     }
 
+    // ── Use interpolated depth if available for skip frames ────────────────────
+    std::vector<float> nvofDepthBuf;
+    bool useNvOFDepth = false;
+    if (!haveDepth && !shouldPost && m_skipEvery > 1) {
+        int myFrame = m_frameCount;
+        std::unique_lock<std::mutex> lk(m_depthReadyMtx);
+        bool ok = m_depthReadyCV.wait_for(lk, std::chrono::milliseconds(200),
+            [&]{ auto& sl=m_depthReadySlots[myFrame%kDepthSlots];
+                 return sl.ready && sl.frameNo==myFrame; });
+        if (ok) {
+            auto& sl = m_depthReadySlots[myFrame%kDepthSlots];
+            nvofDepthBuf = sl.depth; sl.ready=false; useNvOFDepth=true;
+        }
+    }
     // ── Stereo render directly into the DirectShow output sample ─────────────
     int outW, outH;
     OutputDimensions(m_inW, m_inH, outW, outH);
@@ -975,7 +1037,7 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
         }
     } else {
         m_stereo->Render(renderBGRA, m_inW, m_inH, renderStride,
-                         m_depthRender.data(), cfg,
+                         useNvOFDepth ? nvofDepthBuf.data() : m_depthRender.data(), cfg,
                          m_accumDx, m_accumDy,
                          pDst, outStride);
     }

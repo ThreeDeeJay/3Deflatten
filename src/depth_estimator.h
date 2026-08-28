@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // 3Deflatten – ONNX Runtime depth estimator (Depth Anything V2 / V3)
 #pragma once
+struct NvOFState; // defined in nvof_depth_interp.cu
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -16,9 +17,14 @@
 #include "ideflatten.h"
 
 struct DepthResult {
-    std::vector<float> data;   // row-major float depth [0,1], size = w*h
-    int width;
-    int height;
+    std::vector<float> data;   // upscaled depth [0,1], size = w*h
+    int width, height;
+    // Interpolated LR depth frames for the S-1 frames skipped between inferences.
+    // Each entry is float[rawW*rawH] at model output resolution (before upscaling).
+    // Populated only in TrtRtx path when NvOF is available and m_skipEvery > 1.
+    struct InterpFrame { std::vector<float> depth; int rawW=0, rawH=0; };
+    std::vector<InterpFrame> interpData;
+    int prevInferFrameNo = -1; // global frame number of the previous inference
 };
 
 class DepthEstimator {
