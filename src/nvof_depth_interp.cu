@@ -97,6 +97,11 @@ __device__ float atomicMinf_impl(float* addr,float val){
     do{assumed=old;old=atomicCAS(p,assumed,__float_as_int(min(val,__int_as_float(assumed))));}
     while(assumed!=old); return __int_as_float(old);
 }
+__device__ float atomicMaxf_impl(float* addr,float val){
+    int* p=(int*)addr; int assumed,old=*p;
+    do{assumed=old;old=atomicCAS(p,assumed,__float_as_int(max(val,__int_as_float(assumed))));}
+    while(assumed!=old); return __int_as_float(old);
+}
 
 __global__ void k_minmax(const float* __restrict__ d, float* mn, float* mx, int n) {
     // Simple block-level reduction (caller uses single block for LR depth)
@@ -112,11 +117,6 @@ __global__ void k_minmax(const float* __restrict__ d, float* mn, float* mx, int 
     if(tid==0){atomicMinf(mn,smem[0]);atomicMaxf(mx,smem[bs]);}
 }
 
-__device__ float atomicMaxf_impl(float* addr,float val){
-    int* p=(int*)addr; int assumed,old=*p;
-    do{assumed=old;old=atomicCAS(p,assumed,__float_as_int(max(val,__int_as_float(assumed))));}
-    while(assumed!=old); return __int_as_float(old);
-}
 // Simpler: just use our own normalize that does min-max scan on device
 __global__ void k_normalize(const float* __restrict__ in, float* __restrict__ out,
                              float mn, float mx, int n) {
