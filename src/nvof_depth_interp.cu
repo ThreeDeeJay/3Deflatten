@@ -114,7 +114,7 @@ __global__ void k_minmax(const float* __restrict__ d, float* mn, float* mx, int 
         if(tid<s){smem[tid]=min(smem[tid],smem[tid+s]);smem[tid+bs]=max(smem[tid+bs],smem[tid+s+bs]);}
         __syncthreads();
     }
-    if(tid==0){atomicMinf(mn,smem[0]);atomicMaxf(mx,smem[bs]);}
+    if(tid==0){atomicMinf_impl(mn,smem[0]);atomicMaxf_impl(mx,smem[bs]);}
 }
 
 // Simpler: just use our own normalize that does min-max scan on device
