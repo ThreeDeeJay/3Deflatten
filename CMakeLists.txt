@@ -598,6 +598,13 @@ if(ORT_BACKEND STREQUAL "Unified")
     if(TARGET CUDA::cudart)
         target_link_libraries(3Deflatten PRIVATE CUDA::cudart)
     endif()
+    if(TARGET CUDA::cuda_driver)
+        target_link_libraries(3Deflatten PRIVATE CUDA::cuda_driver)
+    else()
+        message(FATAL_ERROR
+            "CUDA Driver API target CUDA::cuda_driver was not found. "
+            "nvof_depth_interp.cu requires cuCtxGetCurrent().")
+    endif()
     if(TARGET jbu_cuda_obj)
         target_link_libraries(3Deflatten PRIVATE $<TARGET_OBJECTS:jbu_cuda_obj>)
     endif()
