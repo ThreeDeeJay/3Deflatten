@@ -988,6 +988,7 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     cudaEventRecord(s.inferDone[writeBuf], s.inferStream);
     // ofStream: wait for guide upload (jbuStream) and inference (inferStream),
     // then prepare NvOF slot. Both waits are GPU-side — CPU is not stalled.
+    float* d_outSlice = s.d_output[writeBuf] + (size_t)(F_out - 1) * mw * mh;
     if (s.nvof && nvof_available(s.nvof)) {
         cudaStreamWaitEvent(s.ofStream, s.guideUpDone, 0);
         cudaStreamWaitEvent(s.ofStream, s.inferDone[writeBuf], 0);
@@ -1021,7 +1022,6 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     s.bufJBU[writeBuf]    = false;
 
     const int F_out   = (s.nbVideoFrames > 0) ? s.nbVideoFrames : 1;
-    float* d_outSlice = s.d_output[writeBuf] + (size_t)(F_out - 1) * mw * mh;
 
     // ── GPU upscale path: Bilinear / JBU / WMF all run on GPU now ─────────────
     // Previously Bilinear mode skipped these kernels entirely and fell back
