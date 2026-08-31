@@ -975,6 +975,7 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
     // ── Use interpolated depth if available for skip frames ────────────────────
     std::vector<float> nvofDepthBuf;
     bool useNvOFDepth = false;
+    bool shouldPost = (m_skipCounter >= m_skipEvery);
     if (!haveDepth && !shouldPost && m_skipEvery > 1) {
         int myFrame = m_frameCount;
         std::unique_lock<std::mutex> lk(m_depthReadyMtx);
