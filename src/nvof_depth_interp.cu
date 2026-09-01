@@ -180,28 +180,48 @@ NvOFState* nvof_create(int w, int h, int maxInterp, const std::wstring& dllDir) 
     auto* st = new NvOFState;
     st->w=w; st->h=h; st->maxInterp=std::min(maxInterp,MAX_INTERP);
 
-    // Load nvofapi64.dll from Win64 folder
-    std::wstring path = dllDir + L"\\nvofapi64.dll";
-    st->hDLL = (void*)LOAD_LIB(path.c_str());
-    if (!st->hDLL) {
-        path = L"nvofapi64.dll"; // system fallback
-        st->hDLL = (void*)LOAD_LIB(path.c_str());
+    // Load nvofapi64.dll: driver installs it in System32, SDK puts it in Win64 folder.
+    // Search System32 first (always has the latest driver version), then our folder.
+    wchar_t sys32[MAX_PATH]={}; GetSystemDirectoryW(sys32,MAX_PATH);
+    std::wstring sys32path=std::wstring(sys32)+L"\\nvofapi64.dll";
+    st->hDLL=(void*)LoadLibraryExW(sys32path.c_str(),nullptr,
+        LOAD_LIBRARY_SEARCH_SYSTEM32|LOAD_LIBRARY_SEARCH_USER_DIRS);
+    if (!st->hDLL) { // try Win64 folder
+        std::wstring p2=dllDir+L"\\nvofapi64.dll";
+        st->hDLL=(void*)LoadLibraryExW(p2.c_str(),nullptr,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS|
+            LOAD_LIBRARY_SEARCH_USER_DIRS);
     }
     if (!st->hDLL) {
         LOG_INFO("NvOF: nvofapi64.dll not found — depth interpolation disabled");
         delete st; return nullptr;
     }
 
-    // Get function table
+    // Query max supported API version first (driver may be older than SDK v4)
+    using PFN_MaxVer = NV_OF_STATUS(*)(unsigned*);
+    auto fnMaxVer=(PFN_MaxVer)GET_PROC(st->hDLL,"NvOFGetMaxSupportedApiVersion");
+    unsigned apiVer = NV_OF_API_VERSION;
+    if (fnMaxVer) { unsigned maxVer=0; fnMaxVer(&maxVer);
+        if (maxVer < NV_OF_API_VERSION) { apiVer=maxVer;
+            LOG_INFO("NvOF: driver supports max version 0x",std::hex,maxVer," < requested 0x",NV_OF_API_VERSION,std::dec);
+        }
+    }
     using PFN = NV_OF_STATUS(*)(unsigned, NV_OF_CUDA_FN*);
     auto entry = (PFN)GET_PROC(st->hDLL,"NvOFAPICreateInstanceCuda");
-    if (!entry || entry(NV_OF_API_VERSION, &st->fn) != NV_OF_SUCCESS) {
-        LOG_WARN("NvOF: NvOFAPICreateInstanceCuda failed"); FREE_LIB(st->hDLL); delete st; return nullptr;
+    if (!entry || entry(apiVer, &st->fn) != NV_OF_SUCCESS) {
+        LOG_WARN("NvOF: NvOFAPICreateInstanceCuda failed — CUDA context or driver issue"); FREE_LIB(st->hDLL); delete st; return nullptr;
     }
 
-    // Get current CUDA context (TRT has already created it)
-    CUcontext ctx=nullptr; cuCtxGetCurrent(&ctx);
-    if (!ctx) { LOG_WARN("NvOF: no CUDA context"); FREE_LIB(st->hDLL); delete st; return nullptr; }
+    // Acquire the primary CUDA context for device 0.
+    // cuCtxGetCurrent() is unreliable after TRT (may push/pop context internally).
+    // cuDevicePrimaryCtxRetain always returns the same context that the CUDA
+    // runtime uses, matching what TRT has set up.
+    int cudaDev=0; cudaGetDevice(&cudaDev);
+    CUdevice cuDev; cuDeviceGet(&cuDev, cudaDev);
+    CUcontext ctx=nullptr;
+    if (cuDevicePrimaryCtxRetain(&ctx, cuDev) != CUDA_SUCCESS || !ctx) {
+        LOG_WARN("NvOF: cuDevicePrimaryCtxRetain failed"); FREE_LIB(st->hDLL); delete st; return nullptr;
+    }
 
     // Create NvOF handle
     if (st->fn.nvCreateOpticalFlowCuda(ctx, &st->hOF) != NV_OF_SUCCESS) {
