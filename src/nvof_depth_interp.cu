@@ -27,7 +27,7 @@
 // ── NvOF API types (inlined — no SDK headers needed) ─────────────────────────
 typedef int NV_OF_STATUS;
 #define NV_OF_SUCCESS 0
-#define NV_OF_API_VERSION ((1u<<8)|4u)  // SDK v4.0
+#define NV_OF_API_VERSION 0x50  // SDK v5.0
 typedef unsigned int NV_OF_BOOL;
 typedef enum {
     NV_OF_PERF_LEVEL_SLOW=5, NV_OF_PERF_LEVEL_MEDIUM=10
