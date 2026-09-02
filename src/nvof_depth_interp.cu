@@ -1799,22 +1799,6 @@ void nvof_prepare_slot(
         (mw + block.x - 1) / block.x,
         (mh + block.y - 1) / block.y
     );
-    k_bgra_to_gray8<<<
-        grid,
-        block,
-        0,
-        cudaStream
-    >>>(
-        d_guideBGRA,
-        srcW,
-        srcH,
-        srcStride,
-        reinterpret_cast<uint8_t*>(
-            nullptr
-        ),
-        mw,
-        mh
-    );
     // The NvOF guide buffer is opaque to the CUDA runtime, so obtain its
     // CUdeviceptr and use that as the destination.
     CUdeviceptr guidePtr = 0;
