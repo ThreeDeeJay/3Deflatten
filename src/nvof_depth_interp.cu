@@ -1064,7 +1064,7 @@ static bool nvof_query_capabilities(
     {
         for (uint32_t grid : hintGrids)
         {
-            LOG_DEBUG(
+            LOG_INFO(
                 "NvOF: supported hint grid = %u",
                 grid
             );
@@ -1220,7 +1220,7 @@ NvOFState* nvof_create(
         // creating a second independent CUDA context can cause unnecessary
         // resource duplication and synchronization problems.
         st->ofContext = currentContext;
-        LOG_DEBUG(
+        LOG_INFO(
             "NvOF: using existing CUDA context"
         );
     }
@@ -1263,7 +1263,7 @@ NvOFState* nvof_create(
             delete st;
             return nullptr;
         }
-        LOG_DEBUG(
+        LOG_INFO(
             "NvOF: retained CUDA primary context"
         );
     }
@@ -1565,7 +1565,7 @@ NvOFState* nvof_create(
         strideInfo.strideInfo[0].strideXInBytes;
     st->flowStrideY =
         strideInfo.strideInfo[0].strideYInBytes;
-    LOG_DEBUG(
+    LOG_INFO(
         "NvOF: flow stride = x=%u y=%u bytes",
         st->flowStrideX,
         st->flowStrideY
