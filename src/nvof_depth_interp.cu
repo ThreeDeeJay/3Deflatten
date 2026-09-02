@@ -20,59 +20,74 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#define LOAD_LIB(n)                                                     \
-    LoadLibraryExW(                                                     \
-        (n),                                                            \
-        nullptr,                                                        \
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |                              \
-        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS |                             \
+#define LOAD_LIB(n) \
+    LoadLibraryExW( \
+        (n), \
+        nullptr, \
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | \
+        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | \
         LOAD_LIBRARY_SEARCH_USER_DIRS)
-#define LOAD_SYSTEM_LIB(n)                                              \
-    LoadLibraryExW(                                                     \
-        (n),                                                            \
-        nullptr,                                                        \
+#define LOAD_SYSTEM_LIB(n) \
+    LoadLibraryExW( \
+        (n), \
+        nullptr, \
         LOAD_LIBRARY_SEARCH_SYSTEM32)
-#define FREE_LIB(h)                                                     \
+#define FREE_LIB(h) \
     FreeLibrary(reinterpret_cast<HMODULE>(h))
-#define GET_PROC(h, n)                                                  \
+#define GET_PROC(h, n) \
     GetProcAddress(reinterpret_cast<HMODULE>(h), (n))
 #else
 #include <dlfcn.h>
-#define LOAD_LIB(n)        dlopen((n), RTLD_LAZY)
+#define LOAD_LIB(n) dlopen((n), RTLD_LAZY)
 #define LOAD_SYSTEM_LIB(n) dlopen((n), RTLD_LAZY)
-#define FREE_LIB(h)        dlclose((h))
-#define GET_PROC(h, n)     dlsym((h), (n))
+#define FREE_LIB(h) dlclose((h))
+#define GET_PROC(h, n) dlsym((h), (n))
 #endif
 // =============================================================================
 // NVIDIA NvOF ABI definitions
 // =============================================================================
 //
-// These definitions intentionally match NVIDIA's public:
-//   nvOpticalFlowCommon.h
-//   nvOpticalFlowCuda.h
+// These definitions intentionally match NVIDIA's public NvOF API 2.0:
+//
+//     nvOpticalFlowCommon.h
+//     nvOpticalFlowCuda.h
+//
+// IMPORTANT:
+// The installed driver may report a much newer maximum API version
+// (for example 0x80), but this source only defines the API 2.0 ABI.
+//
+// Therefore NvOFAPICreateInstanceCuda() MUST be called with 0x20.
+// Passing the driver's maximum version while supplying an older
+// NV_OF_INIT_PARAMS layout causes the driver to interpret the structure
+// using a newer ABI and produces errors such as:
+//
+//     Incorrect NV_OF_INIT_PARAMS::inputBufferFormat value
+//
+// Do not add newer fields to these structures unless the complete ABI
+// for that API version is known and implemented here.
 //
 // Do not reorder these structures or function-table entries.
-//
+// =============================================================================
 typedef int32_t NV_OF_STATUS;
 enum
 {
-    NV_OF_SUCCESS                   = 0,
-    NV_OF_ERR_OF_NOT_AVAILABLE      = 1,
-    NV_OF_ERR_UNSUPPORTED_DEVICE    = 2,
+    NV_OF_SUCCESS = 0,
+    NV_OF_ERR_OF_NOT_AVAILABLE = 1,
+    NV_OF_ERR_UNSUPPORTED_DEVICE = 2,
     NV_OF_ERR_DEVICE_DOES_NOT_EXIST = 3,
-    NV_OF_ERR_INVALID_PTR           = 4,
-    NV_OF_ERR_INVALID_PARAM         = 5,
-    NV_OF_ERR_INVALID_CALL          = 6,
-    NV_OF_ERR_INVALID_VERSION       = 7,
-    NV_OF_ERR_OUT_OF_MEMORY         = 8,
-    NV_OF_ERR_NOT_INITIALIZED       = 9,
-    NV_OF_ERR_UNSUPPORTED_FEATURE   = 10,
-    NV_OF_ERR_GENERIC               = 11
+    NV_OF_ERR_INVALID_PTR = 4,
+    NV_OF_ERR_INVALID_PARAM = 5,
+    NV_OF_ERR_INVALID_CALL = 6,
+    NV_OF_ERR_INVALID_VERSION = 7,
+    NV_OF_ERR_OUT_OF_MEMORY = 8,
+    NV_OF_ERR_NOT_INITIALIZED = 9,
+    NV_OF_ERR_UNSUPPORTED_FEATURE = 10,
+    NV_OF_ERR_GENERIC = 11
 };
 typedef enum _NV_OF_BOOL
 {
     NV_OF_FALSE = 0,
-    NV_OF_TRUE  = 1
+    NV_OF_TRUE = 1
 } NV_OF_BOOL;
 // -----------------------------------------------------------------------------
 // Capabilities
@@ -80,16 +95,16 @@ typedef enum _NV_OF_BOOL
 typedef enum _NV_OF_CAPS
 {
     NV_OF_CAPS_SUPPORTED_OUTPUT_GRID_SIZES = 0,
-    NV_OF_CAPS_SUPPORTED_HINT_GRID_SIZES   = 1,
-    NV_OF_CAPS_SUPPORT_HINT_WITH_OF_MODE   = 2,
-    NV_OF_CAPS_SUPPORT_HINT_WITH_ST_MODE   = 3,
-    NV_OF_CAPS_WIDTH_MIN                   = 4,
-    NV_OF_CAPS_HEIGHT_MIN                  = 5,
-    NV_OF_CAPS_WIDTH_MAX                   = 6,
-    NV_OF_CAPS_HEIGHT_MAX                  = 7,
-    NV_OF_CAPS_SUPPORT_ROI                 = 8,
-    NV_OF_CAPS_SUPPORT_ROI_MAX_NUM        = 9,
-    NV_OF_CAPS_SUPPORT_MAX                 = 10
+    NV_OF_CAPS_SUPPORTED_HINT_GRID_SIZES = 1,
+    NV_OF_CAPS_SUPPORT_HINT_WITH_OF_MODE = 2,
+    NV_OF_CAPS_SUPPORT_HINT_WITH_ST_MODE = 3,
+    NV_OF_CAPS_WIDTH_MIN = 4,
+    NV_OF_CAPS_HEIGHT_MIN = 5,
+    NV_OF_CAPS_WIDTH_MAX = 6,
+    NV_OF_CAPS_HEIGHT_MAX = 7,
+    NV_OF_CAPS_SUPPORT_ROI = 8,
+    NV_OF_CAPS_SUPPORT_ROI_MAX_NUM = 9,
+    NV_OF_CAPS_SUPPORT_MAX = 10
 } NV_OF_CAPS;
 // -----------------------------------------------------------------------------
 // Performance
@@ -97,9 +112,9 @@ typedef enum _NV_OF_CAPS
 typedef enum _NV_OF_PERF_LEVEL
 {
     NV_OF_PERF_LEVEL_UNDEFINED = 0,
-    NV_OF_PERF_LEVEL_SLOW      = 5,
-    NV_OF_PERF_LEVEL_MEDIUM    = 10,
-    NV_OF_PERF_LEVEL_FAST      = 20
+    NV_OF_PERF_LEVEL_SLOW = 5,
+    NV_OF_PERF_LEVEL_MEDIUM = 10,
+    NV_OF_PERF_LEVEL_FAST = 20
 } NV_OF_PERF_LEVEL;
 // -----------------------------------------------------------------------------
 // Output vector grid
@@ -107,9 +122,9 @@ typedef enum _NV_OF_PERF_LEVEL
 typedef enum _NV_OF_OUTPUT_VECTOR_GRID_SIZE
 {
     NV_OF_OUTPUT_VECTOR_GRID_SIZE_UNDEFINED = 0,
-    NV_OF_OUTPUT_VECTOR_GRID_SIZE_1         = 1,
-    NV_OF_OUTPUT_VECTOR_GRID_SIZE_2         = 2,
-    NV_OF_OUTPUT_VECTOR_GRID_SIZE_4         = 4
+    NV_OF_OUTPUT_VECTOR_GRID_SIZE_1 = 1,
+    NV_OF_OUTPUT_VECTOR_GRID_SIZE_2 = 2,
+    NV_OF_OUTPUT_VECTOR_GRID_SIZE_4 = 4
 } NV_OF_OUTPUT_VECTOR_GRID_SIZE;
 // -----------------------------------------------------------------------------
 // Hint vector grid
@@ -117,24 +132,24 @@ typedef enum _NV_OF_OUTPUT_VECTOR_GRID_SIZE
 typedef enum _NV_OF_HINT_VECTOR_GRID_SIZE
 {
     NV_OF_HINT_VECTOR_GRID_SIZE_UNDEFINED = 0,
-    NV_OF_HINT_VECTOR_GRID_SIZE_1         = 1,
-    NV_OF_HINT_VECTOR_GRID_SIZE_2         = 2,
-    NV_OF_HINT_VECTOR_GRID_SIZE_4         = 4,
-    NV_OF_HINT_VECTOR_GRID_SIZE_8         = 8
+    NV_OF_HINT_VECTOR_GRID_SIZE_1 = 1,
+    NV_OF_HINT_VECTOR_GRID_SIZE_2 = 2,
+    NV_OF_HINT_VECTOR_GRID_SIZE_4 = 4,
+    NV_OF_HINT_VECTOR_GRID_SIZE_8 = 8
 } NV_OF_HINT_VECTOR_GRID_SIZE;
 // -----------------------------------------------------------------------------
 // Buffer format
 // -----------------------------------------------------------------------------
 typedef enum _NV_OF_BUFFER_FORMAT
 {
-    NV_OF_BUFFER_FORMAT_UNDEFINED  = 0,
+    NV_OF_BUFFER_FORMAT_UNDEFINED = 0,
     NV_OF_BUFFER_FORMAT_GRAYSCALE8 = 1,
-    NV_OF_BUFFER_FORMAT_NV12       = 2,
-    NV_OF_BUFFER_FORMAT_ABGR8      = 3,
-    NV_OF_BUFFER_FORMAT_SHORT      = 4,
-    NV_OF_BUFFER_FORMAT_SHORT2     = 5,
-    NV_OF_BUFFER_FORMAT_UINT       = 6,
-    NV_OF_BUFFER_FORMAT_UINT8      = 7
+    NV_OF_BUFFER_FORMAT_NV12 = 2,
+    NV_OF_BUFFER_FORMAT_ABGR8 = 3,
+    NV_OF_BUFFER_FORMAT_SHORT = 4,
+    NV_OF_BUFFER_FORMAT_SHORT2 = 5,
+    NV_OF_BUFFER_FORMAT_UINT = 6,
+    NV_OF_BUFFER_FORMAT_UINT8 = 7
 } NV_OF_BUFFER_FORMAT;
 // -----------------------------------------------------------------------------
 // Buffer usage
@@ -142,18 +157,18 @@ typedef enum _NV_OF_BUFFER_FORMAT
 typedef enum _NV_OF_BUFFER_USAGE
 {
     NV_OF_BUFFER_USAGE_UNDEFINED = 0,
-    NV_OF_BUFFER_USAGE_INPUT     = 1,
-    NV_OF_BUFFER_USAGE_OUTPUT    = 2,
-    NV_OF_BUFFER_USAGE_HINT      = 3,
-    NV_OF_BUFFER_USAGE_COST      = 4
+    NV_OF_BUFFER_USAGE_INPUT = 1,
+    NV_OF_BUFFER_USAGE_OUTPUT = 2,
+    NV_OF_BUFFER_USAGE_HINT = 3,
+    NV_OF_BUFFER_USAGE_COST = 4
 } NV_OF_BUFFER_USAGE;
 // -----------------------------------------------------------------------------
 // Operating mode
 // -----------------------------------------------------------------------------
 typedef enum _NV_OF_MODE
 {
-    NV_OF_MODE_UNDEFINED       = 0,
-    NV_OF_MODE_OPTICALFLOW     = 1,
+    NV_OF_MODE_UNDEFINED = 0,
+    NV_OF_MODE_OPTICALFLOW = 1,
     NV_OF_MODE_STEREODISPARITY = 2
 } NV_OF_MODE;
 // -----------------------------------------------------------------------------
@@ -161,8 +176,8 @@ typedef enum _NV_OF_MODE
 // -----------------------------------------------------------------------------
 typedef enum _NV_OF_CUDA_BUFFER_TYPE
 {
-    NV_OF_CUDA_BUFFER_TYPE_UNDEFINED   = 0,
-    NV_OF_CUDA_BUFFER_TYPE_CUARRAY     = 1,
+    NV_OF_CUDA_BUFFER_TYPE_UNDEFINED = 0,
+    NV_OF_CUDA_BUFFER_TYPE_CUARRAY = 1,
     NV_OF_CUDA_BUFFER_TYPE_CUDEVICEPTR = 2
 } NV_OF_CUDA_BUFFER_TYPE;
 // -----------------------------------------------------------------------------
@@ -171,8 +186,8 @@ typedef enum _NV_OF_CUDA_BUFFER_TYPE
 typedef enum _NV_OF_STEREO_DISPARITY_RANGE
 {
     NV_OF_STEREO_DISPARITY_RANGE_UNDEFINED = 0,
-    NV_OF_STEREO_DISPARITY_RANGE_128       = 128,
-    NV_OF_STEREO_DISPARITY_RANGE_256       = 256
+    NV_OF_STEREO_DISPARITY_RANGE_128 = 128,
+    NV_OF_STEREO_DISPARITY_RANGE_256 = 256
 } NV_OF_STEREO_DISPARITY_RANGE;
 // -----------------------------------------------------------------------------
 // Opaque handles
@@ -181,27 +196,30 @@ typedef void* NvOFHandle;
 typedef void* NvOFGPUBufferHandle;
 typedef void* NvOFPrivDataHandle;
 // -----------------------------------------------------------------------------
-// Init parameters
+// Init parameters — NvOF API 2.0
 // -----------------------------------------------------------------------------
 //
-// IMPORTANT:
-// Keep this layout exactly compatible with NVIDIA's NV_OF_INIT_PARAMS ABI.
-// There is NO inputBufferFormat member in this structure.
-// The input format is specified when the CUDA input buffers are created.
+// This is the API 2.0 layout.
+//
+// Do NOT add inputBufferFormat, predDirection, enableGlobalFlow, or other
+// newer fields here. Those belong to newer API revisions and require their
+// corresponding complete ABI/function-table version.
+//
+// The driver can support newer APIs while still accepting an API 2.0 client.
 // -----------------------------------------------------------------------------
 typedef struct _NV_OF_INIT_PARAMS
 {
     uint32_t width;
     uint32_t height;
     NV_OF_OUTPUT_VECTOR_GRID_SIZE outGridSize;
-    NV_OF_HINT_VECTOR_GRID_SIZE   hintGridSize;
-    NV_OF_MODE                   mode;
-    NV_OF_PERF_LEVEL             perfLevel;
-    NV_OF_BOOL                   enableExternalHints;
-    NV_OF_BOOL                   enableOutputCost;
-    NvOFPrivDataHandle           hPrivData;
+    NV_OF_HINT_VECTOR_GRID_SIZE hintGridSize;
+    NV_OF_MODE mode;
+    NV_OF_PERF_LEVEL perfLevel;
+    NV_OF_BOOL enableExternalHints;
+    NV_OF_BOOL enableOutputCost;
+    NvOFPrivDataHandle hPrivData;
     NV_OF_STEREO_DISPARITY_RANGE disparityRange;
-    NV_OF_BOOL                   enableRoi;
+    NV_OF_BOOL enableRoi;
 } NV_OF_INIT_PARAMS;
 // -----------------------------------------------------------------------------
 // GPU buffer descriptor
@@ -210,7 +228,7 @@ typedef struct _NV_OF_BUFFER_DESCRIPTOR
 {
     uint32_t width;
     uint32_t height;
-    NV_OF_BUFFER_USAGE  bufferUsage;
+    NV_OF_BUFFER_USAGE bufferUsage;
     NV_OF_BUFFER_FORMAT bufferFormat;
 } NV_OF_BUFFER_DESCRIPTOR;
 // -----------------------------------------------------------------------------
@@ -343,18 +361,18 @@ typedef NV_OF_STATUS (NVOF_CALL *PFNNVOFGETCAPS)(
 // -----------------------------------------------------------------------------
 typedef struct _NV_OF_CUDA_API_FUNCTION_LIST
 {
-    PFNNVCREATEOPTICALFLOWCUDA      nvCreateOpticalFlowCuda;
-    PFNNVOFINIT                     nvOFInit;
-    PFNNVOFCREATEGPUBUFFERCUDA      nvOFCreateGPUBufferCuda;
-    PFNNVOFGPUBUFFERGETCUARRAY      nvOFGPUBufferGetCUarray;
-    PFNNVOFGPUBUFFERGETCUDEVICEPTR  nvOFGPUBufferGetCUdeviceptr;
-    PFNNVOFGPUBUFFERGETSTRIDEINFO   nvOFGPUBufferGetStrideInfo;
-    PFNNVOFSETIOCUDASTREAMS         nvOFSetIOCudaStreams;
-    PFNNVOFEXECUTE                   nvOFExecute;
-    PFNNVOFDESTROYGPUBUFFERCUDA      nvOFDestroyGPUBufferCuda;
-    PFNNVOFDESTROY                   nvOFDestroy;
-    PFNNVOFGETLASTERROR              nvOFGetLastError;
-    PFNNVOFGETCAPS                   nvOFGetCaps;
+    PFNNVCREATEOPTICALFLOWCUDA nvCreateOpticalFlowCuda;
+    PFNNVOFINIT nvOFInit;
+    PFNNVOFCREATEGPUBUFFERCUDA nvOFCreateGPUBufferCuda;
+    PFNNVOFGPUBUFFERGETCUARRAY nvOFGPUBufferGetCUarray;
+    PFNNVOFGPUBUFFERGETCUDEVICEPTR nvOFGPUBufferGetCUdeviceptr;
+    PFNNVOFGPUBUFFERGETSTRIDEINFO nvOFGPUBufferGetStrideInfo;
+    PFNNVOFSETIOCUDASTREAMS nvOFSetIOCudaStreams;
+    PFNNVOFEXECUTE nvOFExecute;
+    PFNNVOFDESTROYGPUBUFFERCUDA nvOFDestroyGPUBufferCuda;
+    PFNNVOFDESTROY nvOFDestroy;
+    PFNNVOFGETLASTERROR nvOFGetLastError;
+    PFNNVOFGETCAPS nvOFGetCaps;
 } NV_OF_CUDA_API_FUNCTION_LIST;
 // -----------------------------------------------------------------------------
 // DLL entry points
@@ -366,6 +384,26 @@ typedef NV_OF_STATUS (NVOF_CALL *PFN_NV_OF_API_CREATE_INSTANCE_CUDA)(
     uint32_t,
     NV_OF_CUDA_API_FUNCTION_LIST*
 );
+// =============================================================================
+// NvOF API version negotiation
+// =============================================================================
+//
+// NVIDIA encodes the API version as:
+//
+//     major << 4 | minor
+//
+// NvOF API 2.0 therefore corresponds to:
+//
+//     0x20
+//
+// The driver on the target system reports 0x80 as its maximum supported
+// version. That does NOT mean the client should pass 0x80 here.
+//
+// This source implements the API 2.0 ABI, so explicitly request API 2.0.
+// A newer API can be used later only after its complete ABI has been added.
+//
+// =============================================================================
+static constexpr uint32_t kNvOfApiVersion20 = 0x20u;
 // =============================================================================
 // CUDA kernels
 // =============================================================================
@@ -410,19 +448,23 @@ __global__ void k_bgra_to_gray8(
         fy - static_cast<float>(y0);
     const uint8_t* p00 =
         src +
-        static_cast<size_t>(y0) * static_cast<size_t>(srcStride) +
+        static_cast<size_t>(y0) *
+            static_cast<size_t>(srcStride) +
         static_cast<size_t>(x0) * 4u;
     const uint8_t* p10 =
         src +
-        static_cast<size_t>(y0) * static_cast<size_t>(srcStride) +
+        static_cast<size_t>(y0) *
+            static_cast<size_t>(srcStride) +
         static_cast<size_t>(x1) * 4u;
     const uint8_t* p01 =
         src +
-        static_cast<size_t>(y1) * static_cast<size_t>(srcStride) +
+        static_cast<size_t>(y1) *
+            static_cast<size_t>(srcStride) +
         static_cast<size_t>(x0) * 4u;
     const uint8_t* p11 =
         src +
-        static_cast<size_t>(y1) * static_cast<size_t>(srcStride) +
+        static_cast<size_t>(y1) *
+            static_cast<size_t>(srcStride) +
         static_cast<size_t>(x1) * 4u;
     // BGRA -> luminance.
     const float l00 =
@@ -458,7 +500,7 @@ __global__ void k_bgra_to_gray8(
         );
     dst[
         static_cast<size_t>(y) *
-        static_cast<size_t>(dstW) +
+            static_cast<size_t>(dstW) +
         static_cast<size_t>(x)
     ] =
         static_cast<uint8_t>(
@@ -530,7 +572,7 @@ __global__ void k_scan_minmax(
 {
     const size_t i =
         static_cast<size_t>(blockIdx.x) *
-        static_cast<size_t>(blockDim.x) +
+            static_cast<size_t>(blockDim.x) +
         static_cast<size_t>(threadIdx.x);
     if (i >= count)
         return;
@@ -562,7 +604,7 @@ __global__ void k_normalize_depth(
 {
     const size_t i =
         static_cast<size_t>(blockIdx.x) *
-        static_cast<size_t>(blockDim.x) +
+            static_cast<size_t>(blockDim.x) +
         static_cast<size_t>(threadIdx.x);
     if (i >= count)
         return;
@@ -608,13 +650,14 @@ __device__ __forceinline__ float2 read_nvof_flow(
 {
     const uint8_t* row =
         flowBytes +
-        static_cast<size_t>(y) * flowStride;
+        static_cast<size_t>(y) *
+            flowStride;
     const int16_t* vector =
         reinterpret_cast<const int16_t*>(
             row +
             static_cast<size_t>(x) *
-            sizeof(int16_t) *
-            2u
+                sizeof(int16_t) *
+                2u
         );
     return make_float2(
         static_cast<float>(vector[0]) / 32.0f,
@@ -628,8 +671,7 @@ __device__ __forceinline__ float2 read_nvof_flow(
 //
 //     ceil(width / grid) x ceil(height / grid)
 //
-// Each vector component is signed 16-bit S10.5,
-// therefore:
+// Each vector component is signed 16-bit S10.5:
 //
 //     component / 32.0f
 //
@@ -719,7 +761,7 @@ __global__ void k_expand_flow(
         );
     fullFlow[
         static_cast<size_t>(y) *
-        static_cast<size_t>(fullW) +
+            static_cast<size_t>(fullW) +
         static_cast<size_t>(x)
     ] =
         make_float2(
@@ -762,25 +804,25 @@ __device__ float sample_float_bilinear(
     const float a =
         data[
             static_cast<size_t>(y0) *
-            static_cast<size_t>(width) +
+                static_cast<size_t>(width) +
             static_cast<size_t>(x0)
         ];
     const float b =
         data[
             static_cast<size_t>(y0) *
-            static_cast<size_t>(width) +
+                static_cast<size_t>(width) +
             static_cast<size_t>(x1)
         ];
     const float c =
         data[
             static_cast<size_t>(y1) *
-            static_cast<size_t>(width) +
+                static_cast<size_t>(width) +
             static_cast<size_t>(x0)
         ];
     const float d =
         data[
             static_cast<size_t>(y1) *
-            static_cast<size_t>(width) +
+                static_cast<size_t>(width) +
             static_cast<size_t>(x1)
         ];
     const float top =
@@ -808,7 +850,7 @@ __device__ float sample_float_bilinear(
 // For intermediate time t:
 //
 //     previous sample = p + t * flow
-//     current  sample = p - (1-t) * flow
+//     current sample  = p - (1-t) * flow
 // -----------------------------------------------------------------------------
 __global__ void k_warp_blend(
     const float* __restrict__ prevDepth,
@@ -827,7 +869,7 @@ __global__ void k_warp_blend(
         return;
     const size_t index =
         static_cast<size_t>(y) *
-        static_cast<size_t>(width) +
+            static_cast<size_t>(width) +
         static_cast<size_t>(x);
     const float2 flow =
         fullFlow[index];
@@ -1089,9 +1131,9 @@ static bool nvof_get_scalar_cap(
 {
     std::vector<uint32_t> values;
     if (!nvof_get_caps(
-            st,
-            capability,
-            values))
+        st,
+        capability,
+        values))
     {
         return false;
     }
@@ -1109,9 +1151,9 @@ static bool nvof_query_capabilities(
 {
     std::vector<uint32_t> grids;
     if (!nvof_get_caps(
-            st,
-            NV_OF_CAPS_SUPPORTED_OUTPUT_GRID_SIZES,
-            grids))
+        st,
+        NV_OF_CAPS_SUPPORTED_OUTPUT_GRID_SIZES,
+        grids))
     {
         LOG_WARN(
             "NvOF: failed to query supported output grid sizes"
@@ -1160,9 +1202,9 @@ static bool nvof_query_capabilities(
     uint32_t widthMax = 0;
     uint32_t heightMax = 0;
     if (nvof_get_scalar_cap(
-            st,
-            NV_OF_CAPS_WIDTH_MIN,
-            widthMin))
+        st,
+        NV_OF_CAPS_WIDTH_MIN,
+        widthMin))
     {
         LOG_INFO(
             "NvOF: width range minimum = %u",
@@ -1180,9 +1222,9 @@ static bool nvof_query_capabilities(
         }
     }
     if (nvof_get_scalar_cap(
-            st,
-            NV_OF_CAPS_HEIGHT_MIN,
-            heightMin))
+        st,
+        NV_OF_CAPS_HEIGHT_MIN,
+        heightMin))
     {
         LOG_INFO(
             "NvOF: height range minimum = %u",
@@ -1200,9 +1242,9 @@ static bool nvof_query_capabilities(
         }
     }
     if (nvof_get_scalar_cap(
-            st,
-            NV_OF_CAPS_WIDTH_MAX,
-            widthMax))
+        st,
+        NV_OF_CAPS_WIDTH_MAX,
+        widthMax))
     {
         LOG_INFO(
             "NvOF: width range maximum = %u",
@@ -1220,9 +1262,9 @@ static bool nvof_query_capabilities(
         }
     }
     if (nvof_get_scalar_cap(
-            st,
-            NV_OF_CAPS_HEIGHT_MAX,
-            heightMax))
+        st,
+        NV_OF_CAPS_HEIGHT_MAX,
+        heightMax))
     {
         LOG_INFO(
             "NvOF: height range maximum = %u",
@@ -1241,9 +1283,9 @@ static bool nvof_query_capabilities(
     }
     std::vector<uint32_t> hintGrids;
     if (nvof_get_caps(
-            st,
-            NV_OF_CAPS_SUPPORTED_HINT_GRID_SIZES,
-            hintGrids))
+        st,
+        NV_OF_CAPS_SUPPORTED_HINT_GRID_SIZES,
+        hintGrids))
     {
         for (uint32_t grid : hintGrids)
         {
@@ -1255,9 +1297,9 @@ static bool nvof_query_capabilities(
     }
     uint32_t hintSupport = 0;
     if (nvof_get_scalar_cap(
-            st,
-            NV_OF_CAPS_SUPPORT_HINT_WITH_OF_MODE,
-            hintSupport))
+        st,
+        NV_OF_CAPS_SUPPORT_HINT_WITH_OF_MODE,
+        hintSupport))
     {
         LOG_INFO(
             "NvOF: external OF hints supported = %u",
@@ -1266,9 +1308,9 @@ static bool nvof_query_capabilities(
     }
     uint32_t roiSupport = 0;
     if (nvof_get_scalar_cap(
-            st,
-            NV_OF_CAPS_SUPPORT_ROI,
-            roiSupport))
+        st,
+        NV_OF_CAPS_SUPPORT_ROI,
+        roiSupport))
     {
         LOG_INFO(
             "NvOF: ROI support = %u",
@@ -1400,10 +1442,10 @@ NvOFState* nvof_create(
     CUcontext currentContext =
         nullptr;
     if (!nvof_cu_ok(
-            cuCtxGetCurrent(
-                &currentContext
-            ),
-            "cuCtxGetCurrent"))
+        cuCtxGetCurrent(
+            &currentContext
+        ),
+        "cuCtxGetCurrent"))
     {
         delete st;
         return nullptr;
@@ -1424,10 +1466,10 @@ NvOFState* nvof_create(
         int device =
             0;
         if (!nvof_cuda_ok(
-                cudaGetDevice(
-                    &device
-                ),
-                "cudaGetDevice"))
+            cudaGetDevice(
+                &device
+            ),
+            "cudaGetDevice"))
         {
             delete st;
             return nullptr;
@@ -1435,21 +1477,21 @@ NvOFState* nvof_create(
         CUdevice cuDevice =
             0;
         if (!nvof_cu_ok(
-                cuDeviceGet(
-                    &cuDevice,
-                    device
-                ),
-                "cuDeviceGet"))
+            cuDeviceGet(
+                &cuDevice,
+                device
+            ),
+            "cuDeviceGet"))
         {
             delete st;
             return nullptr;
         }
         if (!nvof_cu_ok(
-                cuDevicePrimaryCtxRetain(
-                    &st->ofContext,
-                    cuDevice
-                ),
-                "cuDevicePrimaryCtxRetain"))
+            cuDevicePrimaryCtxRetain(
+                &st->ofContext,
+                cuDevice
+            ),
+            "cuDevicePrimaryCtxRetain"))
         {
             delete st;
             return nullptr;
@@ -1459,10 +1501,10 @@ NvOFState* nvof_create(
         st->primaryDevice =
             cuDevice;
         if (!nvof_cu_ok(
-                cuCtxSetCurrent(
-                    st->ofContext
-                ),
-                "cuCtxSetCurrent"))
+            cuCtxSetCurrent(
+                st->ofContext
+            ),
+            "cuCtxSetCurrent"))
         {
             cuDevicePrimaryCtxRelease(
                 cuDevice
@@ -1527,11 +1569,11 @@ NvOFState* nvof_create(
     // -------------------------------------------------------------------------
     // Query driver API version.
     // -------------------------------------------------------------------------
-    uint32_t apiVersion =
+    uint32_t driverMaxApiVersion =
         0;
     const NV_OF_STATUS versionStatus =
         getMaxApiVersion(
-            &apiVersion
+            &driverMaxApiVersion
         );
     if (versionStatus != NV_OF_SUCCESS)
     {
@@ -1543,7 +1585,7 @@ NvOFState* nvof_create(
         nvof_destroy(st);
         return nullptr;
     }
-    if (apiVersion == 0)
+    if (driverMaxApiVersion == 0)
     {
         LOG_WARN(
             "NvOF: driver returned invalid API version 0"
@@ -1553,6 +1595,34 @@ NvOFState* nvof_create(
     }
     LOG_INFO(
         "NvOF: driver max API version = 0x%x",
+        driverMaxApiVersion
+    );
+    // -------------------------------------------------------------------------
+    // Select an ABI version that this source actually implements.
+    // -------------------------------------------------------------------------
+    //
+    // The driver may advertise 0x80, but this source implements API 2.0.
+    //
+    // Passing driverMaxApiVersion directly to NvOFAPICreateInstanceCuda()
+    // would cause the returned function table to expect the newer ABI.
+    // In particular, newer NV_OF_INIT_PARAMS layouts contain fields that
+    // are absent from the API 2.0 structure above.
+    //
+    // Since NvOF APIs are backward compatible, use API 2.0 when the driver
+    // supports it.
+    if (driverMaxApiVersion < kNvOfApiVersion20)
+    {
+        LOG_WARN(
+            "NvOF: driver API version 0x%x is older than required API 2.0 (0x20)",
+            driverMaxApiVersion
+        );
+        nvof_destroy(st);
+        return nullptr;
+    }
+    const uint32_t apiVersion =
+        kNvOfApiVersion20;
+    LOG_INFO(
+        "NvOF: using client API version 0x%x",
         apiVersion
     );
     // -------------------------------------------------------------------------
@@ -1629,7 +1699,7 @@ NvOFState* nvof_create(
         return nullptr;
     }
     // -------------------------------------------------------------------------
-    // Initialize NvOF.
+    // Initialize NvOF using the API 2.0 ABI.
     // -------------------------------------------------------------------------
     NV_OF_INIT_PARAMS initParams{};
     initParams.width =
@@ -1662,15 +1732,28 @@ NvOFState* nvof_create(
         NV_OF_FALSE;
     LOG_INFO(
         "NvOF: initializing width=%u height=%u "
-        "grid=%u mode=%u perf=%u hints=%u cost=%u roi=%u",
+        "grid=%u mode=%u perf=%u "
+        "hints=%u cost=%u roi=%u",
         initParams.width,
         initParams.height,
-        static_cast<unsigned>(initParams.outGridSize),
-        static_cast<unsigned>(initParams.mode),
-        static_cast<unsigned>(initParams.perfLevel),
-        static_cast<unsigned>(initParams.enableExternalHints),
-        static_cast<unsigned>(initParams.enableOutputCost),
-        static_cast<unsigned>(initParams.enableRoi)
+        static_cast<unsigned>(
+            initParams.outGridSize
+        ),
+        static_cast<unsigned>(
+            initParams.mode
+        ),
+        static_cast<unsigned>(
+            initParams.perfLevel
+        ),
+        static_cast<unsigned>(
+            initParams.enableExternalHints
+        ),
+        static_cast<unsigned>(
+            initParams.enableOutputCost
+        ),
+        static_cast<unsigned>(
+            initParams.enableRoi
+        )
     );
     status =
         st->fn.nvOFInit(
@@ -1849,53 +1932,53 @@ NvOFState* nvof_create(
         return nullptr;
     }
     if (!nvof_cuda_ok(
-            cudaMalloc(
-                reinterpret_cast<void**>(
-                    &st->d_depth[0]
-                ),
-                pixelCount *
-                sizeof(float)
+        cudaMalloc(
+            reinterpret_cast<void**>(
+                &st->d_depth[0]
             ),
-            "cudaMalloc(d_depth[0])"))
+            pixelCount *
+            sizeof(float)
+        ),
+        "cudaMalloc(d_depth[0])"))
     {
         nvof_destroy(st);
         return nullptr;
     }
     if (!nvof_cuda_ok(
-            cudaMalloc(
-                reinterpret_cast<void**>(
-                    &st->d_depth[1]
-                ),
-                pixelCount *
-                sizeof(float)
+        cudaMalloc(
+            reinterpret_cast<void**>(
+                &st->d_depth[1]
             ),
-            "cudaMalloc(d_depth[1])"))
+            pixelCount *
+            sizeof(float)
+        ),
+        "cudaMalloc(d_depth[1])"))
     {
         nvof_destroy(st);
         return nullptr;
     }
     if (!nvof_cuda_ok(
-            cudaMalloc(
-                reinterpret_cast<void**>(
-                    &st->d_minmax
-                ),
-                2 *
-                sizeof(float)
+        cudaMalloc(
+            reinterpret_cast<void**>(
+                &st->d_minmax
             ),
-            "cudaMalloc(d_minmax)"))
+            2 *
+            sizeof(float)
+        ),
+        "cudaMalloc(d_minmax)"))
     {
         nvof_destroy(st);
         return nullptr;
     }
     if (!nvof_cuda_ok(
-            cudaMalloc(
-                reinterpret_cast<void**>(
-                    &st->d_flowFull
-                ),
-                pixelCount *
-                sizeof(float2)
+        cudaMalloc(
+            reinterpret_cast<void**>(
+                &st->d_flowFull
             ),
-            "cudaMalloc(d_flowFull)"))
+            pixelCount *
+            sizeof(float2)
+        ),
+        "cudaMalloc(d_flowFull)"))
     {
         nvof_destroy(st);
         return nullptr;
@@ -1921,8 +2004,8 @@ void nvof_destroy(
         CUcontext current =
             nullptr;
         if (cuCtxGetCurrent(
-                &current
-            ) == CUDA_SUCCESS)
+            &current
+        ) == CUDA_SUCCESS)
         {
             if (current != st->ofContext)
             {
@@ -2265,26 +2348,26 @@ void nvof_prepare_slot(
     const float initialMax =
         -std::numeric_limits<float>::infinity();
     if (!nvof_cuda_ok(
-            cudaMemcpyAsync(
-                minmax,
-                &initialMin,
-                sizeof(float),
-                cudaMemcpyHostToDevice,
-                cudaStream
-            ),
-            "cudaMemcpyAsync(min)"))
+        cudaMemcpyAsync(
+            minmax,
+            &initialMin,
+            sizeof(float),
+            cudaMemcpyHostToDevice,
+            cudaStream
+        ),
+        "cudaMemcpyAsync(min)"))
     {
         return;
     }
     if (!nvof_cuda_ok(
-            cudaMemcpyAsync(
-                minmax + 1,
-                &initialMax,
-                sizeof(float),
-                cudaMemcpyHostToDevice,
-                cudaStream
-            ),
-            "cudaMemcpyAsync(max)"))
+        cudaMemcpyAsync(
+            minmax + 1,
+            &initialMax,
+            sizeof(float),
+            cudaMemcpyHostToDevice,
+            cudaStream
+        ),
+        "cudaMemcpyAsync(max)"))
     {
         return;
     }
