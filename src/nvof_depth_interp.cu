@@ -183,10 +183,20 @@ typedef void* NvOFPrivDataHandle;
 // -----------------------------------------------------------------------------
 // Init parameters
 // -----------------------------------------------------------------------------
+//
+// IMPORTANT:
+// NV_OF_INIT_PARAMS includes inputBufferFormat in the NvOF ABI.  The input
+// buffers created below are GRAYSCALE8, so this must explicitly be set to
+// NV_OF_BUFFER_FORMAT_GRAYSCALE8 before nvOFInit().
+//
+// Keep the field order exactly as defined here.  nvOFInit() consumes this
+// structure directly across the DLL ABI.
+// -----------------------------------------------------------------------------
 typedef struct _NV_OF_INIT_PARAMS
 {
     uint32_t width;
     uint32_t height;
+    NV_OF_BUFFER_FORMAT inputBufferFormat;
     NV_OF_OUTPUT_VECTOR_GRID_SIZE outGridSize;
     NV_OF_HINT_VECTOR_GRID_SIZE   hintGridSize;
     NV_OF_MODE       mode;
@@ -1630,6 +1640,9 @@ NvOFState* nvof_create(
         static_cast<uint32_t>(w);
     initParams.height =
         static_cast<uint32_t>(h);
+    // Our NvOF input buffers are created as GRAYSCALE8.
+    initParams.inputBufferFormat =
+        NV_OF_BUFFER_FORMAT_GRAYSCALE8;
     initParams.outGridSize =
         static_cast<
             NV_OF_OUTPUT_VECTOR_GRID_SIZE
@@ -1655,10 +1668,13 @@ NvOFState* nvof_create(
     initParams.enableRoi =
         NV_OF_FALSE;
     LOG_INFO(
-        "NvOF: initializing width=%u height=%u grid=%u "
+        "NvOF: initializing width=%u height=%u inputFormat=%u grid=%u "
         "mode=OPTICALFLOW perf=SLOW hints=OFF cost=OFF roi=OFF",
         initParams.width,
         initParams.height,
+        static_cast<unsigned>(
+            initParams.inputBufferFormat
+        ),
         static_cast<unsigned>(
             initParams.outGridSize
         )
@@ -1679,6 +1695,9 @@ NvOFState* nvof_create(
         nvof_destroy(st);
         return nullptr;
     }
+    LOG_INFO(
+        "NvOF: initialization successful"
+    );
     // -------------------------------------------------------------------------
     // Allocate NvOF input buffers.
     // -------------------------------------------------------------------------
