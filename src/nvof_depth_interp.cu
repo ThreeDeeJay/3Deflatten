@@ -1901,12 +1901,12 @@ NvOFState* nvof_create(
     // For CUDA NvOF buffers, strideXInBytes is the byte
     // distance between successive rows of the plane.
     // For SHORT2 at 130 pixels, this should be 130 * 4 = 520.
-    if (st->flowStrideX <
+    if (st->flowRowPitchBytes <
         requiredRowBytes)
     {
         LOG_WARN(
             "NvOF: invalid flow row stride: x=%u, y=%u, required >= %u",
-            st->flowStrideX,
+            st->flowRowPitchBytes,
             st->flowStrideY,
             requiredRowBytes
         );
@@ -1916,7 +1916,7 @@ NvOFState* nvof_create(
     LOG_INFO(
         "NvOF: flow stride horizontal=%u rowPitch=%u bytes",
         st->flowStrideY,
-        st->flowStrideX
+        st->flowRowPitchBytes
     );
     // -------------------------------------------------------------------------
     // Allocate CUDA-side buffers.
