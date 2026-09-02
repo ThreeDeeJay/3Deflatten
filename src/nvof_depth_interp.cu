@@ -938,7 +938,7 @@ struct NvOFState
     // NvOF output flow.
     NvOFGPUBufferHandle flow = nullptr;
     // NvOF output stride.
-    uint32_t flowStrideX = 0;
+    uint32_t flowRowPitchBytes = 0;
     uint32_t flowStrideY = 0;
     // Full LR-resolution flow.
     float2* d_flowFull = nullptr;
@@ -1887,7 +1887,7 @@ NvOFState* nvof_create(
         nvof_destroy(st);
         return nullptr;
     }
-    st->flowStrideX =
+    st->flowRowPitchBytes =
         strideInfo.strideInfo[0].strideXInBytes;
     st->flowStrideY =
         strideInfo.strideInfo[0].strideYInBytes;
@@ -1898,11 +1898,15 @@ NvOFState* nvof_create(
         static_cast<uint32_t>(
             sizeof(int16_t) * 2
         );
-    if (st->flowStrideY <
+    // For CUDA NvOF buffers, strideXInBytes is the byte
+    // distance between successive rows of the plane.
+    // For SHORT2 at 130 pixels, this should be 130 * 4 = 520.
+    if (st->flowStrideX <
         requiredRowBytes)
     {
         LOG_WARN(
-            "NvOF: invalid flow stride: y=%u, required >= %u",
+            "NvOF: invalid flow row stride: x=%u, y=%u, required >= %u",
+            st->flowStrideX,
             st->flowStrideY,
             requiredRowBytes
         );
@@ -1910,9 +1914,9 @@ NvOFState* nvof_create(
         return nullptr;
     }
     LOG_INFO(
-        "NvOF: flow stride = x=%u y=%u bytes",
-        st->flowStrideX,
-        st->flowStrideY
+        "NvOF: flow stride horizontal=%u rowPitch=%u bytes",
+        st->flowStrideY,
+        st->flowStrideX
     );
     // -------------------------------------------------------------------------
     // Allocate CUDA-side buffers.
@@ -2620,7 +2624,7 @@ bool nvof_execute(
             )
         ),
         static_cast<size_t>(
-            st->flowStrideY
+            st->flowRowPitchBytes
         ),
         st->flowWidth,
         st->flowHeight,
