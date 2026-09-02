@@ -186,7 +186,7 @@ jobs:
     - name: Upload AX
       uses: actions/upload-artifact@v4
       with:
-        name: ${{env.Title}}-${{matrix.Settings.Name}}-${{matrix.Configuration}}
+        name: ${{env.Title}}-${{matrix.Settings.Name}}-${{matrix.Configuration}}.ax
         path: "${{github.workspace}}/${{env.Artifacts}}/${{env.Title}}_${{matrix.Settings.Architecture}}.ax"
 
     - name: Upload artifacts
