@@ -183,6 +183,12 @@ jobs:
 #        move /Y "TensorRT-RTX-${{env.TENSORRT_RTX_VERSION_MAJOR}}.${{env.TENSORRT_RTX_VERSION_MINOR}}.${{env.TENSORRT_RTX_VERSION_PATCH}}.${{env.TENSORRT_RTX_VERSION_BUILD}}\bin\tensorrt_onnxparser_rtx_${{env.TENSORRT_RTX_VERSION_MAJOR}}_${{env.TENSORRT_RTX_VERSION_MINOR}}.dll" "${{env.Artifacts}}/"
 #        move /Y "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v${{env.CUDA_VERSION_MAJOR}}.${{env.CUDA_VERSION_MINOR}}\bin\*.dll"                                                                                                                                                "${{env.Artifacts}}/"
 
+    - name: Upload AX
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{env.Title}}-${{matrix.Settings.Name}}-${{matrix.Configuration}}
+        path: "${{github.workspace}}/${{env.Artifacts}}/${{env.Extension}}/${{env.Title}}_${{matrix.Architecture}}.ax"
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
