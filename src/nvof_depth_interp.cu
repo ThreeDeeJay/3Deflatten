@@ -5,7 +5,7 @@
 // No static link against nvofapi64.lib is required.
 //
 // This file intentionally mirrors the CUDA NvOF ABI from NVIDIA's
-// Optical Flow SDK headers.  The function-table order and structure
+// Optical Flow SDK headers. The function-table order and structure
 // layouts are ABI-critical.
 #include "nvof_depth_interp.h"
 #include "logger.h"
@@ -38,10 +38,10 @@
     GetProcAddress(reinterpret_cast<HMODULE>(h), (n))
 #else
 #include <dlfcn.h>
-#define LOAD_LIB(n)          dlopen((n), RTLD_LAZY)
-#define LOAD_SYSTEM_LIB(n)   dlopen((n), RTLD_LAZY)
-#define FREE_LIB(h)          dlclose((h))
-#define GET_PROC(h, n)       dlsym((h), (n))
+#define LOAD_LIB(n)        dlopen((n), RTLD_LAZY)
+#define LOAD_SYSTEM_LIB(n) dlopen((n), RTLD_LAZY)
+#define FREE_LIB(h)        dlclose((h))
+#define GET_PROC(h, n)     dlsym((h), (n))
 #endif
 // =============================================================================
 // NVIDIA NvOF ABI definitions
@@ -306,23 +306,26 @@ typedef NV_OF_STATUS (NVOF_CALL *PFNNVOFDESTROYGPUBUFFERCUDA)(
 typedef NV_OF_STATUS (NVOF_CALL *PFNNVOFDESTROY)(
     NvOFHandle
 );
-// IMPORTANT:
-// NVIDIA's actual signature is:
+// NVIDIA signature:
 //
-//   nvOFGetLastError(hOf, char lastError[], uint32_t *size)
-//
-// NOT char**.
+// nvOFGetLastError(
+//     hOf,
+//     char lastError[],
+//     uint32_t *size
+// );
 typedef NV_OF_STATUS (NVOF_CALL *PFNNVOFGETLASTERROR)(
     NvOFHandle,
     char[],
     uint32_t*
 );
-// IMPORTANT:
-// NVIDIA's actual signature is:
+// NVIDIA signature:
 //
-//   nvOFGetCaps(hOf, capsParam, capsVal, size)
-//
-// Both capsVal and size are uint32_t*.
+// nvOFGetCaps(
+//     hOf,
+//     capsParam,
+//     capsVal,
+//     size
+// );
 typedef NV_OF_STATUS (NVOF_CALL *PFNNVOFGETCAPS)(
     NvOFHandle,
     NV_OF_CAPS,
@@ -334,18 +337,18 @@ typedef NV_OF_STATUS (NVOF_CALL *PFNNVOFGETCAPS)(
 // -----------------------------------------------------------------------------
 typedef struct _NV_OF_CUDA_API_FUNCTION_LIST
 {
-    PFNNVCREATEOPTICALFLOWCUDA     nvCreateOpticalFlowCuda;
-    PFNNVOFINIT                    nvOFInit;
-    PFNNVOFCREATEGPUBUFFERCUDA     nvOFCreateGPUBufferCuda;
-    PFNNVOFGPUBUFFERGETCUARRAY     nvOFGPUBufferGetCUarray;
-    PFNNVOFGPUBUFFERGETCUDEVICEPTR nvOFGPUBufferGetCUdeviceptr;
-    PFNNVOFGPUBUFFERGETSTRIDEINFO  nvOFGPUBufferGetStrideInfo;
+    PFNNVCREATEOPTICALFLOWCUDA      nvCreateOpticalFlowCuda;
+    PFNNVOFINIT                     nvOFInit;
+    PFNNVOFCREATEGPUBUFFERCUDA      nvOFCreateGPUBufferCuda;
+    PFNNVOFGPUBUFFERGETCUARRAY      nvOFGPUBufferGetCUarray;
+    PFNNVOFGPUBUFFERGETCUDEVICEPTR  nvOFGPUBufferGetCUdeviceptr;
+    PFNNVOFGPUBUFFERGETSTRIDEINFO   nvOFGPUBufferGetStrideInfo;
     PFNNVOFSETIOCUDASTREAMS         nvOFSetIOCudaStreams;
-    PFNNVOFEXECUTE                  nvOFExecute;
-    PFNNVOFDESTROYGPUBUFFERCUDA     nvOFDestroyGPUBufferCuda;
-    PFNNVOFDESTROY                  nvOFDestroy;
-    PFNNVOFGETLASTERROR             nvOFGetLastError;
-    PFNNVOFGETCAPS                  nvOFGetCaps;
+    PFNNVOFEXECUTE                   nvOFExecute;
+    PFNNVOFDESTROYGPUBUFFERCUDA      nvOFDestroyGPUBufferCuda;
+    PFNNVOFDESTROY                   nvOFDestroy;
+    PFNNVOFGETLASTERROR              nvOFGetLastError;
+    PFNNVOFGETCAPS                   nvOFGetCaps;
 } NV_OF_CUDA_API_FUNCTION_LIST;
 // -----------------------------------------------------------------------------
 // DLL entry points
@@ -369,93 +372,144 @@ __global__ void k_bgra_to_gray8(
     int dstW,
     int dstH)
 {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int x =
+        blockIdx.x * blockDim.x + threadIdx.x;
+    const int y =
+        blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= dstW || y >= dstH)
         return;
     const float fx =
-        (x + 0.5f) * srcW / static_cast<float>(dstW) - 0.5f;
+        (static_cast<float>(x) + 0.5f) *
+        static_cast<float>(srcW) /
+        static_cast<float>(dstW) -
+        0.5f;
     const float fy =
-        (y + 0.5f) * srcH / static_cast<float>(dstH) - 0.5f;
-    int x0 = static_cast<int>(floorf(fx));
-    int y0 = static_cast<int>(floorf(fy));
+        (static_cast<float>(y) + 0.5f) *
+        static_cast<float>(srcH) /
+        static_cast<float>(dstH) -
+        0.5f;
+    int x0 =
+        static_cast<int>(floorf(fx));
+    int y0 =
+        static_cast<int>(floorf(fy));
     x0 = max(0, min(x0, srcW - 1));
     y0 = max(0, min(y0, srcH - 1));
-    const int x1 = min(x0 + 1, srcW - 1);
-    const int y1 = min(y0 + 1, srcH - 1);
-    const float tx = fx - static_cast<float>(x0);
-    const float ty = fy - static_cast<float>(y0);
+    const int x1 =
+        min(x0 + 1, srcW - 1);
+    const int y1 =
+        min(y0 + 1, srcH - 1);
+    const float tx =
+        fx - static_cast<float>(x0);
+    const float ty =
+        fy - static_cast<float>(y0);
     const uint8_t* p00 =
-        src + y0 * srcStride + x0 * 4;
+        src +
+        static_cast<size_t>(y0) * static_cast<size_t>(srcStride) +
+        static_cast<size_t>(x0) * 4u;
     const uint8_t* p10 =
-        src + y0 * srcStride + x1 * 4;
+        src +
+        static_cast<size_t>(y0) * static_cast<size_t>(srcStride) +
+        static_cast<size_t>(x1) * 4u;
     const uint8_t* p01 =
-        src + y1 * srcStride + x0 * 4;
+        src +
+        static_cast<size_t>(y1) * static_cast<size_t>(srcStride) +
+        static_cast<size_t>(x0) * 4u;
     const uint8_t* p11 =
-        src + y1 * srcStride + x1 * 4;
+        src +
+        static_cast<size_t>(y1) * static_cast<size_t>(srcStride) +
+        static_cast<size_t>(x1) * 4u;
     // BGRA -> luminance.
     const float l00 =
         (29.0f * p00[0] +
          150.0f * p00[1] +
-         77.0f * p00[2]) / 256.0f;
+         77.0f * p00[2]) /
+        256.0f;
     const float l10 =
         (29.0f * p10[0] +
          150.0f * p10[1] +
-         77.0f * p10[2]) / 256.0f;
+         77.0f * p10[2]) /
+        256.0f;
     const float l01 =
         (29.0f * p01[0] +
          150.0f * p01[1] +
-         77.0f * p01[2]) / 256.0f;
+         77.0f * p01[2]) /
+        256.0f;
     const float l11 =
         (29.0f * p11[0] +
          150.0f * p11[1] +
-         77.0f * p11[2]) / 256.0f;
-    const float top = l00 + (l10 - l00) * tx;
-    const float bot = l01 + (l11 - l01) * tx;
-    float value = top + (bot - top) * ty;
-    value = fminf(255.0f, fmaxf(0.0f, value));
-    dst[y * dstW + x] =
-        static_cast<uint8_t>(value + 0.5f);
+         77.0f * p11[2]) /
+        256.0f;
+    const float top =
+        l00 + (l10 - l00) * tx;
+    const float bottom =
+        l01 + (l11 - l01) * tx;
+    float value =
+        top + (bottom - top) * ty;
+    value =
+        fminf(
+            255.0f,
+            fmaxf(0.0f, value)
+        );
+    dst[
+        static_cast<size_t>(y) *
+        static_cast<size_t>(dstW) +
+        static_cast<size_t>(x)
+    ] =
+        static_cast<uint8_t>(
+            value + 0.5f
+        );
 }
 // -----------------------------------------------------------------------------
 // Float atomic min/max
 // -----------------------------------------------------------------------------
-__device__ float atomicMinFloat(float* address, float value)
+__device__ float atomicMinFloat(
+    float* address,
+    float value)
 {
-    int* addressAsInt = reinterpret_cast<int*>(address);
-    int old = *addressAsInt;
+    int* addressAsInt =
+        reinterpret_cast<int*>(address);
+    int old =
+        *addressAsInt;
     while (true)
     {
-        const int assumed = old;
+        const int assumed =
+            old;
         const float current =
             __int_as_float(assumed);
         if (current <= value)
             return current;
-        old = atomicCAS(
-            addressAsInt,
-            assumed,
-            __float_as_int(value)
-        );
+        old =
+            atomicCAS(
+                addressAsInt,
+                assumed,
+                __float_as_int(value)
+            );
         if (old == assumed)
             return value;
     }
 }
-__device__ float atomicMaxFloat(float* address, float value)
+__device__ float atomicMaxFloat(
+    float* address,
+    float value)
 {
-    int* addressAsInt = reinterpret_cast<int*>(address);
-    int old = *addressAsInt;
+    int* addressAsInt =
+        reinterpret_cast<int*>(address);
+    int old =
+        *addressAsInt;
     while (true)
     {
-        const int assumed = old;
+        const int assumed =
+            old;
         const float current =
             __int_as_float(assumed);
         if (current >= value)
             return current;
-        old = atomicCAS(
-            addressAsInt,
-            assumed,
-            __float_as_int(value)
-        );
+        old =
+            atomicCAS(
+                addressAsInt,
+                assumed,
+                __float_as_int(value)
+            );
         if (old == assumed)
             return value;
     }
@@ -465,18 +519,27 @@ __device__ float atomicMaxFloat(float* address, float value)
 // -----------------------------------------------------------------------------
 __global__ void k_scan_minmax(
     const float* __restrict__ input,
-    float* minmax,
-    int count)
+    float* __restrict__ minmax,
+    size_t count)
 {
-    const int i =
-        blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t i =
+        static_cast<size_t>(blockIdx.x) *
+        static_cast<size_t>(blockDim.x) +
+        static_cast<size_t>(threadIdx.x);
     if (i >= count)
         return;
-    const float value = input[i];
+    const float value =
+        input[i];
     if (isfinite(value))
     {
-        atomicMinFloat(&minmax[0], value);
-        atomicMaxFloat(&minmax[1], value);
+        atomicMinFloat(
+            &minmax[0],
+            value
+        );
+        atomicMaxFloat(
+            &minmax[1],
+            value
+        );
     }
 }
 // -----------------------------------------------------------------------------
@@ -489,46 +552,82 @@ __global__ void k_normalize_depth(
     const float* __restrict__ input,
     float* __restrict__ output,
     const float* __restrict__ minmax,
-    int count)
+    size_t count)
 {
-    const int i =
-        blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t i =
+        static_cast<size_t>(blockIdx.x) *
+        static_cast<size_t>(blockDim.x) +
+        static_cast<size_t>(threadIdx.x);
     if (i >= count)
         return;
-    const float mn = minmax[0];
-    const float mx = minmax[1];
-    const float value = input[i];
+    const float mn =
+        minmax[0];
+    const float mx =
+        minmax[1];
+    const float value =
+        input[i];
     if (!isfinite(value))
     {
-        output[i] = 0.0f;
+        output[i] =
+            0.0f;
         return;
     }
-    const float range = mx - mn;
-    if (!(range > 1.0e-8f) || !isfinite(range))
+    const float range =
+        mx - mn;
+    if (!(range > 1.0e-8f) ||
+        !isfinite(range))
     {
-        output[i] = 0.5f;
+        output[i] =
+            0.5f;
         return;
     }
     float normalized =
         (value - mn) / range;
     normalized =
-        fminf(1.0f, fmaxf(0.0f, normalized));
-    output[i] = normalized;
+        fminf(
+            1.0f,
+            fmaxf(0.0f, normalized)
+        );
+    output[i] =
+        normalized;
 }
 // -----------------------------------------------------------------------------
-// Convert NvOF S10.5 SHORT2 flow to full-resolution float2.
+// Read one NvOF SHORT2 vector.
+// -----------------------------------------------------------------------------
+__device__ __forceinline__ float2 read_nvof_flow(
+    const uint8_t* flowBytes,
+    size_t flowStride,
+    int x,
+    int y)
+{
+    const uint8_t* row =
+        flowBytes +
+        static_cast<size_t>(y) * flowStride;
+    const int16_t* vector =
+        reinterpret_cast<const int16_t*>(
+            row +
+            static_cast<size_t>(x) *
+            sizeof(int16_t) *
+            2u
+        );
+    return make_float2(
+        static_cast<float>(vector[0]) / 32.0f,
+        static_cast<float>(vector[1]) / 32.0f
+    );
+}
+// -----------------------------------------------------------------------------
+// Convert NvOF S10.5 SHORT2 flow to full LR resolution.
 //
-// NvOF output is stored at:
+// NvOF output is:
 //
-//   ceil(width / grid) x ceil(height / grid)
+//     ceil(width / grid) x ceil(height / grid)
 //
-// Each vector is:
+// Each vector component is signed 16-bit S10.5,
+// therefore:
 //
-//   int16 / 32.0
+//     component / 32.0f
 //
-// because the low five bits are fractional bits.
-//
-// Bilinear interpolation is used when grid > 1.
+// For grid sizes > 1, the sparse flow field is bilinearly expanded.
 // -----------------------------------------------------------------------------
 __global__ void k_expand_flow(
     const uint8_t* __restrict__ flowBytes,
@@ -552,10 +651,20 @@ __global__ void k_expand_flow(
     const float gy =
         static_cast<float>(y) /
         static_cast<float>(grid);
-    const int x0 =
-        max(0, min(static_cast<int>(floorf(gx)), flowW - 1));
-    const int y0 =
-        max(0, min(static_cast<int>(floorf(gy)), flowH - 1));
+    int x0 =
+        static_cast<int>(floorf(gx));
+    int y0 =
+        static_cast<int>(floorf(gy));
+    x0 =
+        max(
+            0,
+            min(x0, flowW - 1)
+        );
+    y0 =
+        max(
+            0,
+            min(y0, flowH - 1)
+        );
     const int x1 =
         min(x0 + 1, flowW - 1);
     const int y1 =
@@ -564,40 +673,56 @@ __global__ void k_expand_flow(
         gx - static_cast<float>(x0);
     const float ty =
         gy - static_cast<float>(y0);
-    auto readFlow =
-        [&](int fx, int fy) -> float2
-    {
-        const uint8_t* row =
-            flowBytes + static_cast<size_t>(fy) * flowStride;
-        const int16_t* v =
-            reinterpret_cast<const int16_t*>(
-                row + static_cast<size_t>(fx) * sizeof(int16_t) * 2
-            );
-        return make_float2(
-            static_cast<float>(v[0]) / 32.0f,
-            static_cast<float>(v[1]) / 32.0f
+    const float2 f00 =
+        read_nvof_flow(
+            flowBytes,
+            flowStride,
+            x0,
+            y0
         );
-    };
-    const float2 f00 = readFlow(x0, y0);
-    const float2 f10 = readFlow(x1, y0);
-    const float2 f01 = readFlow(x0, y1);
-    const float2 f11 = readFlow(x1, y1);
-    const float2 top = make_float2(
-        f00.x + (f10.x - f00.x) * tx,
-        f00.y + (f10.y - f00.y) * tx
-    );
-    const float2 bottom = make_float2(
-        f01.x + (f11.x - f01.x) * tx,
-        f01.y + (f11.y - f01.y) * tx
-    );
-    fullFlow[y * fullW + x] =
+    const float2 f10 =
+        read_nvof_flow(
+            flowBytes,
+            flowStride,
+            x1,
+            y0
+        );
+    const float2 f01 =
+        read_nvof_flow(
+            flowBytes,
+            flowStride,
+            x0,
+            y1
+        );
+    const float2 f11 =
+        read_nvof_flow(
+            flowBytes,
+            flowStride,
+            x1,
+            y1
+        );
+    const float2 top =
+        make_float2(
+            f00.x + (f10.x - f00.x) * tx,
+            f00.y + (f10.y - f00.y) * tx
+        );
+    const float2 bottom =
+        make_float2(
+            f01.x + (f11.x - f01.x) * tx,
+            f01.y + (f11.y - f01.y) * tx
+        );
+    fullFlow[
+        static_cast<size_t>(y) *
+        static_cast<size_t>(fullW) +
+        static_cast<size_t>(x)
+    ] =
         make_float2(
             top.x + (bottom.x - top.x) * ty,
             top.y + (bottom.y - top.y) * ty
         );
 }
 // -----------------------------------------------------------------------------
-// Bilinear scalar sampling
+// Bilinear scalar sampling.
 // -----------------------------------------------------------------------------
 __device__ float sample_float_bilinear(
     const float* data,
@@ -606,14 +731,16 @@ __device__ float sample_float_bilinear(
     float x,
     float y)
 {
-    x = fminf(
-        static_cast<float>(width - 1),
-        fmaxf(0.0f, x)
-    );
-    y = fminf(
-        static_cast<float>(height - 1),
-        fmaxf(0.0f, y)
-    );
+    x =
+        fminf(
+            static_cast<float>(width - 1),
+            fmaxf(0.0f, x)
+        );
+    y =
+        fminf(
+            static_cast<float>(height - 1),
+            fmaxf(0.0f, y)
+        );
     const int x0 =
         static_cast<int>(floorf(x));
     const int y0 =
@@ -627,33 +754,55 @@ __device__ float sample_float_bilinear(
     const float ty =
         y - static_cast<float>(y0);
     const float a =
-        data[y0 * width + x0];
+        data[
+            static_cast<size_t>(y0) *
+            static_cast<size_t>(width) +
+            static_cast<size_t>(x0)
+        ];
     const float b =
-        data[y0 * width + x1];
+        data[
+            static_cast<size_t>(y0) *
+            static_cast<size_t>(width) +
+            static_cast<size_t>(x1)
+        ];
     const float c =
-        data[y1 * width + x0];
+        data[
+            static_cast<size_t>(y1) *
+            static_cast<size_t>(width) +
+            static_cast<size_t>(x0)
+        ];
     const float d =
-        data[y1 * width + x1];
+        data[
+            static_cast<size_t>(y1) *
+            static_cast<size_t>(width) +
+            static_cast<size_t>(x1)
+        ];
     const float top =
         a + (b - a) * tx;
     const float bottom =
         c + (d - c) * tx;
-    return top + (bottom - top) * ty;
+    return
+        top +
+        (bottom - top) * ty;
 }
 // -----------------------------------------------------------------------------
-// Warp previous/current depth using current->reference NvOF flow.
+// Warp previous/current depth using current->reference flow.
 //
-// NvOF's forward flow is the movement from input frame to reference frame.
+// NvOF forward flow is input -> reference.
+//
 // We execute:
 //
 //     inputFrame     = current
 //     referenceFrame = previous
 //
-// Therefore, for an intermediate time t:
+// Therefore the resulting flow is:
+//
+//     current -> previous
+//
+// For intermediate time t:
 //
 //     previous sample = p + t * flow
 //     current  sample = p - (1-t) * flow
-//
 // -----------------------------------------------------------------------------
 __global__ void k_warp_blend(
     const float* __restrict__ prevDepth,
@@ -670,8 +819,10 @@ __global__ void k_warp_blend(
         blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height)
         return;
-    const int index =
-        y * width + x;
+    const size_t index =
+        static_cast<size_t>(y) *
+        static_cast<size_t>(width) +
+        static_cast<size_t>(x);
     const float2 flow =
         fullFlow[index];
     const float prevX =
@@ -719,12 +870,19 @@ struct NvOFState
     int flowHeight = 0;
     bool initialized = false;
     void* library = nullptr;
+    // Context that was current when nvof_create() was called.
     CUcontext previousContext = nullptr;
+    // Context NvOF uses.
     CUcontext ofContext = nullptr;
+    // True only when we retained the device primary context ourselves.
     bool ownsPrimaryContext = false;
+    // Device associated with the retained primary context.
+    // This must be stored explicitly because the current context may
+    // have been restored before release.
+    CUdevice primaryDevice = 0;
     NvOFHandle hOF = nullptr;
     NV_OF_CUDA_API_FUNCTION_LIST fn{};
-    // Per-slot input frames.
+    // Per-slot grayscale input frames.
     NvOFGPUBufferHandle guide[2] = {
         nullptr,
         nullptr
@@ -734,20 +892,22 @@ struct NvOFState
     // NvOF output stride.
     uint32_t flowStrideX = 0;
     uint32_t flowStrideY = 0;
-    // Full LR-resolution flow after grid expansion.
+    // Full LR-resolution flow.
     float2* d_flowFull = nullptr;
     // Normalized depth per pipeline slot.
     float* d_depth[2] = {
         nullptr,
         nullptr
     };
-    // Scratch:
-    //
     // [0] = min
     // [1] = max
-    //
     float* d_minmax = nullptr;
-    // CUDA stream used by the last NvOF execution.
+    // State tracking.
+    bool slotPrepared[2] = {
+        false,
+        false
+    };
+    bool flowValid = false;
     CUstream lastStream = nullptr;
 };
 // =============================================================================
@@ -797,7 +957,9 @@ static void nvof_log_last_error(
     }
     char message[256] = {};
     uint32_t size =
-        static_cast<uint32_t>(sizeof(message));
+        static_cast<uint32_t>(
+            sizeof(message)
+        );
     const NV_OF_STATUS status =
         st->fn.nvOFGetLastError(
             st->hOF,
@@ -837,8 +999,14 @@ static bool nvof_cu_ok(
         return true;
     const char* name = nullptr;
     const char* text = nullptr;
-    cuGetErrorName(status, &name);
-    cuGetErrorString(status, &text);
+    cuGetErrorName(
+        status,
+        &name
+    );
+    cuGetErrorString(
+        status,
+        &text
+    );
     LOG_WARN(
         "NvOF: CUDA driver failure in %s: %s (%s)",
         operation,
@@ -882,7 +1050,9 @@ static bool nvof_get_caps(
     }
     if (count == 0)
         return true;
-    values.resize(count);
+    values.resize(
+        static_cast<size_t>(count)
+    );
     status =
         st->fn.nvOFGetCaps(
             st->hOF,
@@ -901,7 +1071,9 @@ static bool nvof_get_caps(
         values.clear();
         return false;
     }
-    values.resize(count);
+    values.resize(
+        static_cast<size_t>(count)
+    );
     return true;
 }
 static bool nvof_get_scalar_cap(
@@ -919,7 +1091,8 @@ static bool nvof_get_scalar_cap(
     }
     if (values.empty())
         return false;
-    value = values[0];
+    value =
+        values[0];
     return true;
 }
 // =============================================================================
@@ -962,7 +1135,7 @@ static bool nvof_query_capabilities(
         if (grid == 4)
             supports4 = true;
     }
-    // Prefer the highest-resolution flow representation.
+    // Prefer highest-resolution flow.
     if (supports1)
         st->gridSize = 1;
     else if (supports2)
@@ -989,7 +1162,8 @@ static bool nvof_query_capabilities(
             "NvOF: width range minimum = %u",
             widthMin
         );
-        if (st->width < static_cast<int>(widthMin))
+        if (st->width <
+            static_cast<int>(widthMin))
         {
             LOG_WARN(
                 "NvOF: width %d is below driver minimum %u",
@@ -1008,7 +1182,8 @@ static bool nvof_query_capabilities(
             "NvOF: height range minimum = %u",
             heightMin
         );
-        if (st->height < static_cast<int>(heightMin))
+        if (st->height <
+            static_cast<int>(heightMin))
         {
             LOG_WARN(
                 "NvOF: height %d is below driver minimum %u",
@@ -1027,7 +1202,8 @@ static bool nvof_query_capabilities(
             "NvOF: width range maximum = %u",
             widthMax
         );
-        if (st->width > static_cast<int>(widthMax))
+        if (st->width >
+            static_cast<int>(widthMax))
         {
             LOG_WARN(
                 "NvOF: width %d exceeds driver maximum %u",
@@ -1046,7 +1222,8 @@ static bool nvof_query_capabilities(
             "NvOF: height range maximum = %u",
             heightMax
         );
-        if (st->height > static_cast<int>(heightMax))
+        if (st->height >
+            static_cast<int>(heightMax))
         {
             LOG_WARN(
                 "NvOF: height %d exceeds driver maximum %u",
@@ -1109,20 +1286,18 @@ static bool nvof_query_capabilities(
     return true;
 }
 // =============================================================================
-// Load dynamic library
+// Dynamic library loading
 // =============================================================================
 static void* nvof_load_library(
     const std::wstring& dllDir)
 {
 #ifdef _WIN32
-    // Prefer the driver-installed System32 copy.
-    //
-    // This avoids accidentally loading an incompatible SDK DLL from
-    // an application directory when the NVIDIA driver already provides
-    // the correct runtime.
+    // Prefer the driver-installed System32 runtime.
     void* library =
         reinterpret_cast<void*>(
-            LOAD_SYSTEM_LIB(L"nvofapi64.dll")
+            LOAD_SYSTEM_LIB(
+                L"nvofapi64.dll"
+            )
         );
     if (library)
     {
@@ -1133,17 +1308,21 @@ static void* nvof_load_library(
     }
     if (!dllDir.empty())
     {
-        std::wstring path = dllDir;
+        std::wstring path =
+            dllDir;
         if (!path.empty() &&
             path.back() != L'\\' &&
             path.back() != L'/')
         {
             path += L'\\';
         }
-        path += L"nvofapi64.dll";
+        path +=
+            L"nvofapi64.dll";
         library =
             reinterpret_cast<void*>(
-                LOAD_LIB(path.c_str())
+                LOAD_LIB(
+                    path.c_str()
+                )
             );
         if (library)
         {
@@ -1160,10 +1339,16 @@ static void* nvof_load_library(
 #else
     (void)dllDir;
     void* library =
-        LOAD_SYSTEM_LIB("libnvidia-opticalflow.so.1");
+        LOAD_SYSTEM_LIB(
+            "libnvidia-opticalflow.so.1"
+        );
     if (!library)
+    {
         library =
-            LOAD_SYSTEM_LIB("libnvidia-opticalflow.so");
+            LOAD_SYSTEM_LIB(
+                "libnvidia-opticalflow.so"
+            );
+    }
     if (library)
     {
         LOG_INFO(
@@ -1197,46 +1382,57 @@ NvOFState* nvof_create(
     }
     NvOFState* st =
         new NvOFState();
-    st->width = w;
-    st->height = h;
-    st->maxInterp = maxInterp;
+    st->width =
+        w;
+    st->height =
+        h;
+    st->maxInterp =
+        maxInterp;
     // -------------------------------------------------------------------------
     // CUDA context
     // -------------------------------------------------------------------------
-    CUcontext currentContext = nullptr;
+    CUcontext currentContext =
+        nullptr;
     if (!nvof_cu_ok(
-            cuCtxGetCurrent(&currentContext),
+            cuCtxGetCurrent(
+                &currentContext
+            ),
             "cuCtxGetCurrent"))
     {
         delete st;
         return nullptr;
     }
-    st->previousContext = currentContext;
+    st->previousContext =
+        currentContext;
     if (currentContext)
     {
-        // Prefer the caller's existing context.
-        //
-        // This is important for TensorRT/CUDA interoperability:
-        // creating a second independent CUDA context can cause unnecessary
-        // resource duplication and synchronization problems.
-        st->ofContext = currentContext;
+        // Reuse the application's existing CUDA context.
+        st->ofContext =
+            currentContext;
         LOG_INFO(
             "NvOF: using existing CUDA context"
         );
     }
     else
     {
-        int device = 0;
+        int device =
+            0;
         if (!nvof_cuda_ok(
-                cudaGetDevice(&device),
+                cudaGetDevice(
+                    &device
+                ),
                 "cudaGetDevice"))
         {
             delete st;
             return nullptr;
         }
-        CUdevice cuDevice = 0;
+        CUdevice cuDevice =
+            0;
         if (!nvof_cu_ok(
-                cuDeviceGet(&cuDevice, device),
+                cuDeviceGet(
+                    &cuDevice,
+                    device
+                ),
                 "cuDeviceGet"))
         {
             delete st;
@@ -1252,14 +1448,23 @@ NvOFState* nvof_create(
             delete st;
             return nullptr;
         }
-        st->ownsPrimaryContext = true;
+        st->ownsPrimaryContext =
+            true;
+        st->primaryDevice =
+            cuDevice;
         if (!nvof_cu_ok(
-                cuCtxSetCurrent(st->ofContext),
+                cuCtxSetCurrent(
+                    st->ofContext
+                ),
                 "cuCtxSetCurrent"))
         {
-            cuDevicePrimaryCtxRelease(cuDevice);
-            st->ofContext = nullptr;
-            st->ownsPrimaryContext = false;
+            cuDevicePrimaryCtxRelease(
+                cuDevice
+            );
+            st->ofContext =
+                nullptr;
+            st->ownsPrimaryContext =
+                false;
             delete st;
             return nullptr;
         }
@@ -1271,26 +1476,40 @@ NvOFState* nvof_create(
     // Dynamic NvOF library
     // -------------------------------------------------------------------------
     st->library =
-        nvof_load_library(dllDir);
+        nvof_load_library(
+            dllDir
+        );
     if (!st->library)
     {
         nvof_destroy(st);
         return nullptr;
     }
     auto getMaxApiVersion =
-        reinterpret_cast<PFN_NV_OF_GET_MAX_SUPPORTED_API_VERSION>(
+        reinterpret_cast<
+            PFN_NV_OF_GET_MAX_SUPPORTED_API_VERSION
+        >(
             GET_PROC(
                 st->library,
                 "NvOFGetMaxSupportedApiVersion"
             )
         );
     auto createInstance =
-        reinterpret_cast<PFN_NV_OF_API_CREATE_INSTANCE_CUDA>(
+        reinterpret_cast<
+            PFN_NV_OF_API_CREATE_INSTANCE_CUDA
+        >(
             GET_PROC(
                 st->library,
                 "NvOFAPICreateInstanceCuda"
             )
         );
+    if (!getMaxApiVersion)
+    {
+        LOG_WARN(
+            "NvOF: NvOFGetMaxSupportedApiVersion export not found"
+        );
+        nvof_destroy(st);
+        return nullptr;
+    }
     if (!createInstance)
     {
         LOG_WARN(
@@ -1300,42 +1519,38 @@ NvOFState* nvof_create(
         return nullptr;
     }
     // -------------------------------------------------------------------------
-    // Query driver API version
+    // Query driver API version.
     // -------------------------------------------------------------------------
-    uint32_t apiVersion = 0;
-    if (getMaxApiVersion)
-    {
-        const NV_OF_STATUS status =
-            getMaxApiVersion(&apiVersion);
-        if (status != NV_OF_SUCCESS)
-        {
-            LOG_WARN(
-                "NvOF: NvOFGetMaxSupportedApiVersion failed: %d (%s)",
-                static_cast<int>(status),
-                nvof_status_string(status)
-            );
-            nvof_destroy(st);
-            return nullptr;
-        }
-        LOG_INFO(
-            "NvOF: driver max API version = 0x%x",
-            apiVersion
+    uint32_t apiVersion =
+        0;
+    const NV_OF_STATUS versionStatus =
+        getMaxApiVersion(
+            &apiVersion
         );
-    }
-    else
+    if (versionStatus != NV_OF_SUCCESS)
     {
-        // SDK-compatible fallback.
-        //
-        // The runtime version query is preferred whenever available.
-        apiVersion = 0x50u;
         LOG_WARN(
-            "NvOF: NvOFGetMaxSupportedApiVersion unavailable; "
-            "falling back to API version 0x%x",
-            apiVersion
+            "NvOF: NvOFGetMaxSupportedApiVersion failed: %d (%s)",
+            static_cast<int>(versionStatus),
+            nvof_status_string(versionStatus)
         );
+        nvof_destroy(st);
+        return nullptr;
     }
+    if (apiVersion == 0)
+    {
+        LOG_WARN(
+            "NvOF: driver returned invalid API version 0"
+        );
+        nvof_destroy(st);
+        return nullptr;
+    }
+    LOG_INFO(
+        "NvOF: driver max API version = 0x%x",
+        apiVersion
+    );
     // -------------------------------------------------------------------------
-    // Populate NvOF function table
+    // Populate NvOF function table.
     // -------------------------------------------------------------------------
     std::memset(
         &st->fn,
@@ -1376,7 +1591,7 @@ NvOFState* nvof_create(
         return nullptr;
     }
     // -------------------------------------------------------------------------
-    // Create optical-flow instance
+    // Create optical-flow instance.
     // -------------------------------------------------------------------------
     status =
         st->fn.nvCreateOpticalFlowCuda(
@@ -1398,8 +1613,6 @@ NvOFState* nvof_create(
     );
     // -------------------------------------------------------------------------
     // Query capabilities BEFORE NvOFInit.
-    //
-    // This is the critical fix for the current r=5 / INVALID_PARAM failure.
     // -------------------------------------------------------------------------
     if (!nvof_query_capabilities(st))
     {
@@ -1410,7 +1623,7 @@ NvOFState* nvof_create(
         return nullptr;
     }
     // -------------------------------------------------------------------------
-    // Initialize NvOF
+    // Initialize NvOF.
     // -------------------------------------------------------------------------
     NV_OF_INIT_PARAMS initParams{};
     initParams.width =
@@ -1418,14 +1631,12 @@ NvOFState* nvof_create(
     initParams.height =
         static_cast<uint32_t>(h);
     initParams.outGridSize =
-        static_cast<NV_OF_OUTPUT_VECTOR_GRID_SIZE>(
+        static_cast<
+            NV_OF_OUTPUT_VECTOR_GRID_SIZE
+        >(
             st->gridSize
         );
     // External hints are disabled.
-    //
-    // NVIDIA explicitly says hintGridSize is considered when external hints
-    // are enabled.  Leaving this UNDEFINED avoids passing an unnecessary
-    // parameter combination to the driver.
     initParams.hintGridSize =
         NV_OF_HINT_VECTOR_GRID_SIZE_UNDEFINED;
     initParams.mode =
@@ -1438,7 +1649,7 @@ NvOFState* nvof_create(
         NV_OF_FALSE;
     initParams.hPrivData =
         nullptr;
-    // RTX 2080 Ti is Turing.  NVIDIA specifies UNDEFINED for Turing.
+    // Turing uses UNDEFINED for stereo disparity range.
     initParams.disparityRange =
         NV_OF_STEREO_DISPARITY_RANGE_UNDEFINED;
     initParams.enableRoi =
@@ -1448,7 +1659,9 @@ NvOFState* nvof_create(
         "mode=OPTICALFLOW perf=SLOW hints=OFF cost=OFF roi=OFF",
         initParams.width,
         initParams.height,
-        static_cast<unsigned>(initParams.outGridSize)
+        static_cast<unsigned>(
+            initParams.outGridSize
+        )
     );
     status =
         st->fn.nvOFInit(
@@ -1467,7 +1680,7 @@ NvOFState* nvof_create(
         return nullptr;
     }
     // -------------------------------------------------------------------------
-    // Allocate NvOF input buffers
+    // Allocate NvOF input buffers.
     // -------------------------------------------------------------------------
     NV_OF_BUFFER_DESCRIPTOR inputDesc{};
     inputDesc.width =
@@ -1499,18 +1712,28 @@ NvOFState* nvof_create(
             nvof_destroy(st);
             return nullptr;
         }
+        if (!st->guide[i])
+        {
+            LOG_WARN(
+                "NvOF: driver returned null input buffer %d",
+                i
+            );
+            nvof_destroy(st);
+            return nullptr;
+        }
     }
     // -------------------------------------------------------------------------
     // Allocate flow output buffer.
-    //
-    // IMPORTANT:
-    // Output dimensions are expressed in outGridSize units.
     // -------------------------------------------------------------------------
     NV_OF_BUFFER_DESCRIPTOR flowDesc{};
     flowDesc.width =
-        static_cast<uint32_t>(st->flowWidth);
+        static_cast<uint32_t>(
+            st->flowWidth
+        );
     flowDesc.height =
-        static_cast<uint32_t>(st->flowHeight);
+        static_cast<uint32_t>(
+            st->flowHeight
+        );
     flowDesc.bufferUsage =
         NV_OF_BUFFER_USAGE_OUTPUT;
     flowDesc.bufferFormat =
@@ -1530,6 +1753,14 @@ NvOFState* nvof_create(
             nvof_status_string(status)
         );
         nvof_log_last_error(st);
+        nvof_destroy(st);
+        return nullptr;
+    }
+    if (!st->flow)
+    {
+        LOG_WARN(
+            "NvOF: driver returned null flow output buffer"
+        );
         nvof_destroy(st);
         return nullptr;
     }
@@ -1565,21 +1796,53 @@ NvOFState* nvof_create(
         strideInfo.strideInfo[0].strideXInBytes;
     st->flowStrideY =
         strideInfo.strideInfo[0].strideYInBytes;
+    const uint32_t requiredRowBytes =
+        static_cast<uint32_t>(
+            st->flowWidth
+        ) *
+        static_cast<uint32_t>(
+            sizeof(int16_t) * 2
+        );
+    if (st->flowStrideY <
+        requiredRowBytes)
+    {
+        LOG_WARN(
+            "NvOF: invalid flow stride: y=%u, required >= %u",
+            st->flowStrideY,
+            requiredRowBytes
+        );
+        nvof_destroy(st);
+        return nullptr;
+    }
     LOG_INFO(
         "NvOF: flow stride = x=%u y=%u bytes",
         st->flowStrideX,
         st->flowStrideY
     );
     // -------------------------------------------------------------------------
-    // Allocate CUDA-side normalized depth and full-resolution flow.
+    // Allocate CUDA-side buffers.
     // -------------------------------------------------------------------------
     const size_t pixelCount =
         static_cast<size_t>(w) *
         static_cast<size_t>(h);
+    if (pixelCount >
+        static_cast<size_t>(
+            std::numeric_limits<int>::max()
+        ))
+    {
+        LOG_WARN(
+            "NvOF: image is too large for kernel indexing"
+        );
+        nvof_destroy(st);
+        return nullptr;
+    }
     if (!nvof_cuda_ok(
             cudaMalloc(
-                reinterpret_cast<void**>(&st->d_depth[0]),
-                pixelCount * sizeof(float)
+                reinterpret_cast<void**>(
+                    &st->d_depth[0]
+                ),
+                pixelCount *
+                sizeof(float)
             ),
             "cudaMalloc(d_depth[0])"))
     {
@@ -1588,8 +1851,11 @@ NvOFState* nvof_create(
     }
     if (!nvof_cuda_ok(
             cudaMalloc(
-                reinterpret_cast<void**>(&st->d_depth[1]),
-                pixelCount * sizeof(float)
+                reinterpret_cast<void**>(
+                    &st->d_depth[1]
+                ),
+                pixelCount *
+                sizeof(float)
             ),
             "cudaMalloc(d_depth[1])"))
     {
@@ -1598,8 +1864,11 @@ NvOFState* nvof_create(
     }
     if (!nvof_cuda_ok(
             cudaMalloc(
-                reinterpret_cast<void**>(&st->d_minmax),
-                2 * sizeof(float)
+                reinterpret_cast<void**>(
+                    &st->d_minmax
+                ),
+                2 *
+                sizeof(float)
             ),
             "cudaMalloc(d_minmax)"))
     {
@@ -1608,15 +1877,19 @@ NvOFState* nvof_create(
     }
     if (!nvof_cuda_ok(
             cudaMalloc(
-                reinterpret_cast<void**>(&st->d_flowFull),
-                pixelCount * sizeof(float2)
+                reinterpret_cast<void**>(
+                    &st->d_flowFull
+                ),
+                pixelCount *
+                sizeof(float2)
             ),
             "cudaMalloc(d_flowFull)"))
     {
         nvof_destroy(st);
         return nullptr;
     }
-    st->initialized = true;
+    st->initialized =
+        true;
     LOG_INFO(
         "NvOF: initialization complete"
     );
@@ -1630,7 +1903,29 @@ void nvof_destroy(
 {
     if (!st)
         return;
-    // Make sure all CUDA work that might reference NvOF buffers is finished.
+    // Synchronize the context that owns NvOF resources before destroying them.
+    if (st->ofContext)
+    {
+        CUcontext current =
+            nullptr;
+        if (cuCtxGetCurrent(
+                &current
+            ) == CUDA_SUCCESS)
+        {
+            if (current != st->ofContext)
+            {
+                cuCtxSetCurrent(
+                    st->ofContext
+                );
+            }
+        }
+        else
+        {
+            cuCtxSetCurrent(
+                st->ofContext
+            );
+        }
+    }
     cudaDeviceSynchronize();
     if (st->hOF)
     {
@@ -1639,71 +1934,101 @@ void nvof_destroy(
             st->fn.nvOFDestroyGPUBufferCuda(
                 st->guide[0]
             );
-            st->guide[0] = nullptr;
+            st->guide[0] =
+                nullptr;
         }
         if (st->guide[1])
         {
             st->fn.nvOFDestroyGPUBufferCuda(
                 st->guide[1]
             );
-            st->guide[1] = nullptr;
+            st->guide[1] =
+                nullptr;
         }
         if (st->flow)
         {
             st->fn.nvOFDestroyGPUBufferCuda(
                 st->flow
             );
-            st->flow = nullptr;
+            st->flow =
+                nullptr;
         }
         st->fn.nvOFDestroy(
             st->hOF
         );
-        st->hOF = nullptr;
+        st->hOF =
+            nullptr;
     }
     if (st->d_depth[0])
     {
-        cudaFree(st->d_depth[0]);
-        st->d_depth[0] = nullptr;
+        cudaFree(
+            st->d_depth[0]
+        );
+        st->d_depth[0] =
+            nullptr;
     }
     if (st->d_depth[1])
     {
-        cudaFree(st->d_depth[1]);
-        st->d_depth[1] = nullptr;
+        cudaFree(
+            st->d_depth[1]
+        );
+        st->d_depth[1] =
+            nullptr;
     }
     if (st->d_minmax)
     {
-        cudaFree(st->d_minmax);
-        st->d_minmax = nullptr;
+        cudaFree(
+            st->d_minmax
+        );
+        st->d_minmax =
+            nullptr;
     }
     if (st->d_flowFull)
     {
-        cudaFree(st->d_flowFull);
-        st->d_flowFull = nullptr;
+        cudaFree(
+            st->d_flowFull
+        );
+        st->d_flowFull =
+            nullptr;
     }
-    // Restore the context that was current before NvOF creation.
+    // Save the device before restoring the caller's context.
+    const bool releasePrimary =
+        st->ownsPrimaryContext;
+    const CUdevice primaryDevice =
+        st->primaryDevice;
+    // Restore the context that was current before creation.
     if (st->previousContext)
     {
-        cuCtxSetCurrent(st->previousContext);
+        cuCtxSetCurrent(
+            st->previousContext
+        );
     }
-    else if (st->ownsPrimaryContext &&
-             st->ofContext)
+    else if (st->ofContext)
     {
-        cuCtxSetCurrent(nullptr);
+        // No caller context existed before creation.
+        // Leave no current context after releasing our primary context.
+        cuCtxSetCurrent(
+            nullptr
+        );
     }
-    if (st->ownsPrimaryContext &&
-        st->ofContext)
+    // Release exactly the primary context that we retained.
+    if (releasePrimary)
     {
-        CUdevice device = 0;
-        if (cuCtxGetDevice(&device) == CUDA_SUCCESS)
-        {
-            cuDevicePrimaryCtxRelease(device);
-        }
+        cuDevicePrimaryCtxRelease(
+            primaryDevice
+        );
     }
-    st->ofContext = nullptr;
+    st->ofContext =
+        nullptr;
+    st->ownsPrimaryContext =
+        false;
     if (st->library)
     {
-        FREE_LIB(st->library);
-        st->library = nullptr;
+        FREE_LIB(
+            st->library
+        );
+        st->library =
+            nullptr;
     }
     delete st;
 }
@@ -1735,9 +2060,11 @@ void nvof_dims(
         return;
     }
     if (w)
-        *w = st->width;
+        *w =
+            st->width;
     if (h)
-        *h = st->height;
+        *h =
+            st->height;
 }
 // =============================================================================
 // Prepare pipeline slot
@@ -1760,7 +2087,8 @@ void nvof_prepare_slot(
     {
         return;
     }
-    if (slot < 0 || slot > 1)
+    if (slot < 0 ||
+        slot > 1)
     {
         LOG_WARN(
             "NvOF: invalid prepare slot %d",
@@ -1768,6 +2096,9 @@ void nvof_prepare_slot(
         );
         return;
     }
+    // Invalidate this slot until every required operation has been queued.
+    st->slotPrepared[slot] =
+        false;
     if (!d_guideBGRA ||
         !d_outSlice)
     {
@@ -1776,12 +2107,38 @@ void nvof_prepare_slot(
         );
         return;
     }
+    if (srcW <= 0 ||
+        srcH <= 0 ||
+        srcStride <= 0)
+    {
+        LOG_WARN(
+            "NvOF: invalid source image dimensions/stride: "
+            "%dx%d stride=%d",
+            srcW,
+            srcH,
+            srcStride
+        );
+        return;
+    }
+    const int64_t minimumStride =
+        static_cast<int64_t>(srcW) * 4;
+    if (static_cast<int64_t>(srcStride) <
+        minimumStride)
+    {
+        LOG_WARN(
+            "NvOF: BGRA source stride %d is smaller than required %lld",
+            srcStride,
+            static_cast<long long>(
+                minimumStride
+            )
+        );
+        return;
+    }
     if (mw != st->width ||
         mh != st->height)
     {
         LOG_WARN(
-            "NvOF: prepare dimensions %dx%d do not match "
-            "NvOF state %dx%d",
+            "NvOF: prepare dimensions %dx%d do not match NvOF state %dx%d",
             mw,
             mh,
             st->width,
@@ -1789,22 +2146,37 @@ void nvof_prepare_slot(
         );
         return;
     }
-    cudaStream_t cudaStream =
-        reinterpret_cast<cudaStream_t>(stream);
-    // -------------------------------------------------------------------------
-    // BGRA -> grayscale
-    // -------------------------------------------------------------------------
-    dim3 block(16, 16);
-    dim3 grid(
-        (mw + block.x - 1) / block.x,
-        (mh + block.y - 1) / block.y
-    );
-    // The NvOF guide buffer is opaque to the CUDA runtime, so obtain its
-    // CUdeviceptr and use that as the destination.
-    CUdeviceptr guidePtr = 0;
-    if (!st->fn.nvOFGPUBufferGetCUdeviceptr)
+    const size_t count =
+        static_cast<size_t>(mw) *
+        static_cast<size_t>(mh);
+    if (count == 0 ||
+        count >
+            static_cast<size_t>(
+                std::numeric_limits<int>::max()
+            ))
+    {
+        LOG_WARN(
+            "NvOF: invalid prepare pixel count"
+        );
         return;
-    guidePtr =
+    }
+    cudaStream_t cudaStream =
+        reinterpret_cast<cudaStream_t>(
+            stream
+        );
+    // -------------------------------------------------------------------------
+    // Obtain NvOF grayscale destination.
+    // -------------------------------------------------------------------------
+    if (!st->guide[slot] ||
+        !st->fn.nvOFGPUBufferGetCUdeviceptr)
+    {
+        LOG_WARN(
+            "NvOF: guide buffer is unavailable for slot %d",
+            slot
+        );
+        return;
+    }
+    const CUdeviceptr guidePtr =
         st->fn.nvOFGPUBufferGetCUdeviceptr(
             st->guide[slot]
         );
@@ -1815,10 +2187,26 @@ void nvof_prepare_slot(
         );
         return;
     }
-    // Re-launch with the actual NvOF destination.
+    // -------------------------------------------------------------------------
+    // BGRA -> grayscale.
+    // -------------------------------------------------------------------------
+    const dim3 block2D(
+        16,
+        16
+    );
+    const dim3 grid2D(
+        static_cast<unsigned>(
+            (mw + static_cast<int>(block2D.x) - 1) /
+            static_cast<int>(block2D.x)
+        ),
+        static_cast<unsigned>(
+            (mh + static_cast<int>(block2D.y) - 1) /
+            static_cast<int>(block2D.y)
+        )
+    );
     k_bgra_to_gray8<<<
-        grid,
-        block,
+        grid2D,
+        block2D,
         0,
         cudaStream
     >>>(
@@ -1827,46 +2215,87 @@ void nvof_prepare_slot(
         srcH,
         srcStride,
         reinterpret_cast<uint8_t*>(
-            static_cast<uintptr_t>(guidePtr)
+            static_cast<uintptr_t>(
+                guidePtr
+            )
         ),
         mw,
         mh
     );
+    cudaError_t launchError =
+        cudaPeekAtLastError();
+    if (launchError != cudaSuccess)
+    {
+        LOG_WARN(
+            "NvOF: BGRA->gray kernel launch failed: %s",
+            cudaGetErrorString(
+                launchError
+            )
+        );
+        return;
+    }
     // -------------------------------------------------------------------------
-    // Depth normalization
+    // Depth normalization.
     // -------------------------------------------------------------------------
     float* minmax =
         d_minmax_scratch
             ? d_minmax_scratch
             : st->d_minmax;
     if (!minmax)
+    {
+        LOG_WARN(
+            "NvOF: no min/max scratch buffer available"
+        );
         return;
-    const size_t count =
-        static_cast<size_t>(mw) *
-        static_cast<size_t>(mh);
+    }
     const float initialMin =
         std::numeric_limits<float>::infinity();
     const float initialMax =
         -std::numeric_limits<float>::infinity();
-    cudaMemcpyAsync(
-        minmax,
-        &initialMin,
-        sizeof(float),
-        cudaMemcpyHostToDevice,
-        cudaStream
-    );
-    cudaMemcpyAsync(
-        minmax + 1,
-        &initialMax,
-        sizeof(float),
-        cudaMemcpyHostToDevice,
-        cudaStream
-    );
-    const int threads = 256;
-    const int blocks =
-        static_cast<int>(
-            (count + threads - 1) /
-            threads
+    if (!nvof_cuda_ok(
+            cudaMemcpyAsync(
+                minmax,
+                &initialMin,
+                sizeof(float),
+                cudaMemcpyHostToDevice,
+                cudaStream
+            ),
+            "cudaMemcpyAsync(min)"))
+    {
+        return;
+    }
+    if (!nvof_cuda_ok(
+            cudaMemcpyAsync(
+                minmax + 1,
+                &initialMax,
+                sizeof(float),
+                cudaMemcpyHostToDevice,
+                cudaStream
+            ),
+            "cudaMemcpyAsync(max)"))
+    {
+        return;
+    }
+    constexpr int threads =
+        256;
+    const size_t blockCount =
+        (count +
+         static_cast<size_t>(threads) -
+         1u) /
+        static_cast<size_t>(threads);
+    if (blockCount >
+        static_cast<size_t>(
+            std::numeric_limits<unsigned int>::max()
+        ))
+    {
+        LOG_WARN(
+            "NvOF: too many CUDA blocks for depth normalization"
+        );
+        return;
+    }
+    const unsigned int blocks =
+        static_cast<unsigned int>(
+            blockCount
         );
     k_scan_minmax<<<
         blocks,
@@ -1876,8 +2305,20 @@ void nvof_prepare_slot(
     >>>(
         d_outSlice,
         minmax,
-        static_cast<int>(count)
+        count
     );
+    launchError =
+        cudaPeekAtLastError();
+    if (launchError != cudaSuccess)
+    {
+        LOG_WARN(
+            "NvOF: min/max kernel launch failed: %s",
+            cudaGetErrorString(
+                launchError
+            )
+        );
+        return;
+    }
     k_normalize_depth<<<
         blocks,
         threads,
@@ -1887,18 +2328,29 @@ void nvof_prepare_slot(
         d_outSlice,
         st->d_depth[slot],
         minmax,
-        static_cast<int>(count)
+        count
     );
-    // Make CUDA launch failures visible without synchronizing the pipeline.
-    const cudaError_t launchError =
+    launchError =
         cudaPeekAtLastError();
     if (launchError != cudaSuccess)
     {
         LOG_WARN(
-            "NvOF: prepare kernel launch failed: %s",
-            cudaGetErrorString(launchError)
+            "NvOF: depth normalization kernel launch failed: %s",
+            cudaGetErrorString(
+                launchError
+            )
         );
+        return;
     }
+    // All work for this slot has successfully been queued on the supplied
+    // stream. Because NvOF uses the same stream later, the operations remain
+    // correctly ordered without an explicit host synchronization.
+    st->slotPrepared[slot] =
+        true;
+    // A new slot changes the frame pair, so an old flow is no longer valid
+    // until nvof_execute() succeeds.
+    st->flowValid =
+        false;
 }
 // =============================================================================
 // Execute NvOF
@@ -1928,10 +2380,34 @@ bool nvof_execute(
         );
         return false;
     }
+    if (!st->slotPrepared[prevSlot] ||
+        !st->slotPrepared[currSlot])
+    {
+        LOG_WARN(
+            "NvOF: execute requested before both slots were prepared "
+            "(prev=%d prepared=%d, curr=%d prepared=%d)",
+            prevSlot,
+            st->slotPrepared[prevSlot] ? 1 : 0,
+            currSlot,
+            st->slotPrepared[currSlot] ? 1 : 0
+        );
+        return false;
+    }
+    if (!st->flow ||
+        !st->fn.nvOFGPUBufferGetCUdeviceptr)
+    {
+        LOG_WARN(
+            "NvOF: flow output buffer unavailable"
+        );
+        return false;
+    }
     CUstream cuStream =
-        reinterpret_cast<CUstream>(stream);
-    // The stream is used for NvOF's internal CUDA preprocessing and
-    // postprocessing.
+        reinterpret_cast<CUstream>(
+            stream
+        );
+    // -------------------------------------------------------------------------
+    // Configure NvOF CUDA streams.
+    // -------------------------------------------------------------------------
     NV_OF_STATUS status =
         st->fn.nvOFSetIOCudaStreams(
             st->hOF,
@@ -1946,20 +2422,21 @@ bool nvof_execute(
             nvof_status_string(status)
         );
         nvof_log_last_error(st);
+        st->flowValid =
+            false;
         return false;
     }
+    // -------------------------------------------------------------------------
+    // Execute current -> previous.
+    // -------------------------------------------------------------------------
     NV_OF_EXECUTE_INPUT_PARAMS input{};
-    // Forward flow is from input -> reference.
-    //
-    // We want current -> previous, so current is input and previous
-    // is reference.
     input.inputFrame =
         st->guide[currSlot];
     input.referenceFrame =
         st->guide[prevSlot];
     input.externalHints =
         nullptr;
-    // Keep temporal hints enabled for consecutive video frames.
+    // Keep temporal hints enabled for successive video frames.
     input.disableTemporalHints =
         NV_OF_FALSE;
     input.padding =
@@ -1993,10 +2470,10 @@ bool nvof_execute(
             nvof_status_string(status)
         );
         nvof_log_last_error(st);
+        st->flowValid =
+            false;
         return false;
     }
-    st->lastStream =
-        cuStream;
     // -------------------------------------------------------------------------
     // Obtain flow output pointer.
     // -------------------------------------------------------------------------
@@ -2009,26 +2486,47 @@ bool nvof_execute(
         LOG_WARN(
             "NvOF: nvOFGPUBufferGetCUdeviceptr(flow) returned null"
         );
+        st->flowValid =
+            false;
         return false;
     }
     // -------------------------------------------------------------------------
     // Expand grid flow to full LR resolution.
     // -------------------------------------------------------------------------
-    dim3 block(16, 16);
-    dim3 grid(
-        (st->width + block.x - 1) / block.x,
-        (st->height + block.y - 1) / block.y
+    const dim3 block2D(
+        16,
+        16
+    );
+    const dim3 grid2D(
+        static_cast<unsigned>(
+            (st->width +
+             static_cast<int>(block2D.x) -
+             1) /
+            static_cast<int>(block2D.x)
+        ),
+        static_cast<unsigned>(
+            (st->height +
+             static_cast<int>(block2D.y) -
+             1) /
+            static_cast<int>(block2D.y)
+        )
     );
     k_expand_flow<<<
-        grid,
-        block,
+        grid2D,
+        block2D,
         0,
-        reinterpret_cast<cudaStream_t>(stream)
+        reinterpret_cast<cudaStream_t>(
+            stream
+        )
     >>>(
         reinterpret_cast<const uint8_t*>(
-            static_cast<uintptr_t>(flowPtr)
+            static_cast<uintptr_t>(
+                flowPtr
+            )
         ),
-        static_cast<size_t>(st->flowStrideY),
+        static_cast<size_t>(
+            st->flowStrideY
+        ),
         st->flowWidth,
         st->flowHeight,
         st->gridSize,
@@ -2042,10 +2540,18 @@ bool nvof_execute(
     {
         LOG_WARN(
             "NvOF: flow expansion launch failed: %s",
-            cudaGetErrorString(launchError)
+            cudaGetErrorString(
+                launchError
+            )
         );
+        st->flowValid =
+            false;
         return false;
     }
+    st->lastStream =
+        cuStream;
+    st->flowValid =
+        true;
     return true;
 }
 // =============================================================================
@@ -2071,6 +2577,27 @@ void nvof_warp(
         currSlot > 1 ||
         prevSlot == currSlot)
     {
+        LOG_WARN(
+            "NvOF: invalid warp slots prev=%d curr=%d",
+            prevSlot,
+            currSlot
+        );
+        return;
+    }
+    if (!st->flowValid)
+    {
+        LOG_WARN(
+            "NvOF: warp requested without a valid optical-flow result"
+        );
+        return;
+    }
+    if (!st->d_depth[prevSlot] ||
+        !st->d_depth[currSlot] ||
+        !st->d_flowFull)
+    {
+        LOG_WARN(
+            "NvOF: warp buffers are unavailable"
+        );
         return;
     }
     t =
@@ -2078,16 +2605,31 @@ void nvof_warp(
             1.0f,
             fmaxf(0.0f, t)
         );
-    dim3 block(16, 16);
-    dim3 grid(
-        (st->width + block.x - 1) / block.x,
-        (st->height + block.y - 1) / block.y
+    const dim3 block2D(
+        16,
+        16
+    );
+    const dim3 grid2D(
+        static_cast<unsigned>(
+            (st->width +
+             static_cast<int>(block2D.x) -
+             1) /
+            static_cast<int>(block2D.x)
+        ),
+        static_cast<unsigned>(
+            (st->height +
+             static_cast<int>(block2D.y) -
+             1) /
+            static_cast<int>(block2D.y)
+        )
     );
     k_warp_blend<<<
-        grid,
-        block,
+        grid2D,
+        block2D,
         0,
-        reinterpret_cast<cudaStream_t>(stream)
+        reinterpret_cast<cudaStream_t>(
+            stream
+        )
     >>>(
         st->d_depth[prevSlot],
         st->d_depth[currSlot],
@@ -2103,7 +2645,9 @@ void nvof_warp(
     {
         LOG_WARN(
             "NvOF: warp/blend launch failed: %s",
-            cudaGetErrorString(launchError)
+            cudaGetErrorString(
+                launchError
+            )
         );
     }
 }
