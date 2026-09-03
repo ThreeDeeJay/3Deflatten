@@ -133,7 +133,6 @@ private:
     DepthReadySlot          m_depthReadySlots[kDepthSlots];
     std::mutex              m_depthReadyMtx;
     std::condition_variable m_depthReadyCV;
-    int                     m_prevInferFrameNo = -1; // for slot signaling
 
     int                m_skipEvery    = 1;      // updated each time worker returns
     int                m_skipCounter  = 0;      // counts Transform() calls for skip logic

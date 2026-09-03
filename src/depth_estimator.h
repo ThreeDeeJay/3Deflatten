@@ -189,11 +189,13 @@ private:
     HRESULT LoadTrtRtxNative(const std::wstring& onnxPath, std::wstring& outInfo,
                               InferenceRuntime runtime, int depthMaxDim);
     HRESULT FinishTrtBuild();   // deferred engine compilation, called on worker thread
-    HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH, int srcStride,
-                            bool isBGR, bool flipDepth, float smoothAlpha,
-                            int depthDilate, float depthEdgeThresh,
+    HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
+                            int srcStride, bool isBGR, bool flipDepth,
+                            float smoothAlpha, int depthDilate,
+                            float depthEdgeThresh,
                             DepthUpscaleMode upscaleMode,
                             int wmfDilateInset,
+                            int sourceFrameNo,
                             DepthResult& result);
 #endif
 

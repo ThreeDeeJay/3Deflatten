@@ -509,133 +509,465 @@ static void DetectBlackBars(const BYTE* bgra, int w, int h, int stride,
     for (int x = w-1; x > w / 2; --x)  { if (!colBlack(x, outTop, outBottom)) { outRight  = x;   break; } }
 }
 
-void C3DeflattenFilter::DepthWorkerThread() {
-    // bgra is declared OUTSIDE the loop so it retains its 8 MB allocation
-    // across iterations.  Swapping with m_pendBGRA (instead of moving) means
-    // m_pendBGRA also always keeps its capacity → Transform() never reallocs.
+void C3DeflattenFilter::DepthWorkerThread()
+{
+    // bgra is declared OUTSIDE the loop so it retains its allocation across
+    // iterations. Swapping with m_pendBGRA means Transform() does not need
+    // to repeatedly allocate the large source-frame buffer.
     std::vector<BYTE> bgra;
-    for (;;) {
-        int w = 0, h = 0, slot = -1;
+
+    for (;;)
+    {
+        int w = 0;
+        int h = 0;
+        int slot = -1;
+        int sourceFrameNo = -1;
+
+        // ── Obtain the newest pending source frame ───────────────────────────
         {
             std::unique_lock<std::mutex> lk(m_pendMtx);
-            m_pendCV.wait(lk, [this]{ return m_pendReady || m_pendStop; });
-            if (m_pendStop) break;
+
+            m_pendCV.wait(
+                lk,
+                [this]
+                {
+                    return m_pendReady || m_pendStop;
+                });
+
+            if (m_pendStop)
+                break;
+
             bgra.swap(m_pendBGRA);
-            w    = m_pendW;
-            h    = m_pendH;
-            slot = m_pendSlot;
-            m_pendReady = false;
+
+            w             = m_pendW;
+            h             = m_pendH;
+            slot          = m_pendSlot;
+            m_pendReady   = false;
+
+            // Capture the source frame number NOW.
+            //
+            // Do not use m_frameCount here because the worker runs
+            // asynchronously and m_frameCount may already have advanced
+            // considerably by the time inference finishes.
+            if (slot >= 0 &&
+                slot < kRingSize)
+            {
+                sourceFrameNo = m_ring[slot].frameNo;
+            }
         }
-        if (bgra.empty() || w == 0 || h == 0) continue;
+
+        if (bgra.empty() ||
+            w <= 0 ||
+            h <= 0)
+        {
+            continue;
+        }
+
+        if (sourceFrameNo < 0)
+        {
+            LOG_WARN(
+                "Depth worker: invalid source frame number slot=",
+                slot
+            );
+        }
 
         DeflattenConfig cfg;
-        { CAutoLock lk(&m_csConfig); cfg = m_cfg; }
-
-        // Black bar crop: pass only the visible content to the depth model
-        // so inference isn\'t wasted on black pixels. The cropped depth is
-        // then embedded back into a full-frame buffer (0 = far for bars).
-        int cL = 0, cT = 0, cW = w, cH = h;
-        if (cfg.autoCropThreshold > 0) {
-            if (--m_cropDetectCounter <= 0) {
-                // Convert 0-100 percentage to 0-255 pixel threshold
-                int thr = cfg.autoCropThreshold * 255 / 100;
-                DetectBlackBars(bgra.data(), w, h, w*4,
-                                m_cropLeft, m_cropTop, m_cropRight, m_cropBottom, thr);
-                m_cropDetectCounter = 60;
-                // Share detected bounds with render thread for mesh UV clipping
-                CAutoLock cfgLk(&m_csConfig);
-                m_cfg.cropLeft   = m_cropLeft;
-                m_cfg.cropTop    = m_cropTop;
-                m_cfg.cropRight  = (m_cropRight  > 0) ? m_cropRight  : w - 1;
-                m_cfg.cropBottom = (m_cropBottom > 0) ? m_cropBottom : h - 1;
-            }
-            cL = m_cropLeft; cT = m_cropTop;
-            cW = ((m_cropRight  > 0) ? m_cropRight  : w-1) - cL + 1;
-            cH = ((m_cropBottom > 0) ? m_cropBottom : h-1) - cT + 1;
+        {
+            CAutoLock lk(&m_csConfig);
+            cfg = m_cfg;
         }
-        DepthResult result;
-        auto t0 = std::chrono::steady_clock::now();
-        HRESULT hr = m_depth->Estimate(bgra.data() + cT*(w*4) + cL*4, cW, cH, w*4,
-                                        true /*isBGR*/,
-                                        cfg.flipDepth == TRUE,
-                                        cfg.depthSmooth,
-                                        cfg.depthDilate,
-                                        cfg.depthEdgeThresh,
-                                        cfg.upscaleMode, cfg.wmfDilateInset, result);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
 
-        // Embed cropped depth into full-frame buffer
-        if (SUCCEEDED(hr) && (cW < w || cH < h)) {
-            std::vector<float> full((size_t)w * h, 0.0f);
-            for (int row = 0; row < result.height; ++row)
-                std::copy(result.data.begin() + row * result.width,
-                          result.data.begin() + row * result.width + result.width,
-                          full.begin() + (size_t)(cT + row) * w + cL);
-            result.data  = std::move(full);
-            result.width = w;
+        // ── Black-bar crop ──────────────────────────────────────────────────
+        //
+        // Pass only visible content to the depth model so inference is not
+        // wasted on black pixels.  The resulting depth is embedded back into
+        // a full-frame buffer below.
+        //
+        int cL = 0;
+        int cT = 0;
+        int cW = w;
+        int cH = h;
+
+        if (cfg.autoCropThreshold > 0)
+        {
+            if (--m_cropDetectCounter <= 0)
+            {
+                // Convert 0-100 percentage to 0-255 pixel threshold.
+                int thr = cfg.autoCropThreshold * 255 / 100;
+
+                DetectBlackBars(
+                    bgra.data(),
+                    w,
+                    h,
+                    w * 4,
+                    m_cropLeft,
+                    m_cropTop,
+                    m_cropRight,
+                    m_cropBottom,
+                    thr
+                );
+
+                m_cropDetectCounter = 60;
+
+                // Share detected bounds with the render thread so mesh UV
+                // clipping remains synchronized with depth cropping.
+                CAutoLock cfgLk(&m_csConfig);
+
+                m_cfg.cropLeft =
+                    m_cropLeft;
+
+                m_cfg.cropTop =
+                    m_cropTop;
+
+                m_cfg.cropRight =
+                    (m_cropRight > 0)
+                        ? m_cropRight
+                        : w - 1;
+
+                m_cfg.cropBottom =
+                    (m_cropBottom > 0)
+                        ? m_cropBottom
+                        : h - 1;
+            }
+
+            cL = m_cropLeft;
+            cT = m_cropTop;
+
+            cW =
+                ((m_cropRight > 0)
+                    ? m_cropRight
+                    : w - 1)
+                - cL + 1;
+
+            cH =
+                ((m_cropBottom > 0)
+                    ? m_cropBottom
+                    : h - 1)
+                - cT + 1;
+        }
+
+        // ── Run depth inference ─────────────────────────────────────────────
+        DepthResult result;
+
+        auto t0 =
+            std::chrono::steady_clock::now();
+
+        HRESULT hr = m_depth->Estimate(
+            bgra.data() + cT * (w * 4) + cL * 4,
+            cW,
+            cH,
+            w * 4,
+            true,                         // isBGR
+            cfg.flipDepth == TRUE,
+            cfg.depthSmooth,
+            cfg.depthDilate,
+            cfg.depthEdgeThresh,
+            cfg.upscaleMode,
+            cfg.wmfDilateInset,
+            sourceFrameNo,
+            result
+        );
+
+        const auto ms =
+            std::chrono::duration_cast<
+                std::chrono::milliseconds
+            >(
+                std::chrono::steady_clock::now() - t0
+            ).count();
+
+        // ── Embed cropped depth back into full frame ─────────────────────────
+        if (SUCCEEDED(hr) &&
+            (cW < w || cH < h))
+        {
+            std::vector<float> full(
+                static_cast<size_t>(w) * h,
+                0.0f
+            );
+
+            for (int row = 0;
+                 row < result.height;
+                 ++row)
+            {
+                std::copy(
+                    result.data.begin()
+                        + static_cast<size_t>(row)
+                            * result.width,
+
+                    result.data.begin()
+                        + static_cast<size_t>(row)
+                            * result.width
+                        + result.width,
+
+                    full.begin()
+                        + static_cast<size_t>(cT + row)
+                            * w
+                        + cL
+                );
+            }
+
+            result.data =
+                std::move(full);
+
+            result.width  = w;
             result.height = h;
         }
-        if (SUCCEEDED(hr)) {
-            std::lock_guard<std::mutex> lk(m_cacheMtx);
-            m_cachedDepth = std::move(result.data); // data moved here
-            m_cachedW     = result.width;
-            m_cachedH     = result.height;
-            m_cachedSlot  = slot;
-            m_cacheReady  = true;
-            m_lastInferMs = (double)ms;
-            LOG_DBG("Depth worker: inference done in ", ms, " ms");
-        } // release m_cacheMtx before signaling (prevents deadlock)
 
-        // ── Signal per-frame depth-ready slots (NvOF interpolation) ──────────
-        // Must run OUTSIDE m_cacheMtx.  Copy the cached depth first (cheap,
-        // only at inference resolution before it was upscaled, or here full).
-        if (SUCCEEDED(hr)) {
-            std::vector<float> depthSnap;
-            int snapW=0, snapH=0;
-            { std::lock_guard<std::mutex> lk(m_cacheMtx);
-              depthSnap=m_cachedDepth; snapW=m_cachedW; snapH=m_cachedH; }
-            int thisFrame = (slot>=0 && slot<kRingSize) ? m_ring[slot].frameNo : -1;
-            if (thisFrame >= 0 && !depthSnap.empty()) {
-                // Signal the inference frame itself
-                { std::lock_guard<std::mutex> lk(m_depthReadyMtx);
-                  auto& sl=m_depthReadySlots[thisFrame%kDepthSlots];
-                  sl.frameNo=thisFrame; sl.depth=depthSnap;
-                  sl.w=snapW; sl.h=snapH; sl.ready=true; }
-                m_depthReadyCV.notify_all();
-                // Signal each NvOF-interpolated frame
-                if (!result.interpData.empty() && result.prevInferFrameNo >= 0) {
-                    for (int k=0;k<(int)result.interpData.size();k++) {
-                        auto& fr=result.interpData[k];
-                        if (fr.depth.empty()) continue;
-                        std::vector<float> up((size_t)snapW*snapH);
-                        float sx=(float)fr.rawW/snapW, sy=(float)fr.rawH/snapH;
-                        for(int dy=0;dy<snapH;++dy){
-                          float fy=(dy+.5f)*sy-.5f;
-                          int y0=std::max(0,std::min((int)fy,fr.rawH-1)),y1=std::min(y0+1,fr.rawH-1);
-                          float ty=std::max(0.f,fy-y0);
-                          for(int dx=0;dx<snapW;++dx){
-                            float fx=(dx+.5f)*sx-.5f;
-                            int x0=std::max(0,std::min((int)fx,fr.rawW-1)),x1=std::min(x0+1,fr.rawW-1);
-                            float tx=std::max(0.f,fx-x0);
-                            up[dy*snapW+dx]=(1-tx)*(1-ty)*fr.depth[y0*fr.rawW+x0]
-                              +tx*(1-ty)*fr.depth[y0*fr.rawW+x1]
-                              +(1-tx)*ty*fr.depth[y1*fr.rawW+x0]+tx*ty*fr.depth[y1*fr.rawW+x1];}}
-                        int fn=result.prevInferFrameNo+k+1;
-                        { std::lock_guard<std::mutex> lk(m_depthReadyMtx);
-                          auto& isl=m_depthReadySlots[fn%kDepthSlots];
-                          isl.frameNo=fn; isl.depth=std::move(up);
-                          isl.w=snapW; isl.h=snapH; isl.ready=true; }
-                        m_depthReadyCV.notify_all();
+        // ── Signal per-frame depth-ready slots (NvOF interpolation) ──────────────────
+        //
+        // IMPORTANT:
+        //
+        // m_cacheReady is the delivery mechanism for the CURRENT real inference.
+        //
+        // m_depthReadySlots is ONLY for frames that were skipped between two real
+        // depth inferences.
+        //
+        // Example:
+        //
+        //     inference 100
+        //     inference 103
+        //
+        //     result.prevInferFrameNo = 100
+        //     result.interpData.size() = 2
+        //
+        //     interpData[0] -> frame 101
+        //     interpData[1] -> frame 102
+        //
+        // No interpolation is generated for the first inference because it has no
+        // previous depth map to pair with.
+
+        if (SUCCEEDED(hr))
+        {
+            const int thisFrame =
+                sourceFrameNo;
+
+            if (thisFrame >= 0 &&
+                !result.interpData.empty() &&
+                result.prevInferFrameNo >= 0)
+            {
+                const int expectedInterp =
+                    std::max(
+                        0,
+                        thisFrame
+                            - result.prevInferFrameNo
+                            - 1
+                    );
+
+                const int actualInterp =
+                    static_cast<int>(
+                        result.interpData.size()
+                    );
+
+                LOG_DBG(
+                    "Depth worker: NvOF result prev=",
+                    result.prevInferFrameNo,
+                    " current=",
+                    thisFrame,
+                    " expected=",
+                    expectedInterp,
+                    " actual=",
+                    actualInterp
+                );
+
+                const int publishCount =
+                    std::min(
+                        expectedInterp,
+                        actualInterp
+                    );
+
+                for (int k = 0;
+                     k < publishCount;
+                     ++k)
+                {
+                    auto& fr =
+                        result.interpData[k];
+
+                    if (fr.depth.empty() ||
+                        fr.rawW <= 0 ||
+                        fr.rawH <= 0)
+                    {
+                        continue;
                     }
+
+                    // The k-th interpolation is:
+                    //
+                    //     prev + k + 1
+                    //
+                    // Example:
+                    //
+                    //     prev=100
+                    //
+                    //     k=0 -> 101
+                    //     k=1 -> 102
+                    const int frameNo =
+                        result.prevInferFrameNo
+                        + k
+                        + 1;
+
+                    std::vector<float> up(
+                        static_cast<size_t>(w) * h
+                    );
+
+                    const float sx =
+                        static_cast<float>(fr.rawW)
+                        / static_cast<float>(w);
+
+                    const float sy =
+                        static_cast<float>(fr.rawH)
+                        / static_cast<float>(h);
+
+                    for (int dy = 0;
+                         dy < h;
+                         ++dy)
+                    {
+                        const float fy =
+                            (dy + 0.5f) * sy - 0.5f;
+
+                        const int y0 =
+                            std::max(
+                                0,
+                                std::min(
+                                    static_cast<int>(fy),
+                                    fr.rawH - 1
+                                )
+                            );
+
+                        const int y1 =
+                            std::min(
+                                y0 + 1,
+                                fr.rawH - 1
+                            );
+
+                        const float ty =
+                            std::max(
+                                0.0f,
+                                fy - y0
+                            );
+
+                        for (int dx = 0;
+                             dx < w;
+                             ++dx)
+                        {
+                            const float fx =
+                                (dx + 0.5f) * sx - 0.5f;
+
+                            const int x0 =
+                                std::max(
+                                    0,
+                                    std::min(
+                                        static_cast<int>(fx),
+                                        fr.rawW - 1
+                                    )
+                                );
+
+                            const int x1 =
+                                std::min(
+                                    x0 + 1,
+                                    fr.rawW - 1
+                                );
+
+                            const float tx =
+                                std::max(
+                                    0.0f,
+                                    fx - x0
+                                );
+
+                            const float v00 =
+                                fr.depth[
+                                    static_cast<size_t>(y0)
+                                        * fr.rawW
+                                    + x0
+                                ];
+
+                            const float v10 =
+                                fr.depth[
+                                    static_cast<size_t>(y0)
+                                        * fr.rawW
+                                    + x1
+                                ];
+
+                            const float v01 =
+                                fr.depth[
+                                    static_cast<size_t>(y1)
+                                        * fr.rawW
+                                    + x0
+                                ];
+
+                            const float v11 =
+                                fr.depth[
+                                    static_cast<size_t>(y1)
+                                        * fr.rawW
+                                    + x1
+                                ];
+
+                            up[
+                                static_cast<size_t>(dy) * w
+                                + dx
+                            ] =
+                                (1.0f - tx)
+                                    * (1.0f - ty) * v00
+                                + tx
+                                    * (1.0f - ty) * v10
+                                + (1.0f - tx)
+                                    * ty * v01
+                                + tx
+                                    * ty * v11;
+                        }
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lk(
+                            m_depthReadyMtx
+                        );
+
+                        auto& sl =
+                            m_depthReadySlots[
+                                frameNo % kDepthSlots
+                            ];
+
+                        sl.frameNo =
+                            frameNo;
+
+                        sl.depth =
+                            std::move(up);
+
+                        sl.w =
+                            w;
+
+                        sl.h =
+                            h;
+
+                        sl.ready =
+                            true;
+                    }
+
+                    LOG_DBG(
+                        "Depth worker: published NvOF depth frame=",
+                        frameNo,
+                        " prev=",
+                        result.prevInferFrameNo,
+                        " current=",
+                        thisFrame
+                    );
+
+                    m_depthReadyCV.notify_all();
                 }
-                m_prevInferFrameNo = thisFrame;
             }
-        } else if (hr == E_PENDING) {
-            // TRT engine build just finished — no depth this frame, next will produce it.
-            LOG_INFO("Depth worker: TRT engine build complete; depth begins next frame.");
-        } else {
-            LOG_WARN("Depth worker: inference failed hr=", HRStr(hr));
+        }
+        else if (hr == E_PENDING)
+        {
+            // TRT engine build just finished.  The first actual inference
+            // will occur on the next source frame.
+            LOG_INFO(
+                "Depth worker: TRT engine build complete; "
+                "depth begins next frame."
+            );
+        }
+        else
+        {
+            LOG_WARN(
+                "Depth worker: inference failed hr=",
+                HRStr(hr)
+            );
         }
     }
 }
@@ -970,21 +1302,45 @@ HRESULT C3DeflattenFilter::Transform(IMediaSample* pIn, IMediaSample* pOut) {
             m_depthRender.assign(depthN, 0.5f);
     }
 
-    // ── Use interpolated depth if available for skip frames ────────────────────
+    // ── Use interpolated depth if already available for this source frame ────────
+    //
+    // NEVER wait here.
+    //
+    // The DirectShow graph thread must not wait for the second depth inference.
+    // NvOF interpolation is inherently asynchronous: frame N+1/N+2 can only be
+    // generated once the later real depth frame has completed.
     std::vector<float> nvofDepthBuf;
     bool useNvOFDepth = false;
-    bool shouldPost = (m_skipCounter >= m_skipEvery);
-    if (!haveDepth && !shouldPost && m_skipEvery > 1) {
-        int myFrame = m_frameCount;
-        std::unique_lock<std::mutex> lk(m_depthReadyMtx);
-        bool ok = m_depthReadyCV.wait_for(lk, std::chrono::milliseconds(200),
-            [&]{ auto& sl=m_depthReadySlots[myFrame%kDepthSlots];
-                 return sl.ready && sl.frameNo==myFrame; });
-        if (ok) {
-            auto& sl = m_depthReadySlots[myFrame%kDepthSlots];
-            nvofDepthBuf = sl.depth; sl.ready=false; useNvOFDepth=true;
+    const bool shouldPost =
+        (m_skipCounter >= m_skipEvery);
+    if (!haveDepth &&
+        !shouldPost &&
+        m_skipEvery > 1)
+    {
+        const int myFrame =
+            m_frameCount;
+        std::lock_guard<std::mutex> lk(
+            m_depthReadyMtx
+        );
+        auto& sl =
+            m_depthReadySlots[
+                myFrame % kDepthSlots
+            ];
+        if (sl.ready &&
+            sl.frameNo == myFrame &&
+            sl.w == m_inW &&
+            sl.h == m_inH &&
+            !sl.depth.empty())
+        {
+            nvofDepthBuf =
+                std::move(sl.depth);
+            sl.ready =
+                false;
+            useNvOFDepth =
+                true;
         }
     }
+
     // ── Stereo render directly into the DirectShow output sample ─────────────
     int outW, outH;
     OutputDimensions(m_inW, m_inH, outW, outH);
