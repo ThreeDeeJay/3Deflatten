@@ -1914,7 +1914,8 @@ NvOFState* nvof_create(
         return nullptr;
     }
     LOG_INFO(
-        "NvOF: flow stride horizontal=%u rowPitch=%u bytes",
+        "NvOF: flow buffer strideX=%u strideY=%u rowPitch=%u bytes",
+        st->flowRowPitchBytes,
         st->flowStrideY,
         st->flowRowPitchBytes
     );
@@ -2195,14 +2196,30 @@ void nvof_prepare_slot(
         );
         return;
     }
-    // Invalidate this slot until every required operation has been queued.
-    st->slotPrepared[slot] =
-        false;
+
     if (!d_guideBGRA ||
         !d_outSlice)
     {
         LOG_WARN(
-            "NvOF: null prepare input"
+            "NvOF: null prepare input slot=%d guide=%p depth=%p",
+            slot,
+            static_cast<const void*>(d_guideBGRA),
+            static_cast<const void*>(d_outSlice)
+            );
+        return;
+    }
+
+// Only invalidate the old slot after the new inputs have passed
+// the basic validity checks.
+    st->slotPrepared[slot] = false;
+    if (!d_guideBGRA ||
+        !d_outSlice)
+    {
+        LOG_WARN(
+            "NvOF: null prepare input slot=%d guide=%p depth=%p",
+            slot,
+            static_cast<const void*>(d_guideBGRA),
+            static_cast<const void*>(d_outSlice)
         );
         return;
     }
