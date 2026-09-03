@@ -957,6 +957,7 @@ struct NvOFState
     };
     bool flowValid = false;
     CUstream lastStream = nullptr;
+    int preparedFrameCount = 0;
 };
 // =============================================================================
 // Error helpers
@@ -2193,10 +2194,9 @@ void nvof_prepare_slot(
         LOG_WARN(
             "NvOF: invalid prepare slot %d",
             slot
-        );
+            );
         return;
     }
-
     if (!d_guideBGRA ||
         !d_outSlice)
     {
@@ -2208,21 +2208,9 @@ void nvof_prepare_slot(
             );
         return;
     }
-
-// Only invalidate the old slot after the new inputs have passed
-// the basic validity checks.
+    // Only invalidate the old slot after the new inputs
+    // have passed the basic validity checks.
     st->slotPrepared[slot] = false;
-    if (!d_guideBGRA ||
-        !d_outSlice)
-    {
-        LOG_WARN(
-            "NvOF: null prepare input slot=%d guide=%p depth=%p",
-            slot,
-            static_cast<const void*>(d_guideBGRA),
-            static_cast<const void*>(d_outSlice)
-        );
-        return;
-    }
     if (srcW <= 0 ||
         srcH <= 0 ||
         srcStride <= 0)
@@ -2463,6 +2451,9 @@ void nvof_prepare_slot(
     // correctly ordered without an explicit host synchronization.
     st->slotPrepared[slot] =
         true;
+    st->preparedFrameCount =
+        (st->slotPrepared[0] ? 1 : 0) +
+        (st->slotPrepared[1] ? 1 : 0);
     // A new slot changes the frame pair, so an old flow is no longer valid
     // until nvof_execute() succeeds.
     st->flowValid =
@@ -2477,6 +2468,14 @@ bool nvof_execute(
     int currSlot,
     void* stream)
 {
+    if (!st->slotPrepared[prevSlot] ||
+        !st->slotPrepared[currSlot])
+    {
+        // Normal during startup or when the depth worker has not
+        // produced the second frame yet.
+        st->flowValid = false;
+        return false;
+    }
     if (!st ||
         !st->initialized ||
         !st->hOF)
