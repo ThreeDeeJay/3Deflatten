@@ -42,17 +42,13 @@ public:
                  int                 depthMaxDim,
                  std::wstring&       outGPUInfo);
 
-    HRESULT Estimate(const BYTE* srcData,
-                     int         srcWidth,
-                     int         srcHeight,
-                     int         srcStride,
-                     bool        isBGR,
-                     bool        flipDepth,
-                     float       smoothAlpha,
-                     int         depthDilate,
-                     float       depthEdgeThresh,
+    HRESULT Estimate(const BYTE* srcData, int srcW, int srcH,
+                     int srcStride, bool isBGR, bool flipDepth,
+                     float smoothAlpha, int depthDilate,
+                     float depthEdgeThresh,
                      DepthUpscaleMode upscaleMode,
-                     int         wmfDilateInset,
+                     int wmfDilateInset,
+                     int sourceFrameNo,
                      DepthResult& result);
 
     bool         IsLoaded()     const { return m_loaded; }
@@ -190,13 +186,13 @@ private:
                               InferenceRuntime runtime, int depthMaxDim);
     HRESULT FinishTrtBuild();   // deferred engine compilation, called on worker thread
     HRESULT EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
-                            int srcStride, bool isBGR, bool flipDepth,
-                            float smoothAlpha, int depthDilate,
-                            float depthEdgeThresh,
-                            DepthUpscaleMode upscaleMode,
-                            int wmfDilateInset,
-                            int sourceFrameNo,
-                            DepthResult& result);
+                           int srcStride, bool isBGR, bool flipDepth,
+                           float smoothAlpha, int depthDilate,
+                           float depthEdgeThresh,
+                           DepthUpscaleMode upscaleMode,
+                           int wmfDilateInset,
+                           int sourceFrameNo,
+                           DepthResult& result);
 #endif
 
     static constexpr float MEAN[3] = {0.485f, 0.456f, 0.406f};

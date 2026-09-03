@@ -2666,27 +2666,35 @@ void DepthEstimator::BuildSessionOptions(GPUProvider provider,
 }
 
 // ── Estimate ─────────────────────────────────────────────────────────────────
-HRESULT DepthEstimator::Estimate(const BYTE* srcData,
-                                  int   srcWidth,
-                                  int   srcHeight,
-                                  int   srcStride,
-                                  bool  isBGR,
-                                  bool  flipDepth,
-                                  float smoothAlpha,
-                                  int   depthDilate,
-                                  float depthEdgeThresh,
-                                  DepthUpscaleMode upscaleMode,
-                                  int   wmfDilateInset,
-                                  DepthResult& result) {
+HRESULT DepthEstimator::Estimate(const BYTE* srcData, int srcW, int srcH,
+                                 int srcStride, bool isBGR, bool flipDepth,
+                                 float smoothAlpha, int depthDilate,
+                                 float depthEdgeThresh,
+                                 DepthUpscaleMode upscaleMode,
+                                 int wmfDilateInset,
+                                 int sourceFrameNo,
+                                 DepthResult& result) {
     if (!m_loaded) {
         LOG_ERR("Estimate called but model not loaded");
         return E_FAIL;
     }
 #ifdef ORT_ENABLE_TRTRTX
     if (m_trtRtx)
-        return EstimateTrtRtx(srcData, srcWidth, srcHeight, srcStride,
-                              isBGR, flipDepth, smoothAlpha,
-                              depthDilate, depthEdgeThresh, upscaleMode, wmfDilateInset, result);
+        return EstimateTrtRtx(
+            srcData,
+            srcW,
+            srcH,
+            srcStride,
+            isBGR,
+            flipDepth,
+            smoothAlpha,
+            depthDilate,
+            depthEdgeThresh,
+            upscaleMode,
+            wmfDilateInset,
+            sourceFrameNo,
+            result
+        );
 #endif
     if (!m_session) {
         LOG_ERR("Estimate: no ORT session and no native TRT session");
