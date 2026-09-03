@@ -910,111 +910,137 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
         return E_PENDING;
     }
 
-    // ── Buffer slot selection ─────────────────────────────────────────────────
+    // ── Buffer slot selection ────────────────────────────────────────────────
     const int writeBuf = s.pipeIdx & 1;
     const int readBuf  = writeBuf ^ 1;   // kept for JBU alloc reuse only
     (void)readBuf;
 
-    // ── Preprocess current frame (CPU) ────────────────────────────────────────
+    // ── Preprocess current frame (CPU) ───────────────────────────────────────
     std::vector<float> inputTensor;
     int mw = 0, mh = 0;
-    PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR, inputTensor, mw, mh);
+    PreprocessFrame(srcData, srcW, srcH, srcStride, isBGR,
+                    inputTensor, mw, mh);
 
     // ── Update video ring buffer (5D models) ──────────────────────────────────
     if (s.nbVideoFrames > 1) {
         const int F     = s.nbVideoFrames;
         const size_t fe = (size_t)3 * mw * mh;
+
         if ((int)s.frameRing.size() != F ||
             (!s.frameRing.empty() && s.frameRing[0].size() != fe)) {
             s.frameRing.assign(F, std::vector<float>(fe, 0.5f));
             s.frameRingPos  = 0;
             s.frameRingFull = false;
         }
+
         s.frameRing[s.frameRingPos] = inputTensor;
         s.frameRingPos = (s.frameRingPos + 1) % F;
-        if (!s.frameRingFull && s.frameRingPos == 0) s.frameRingFull = true;
+
+        if (!s.frameRingFull && s.frameRingPos == 0)
+            s.frameRingFull = true;
 
         std::vector<float> video((size_t)F * fe);
+
         for (int fi = 0; fi < F; ++fi) {
             const int slot = (s.frameRingPos + fi) % F;
             std::memcpy(video.data() + (size_t)fi * fe,
-                        s.frameRing[slot].data(), fe * sizeof(float));
+                        s.frameRing[slot].data(),
+                        fe * sizeof(float));
         }
+
         inputTensor = std::move(video);
     }
 
-    // ── Set input shape (dynamic models) ─────────────────────────────────────
+    // ── Set input shape (dynamic models) ──────────────────────────────────────
     if (m_dynamicInput) {
         bool shapeOK;
+
         if (s.nbVideoFrames > 1) {
             const int F = s.nbVideoFrames;
+
             nvinfer1::Dims d{};
-            d.nbDims=5; d.d[0]=1; d.d[1]=F; d.d[2]=3; d.d[3]=mh; d.d[4]=mw;
-            shapeOK = s.context->setInputShape(s.inputName.c_str(), d);
+            d.nbDims = 5;
+            d.d[0] = 1;
+            d.d[1] = F;
+            d.d[2] = 3;
+            d.d[3] = mh;
+            d.d[4] = mw;
+
+            shapeOK = s.context->setInputShape(
+                s.inputName.c_str(), d);
         } else {
             nvinfer1::Dims4 d4(1, 3, mh, mw);
-            shapeOK = s.context->setInputShape(s.inputName.c_str(), d4);
+
+            shapeOK = s.context->setInputShape(
+                s.inputName.c_str(), d4);
         }
+
         if (!shapeOK) {
             LOG_ERR("TRT: setInputShape(", mh, "x", mw, ") failed.");
             return E_FAIL;
         }
-        s.modelW = mw; s.modelH = mh;
+
+        s.modelW = mw;
+        s.modelH = mh;
     }
 
     // ── Upload input to GPU (inferStream, async) ──────────────────────────────
-    const size_t uploadBytes = inputTensor.size() * sizeof(float);
+    const size_t uploadBytes =
+        inputTensor.size() * sizeof(float);
+
     if (uploadBytes > s.inputBytes) {
-        LOG_ERR("TRT: input (", uploadBytes, " B) > buffer (", s.inputBytes, " B)");
+        LOG_ERR("TRT: input (", uploadBytes,
+                " B) > buffer (", s.inputBytes, " B)");
         return E_FAIL;
     }
-    cudaMemcpyAsync(s.d_input[writeBuf], inputTensor.data(), uploadBytes,
-                    cudaMemcpyHostToDevice, s.inferStream);
 
-    // ── Set tensor addresses and launch inference asynchronously ──────────────
-    s.context->setTensorAddress(s.inputName.c_str(),  s.d_input[writeBuf]);
-    s.context->setTensorAddress(s.outputName.c_str(), s.d_output[writeBuf]);
+    cudaMemcpyAsync(
+        s.d_input[writeBuf],
+        inputTensor.data(),
+        uploadBytes,
+        cudaMemcpyHostToDevice,
+        s.inferStream);
+
+    // ── Set tensor addresses and launch inference asynchronously ─────────────
+    s.context->setTensorAddress(
+        s.inputName.c_str(),
+        s.d_input[writeBuf]);
+
+    s.context->setTensorAddress(
+        s.outputName.c_str(),
+        s.d_output[writeBuf]);
+
     // Auxiliary tensors use the shared dummy buffer.
-    // Check by name (not by mode) to avoid the C4189 'mode' unused-var warning.
     for (int i = 0; i < s.nbBindings; ++i) {
         const char* tn = s.engine->getIOTensorName(i);
-        if (s.inputName != tn && s.outputName != tn)
+
+        if (s.inputName != tn &&
+            s.outputName != tn) {
             s.context->setTensorAddress(tn, s.d_dummy);
-    }
-    if (!s.context->enqueueV3(s.inferStream)) {
-        LOG_ERR("TRT: enqueueV3 failed."); return E_FAIL;
-    }
-    // Signal: jbuStream may start once inference is done
-    cudaEventRecord(s.inferDone[writeBuf], s.inferStream);
-    // ofStream: wait for guide upload (jbuStream) and inference (inferStream),
-    // then prepare NvOF slot. Both waits are GPU-side — CPU is not stalled.
-    const int F_out   = (s.nbVideoFrames > 0) ? s.nbVideoFrames : 1;
-    float* d_outSlice = s.d_output[writeBuf] + (size_t)(F_out - 1) * mw * mh;
-    if (s.nvof && nvof_available(s.nvof)) {
-        cudaStreamWaitEvent(s.ofStream, s.guideUpDone, 0);
-        cudaStreamWaitEvent(s.ofStream, s.inferDone[writeBuf], 0);
-        nvof_prepare_slot(s.nvof, writeBuf,
-                          s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
-                          d_outSlice, nullptr, mw, mh, s.ofStream);
-        if (s.nvofHasPrev) {
-            nvof_execute(s.nvof, s.nvofPrevSlot, writeBuf, s.ofStream);
-            // Warp for each interpolated frame between prevInfer and thisInfer
-            int nInterp = std::min(s.pipeIdx, s.MAX_OF);
-            for (int k=1; k<=nInterp; ++k) {
-                float t = (float)k / (float)(nInterp+1);
-                nvof_warp(s.nvof, s.nvofPrevSlot, writeBuf,
-                          s.d_warpBuf[k-1], t, s.ofStream);
-                cudaMemcpyAsync(s.h_warpBuf[k-1], s.d_warpBuf[k-1],
-                                (size_t)mw*mh*sizeof(float),
-                                cudaMemcpyDeviceToHost, s.ofStream);
-            }
         }
-        cudaEventRecord(s.ofDone, s.ofStream);
     }
 
-    // ── jbuStream waits for inferDone (GPU-side, no CPU stall) ───────────────
-    cudaStreamWaitEvent(s.jbuStream, s.inferDone[writeBuf], 0);
+    if (!s.context->enqueueV3(s.inferStream)) {
+        LOG_ERR("TRT: enqueueV3 failed.");
+        return E_FAIL;
+    }
 
+    // Signal that inference output for this slot is ready.
+    cudaEventRecord(
+        s.inferDone[writeBuf],
+        s.inferStream);
+
+    // ── Current depth slice ──────────────────────────────────────────────────
+    const int F_out =
+        (s.nbVideoFrames > 0)
+            ? s.nbVideoFrames
+            : 1;
+
+    float* d_outSlice =
+        s.d_output[writeBuf] +
+        (size_t)(F_out - 1) * mw * mh;
+
+    // ── Buffer metadata ──────────────────────────────────────────────────────
     s.bufMW[writeBuf]     = mw;
     s.bufMH[writeBuf]     = mh;
     s.bufSrcW[writeBuf]   = srcW;
@@ -1022,209 +1048,489 @@ HRESULT DepthEstimator::EstimateTrtRtx(const BYTE* srcData, int srcW, int srcH,
     s.bufStride[writeBuf] = srcStride;
     s.bufJBU[writeBuf]    = false;
 
-    // ── GPU upscale path: Bilinear / JBU / WMF all run on GPU now ─────────────
-    // Previously Bilinear mode skipped these kernels entirely and fell back
-    // to a CPU resize in the collect phase below — which left the GPU idle
-    // and was, paradoxically, SLOWER than running JBU/WMF on the GPU (a
-    // single-threaded full-HD CPU resize is slower than a small, massively
-    // parallel GPU kernel). All three modes now share the same buffer set
-    // and readback path; only the kernel(s) launched differ.
-    const bool wantJBU = (upscaleMode == DepthUpscaleMode::JBU);
-    const bool wantWMF = (upscaleMode == DepthUpscaleMode::WeightedMode);
+    // ── GPU upscale configuration ────────────────────────────────────────────
+    const bool wantJBU =
+        (upscaleMode == DepthUpscaleMode::JBU);
+
+    const bool wantWMF =
+        (upscaleMode == DepthUpscaleMode::WeightedMode);
+
+    const bool wantNvOF =
+        s.nvof &&
+        nvof_available(s.nvof);
+
     bool gpuUpscaleActive = false;
+
     {
         const bool needAlloc =
-            (s.jbuHrW[writeBuf] != srcW || s.jbuHrH[writeBuf] != srcH ||
-             s.glrW[writeBuf]   != mw   || s.glrH[writeBuf]   != mh);
+            (s.jbuHrW[writeBuf] != srcW ||
+             s.jbuHrH[writeBuf] != srcH ||
+             s.glrW[writeBuf]   != mw   ||
+             s.glrH[writeBuf]   != mh);
+
         bool allocOK = true;
+
         if (needAlloc) {
-            cudaFree(s.d_depthHR[writeBuf]);    s.d_depthHR[writeBuf]   = nullptr;
-            cudaFree(s.d_guideBGRA[writeBuf]);  s.d_guideBGRA[writeBuf] = nullptr;
-            cudaFree(s.d_guideLR[writeBuf]);    s.d_guideLR[writeBuf]   = nullptr;
-            cudaFree(s.d_dilateTmp[writeBuf]);  s.d_dilateTmp[writeBuf] = nullptr;
+            cudaFree(s.d_depthHR[writeBuf]);
+            s.d_depthHR[writeBuf] = nullptr;
+
+            cudaFree(s.d_guideBGRA[writeBuf]);
+            s.d_guideBGRA[writeBuf] = nullptr;
+
+            cudaFree(s.d_guideLR[writeBuf]);
+            s.d_guideLR[writeBuf] = nullptr;
+
+            cudaFree(s.d_dilateTmp[writeBuf]);
+            s.d_dilateTmp[writeBuf] = nullptr;
+
             if (s.h_jbuOut[writeBuf]) {
-                cudaFreeHost(s.h_jbuOut[writeBuf]); s.h_jbuOut[writeBuf] = nullptr;
+                cudaFreeHost(s.h_jbuOut[writeBuf]);
+                s.h_jbuOut[writeBuf] = nullptr;
             }
-            cudaError_t e1 = cudaMalloc(reinterpret_cast<void**>(&s.d_depthHR[writeBuf]),
-                                         (size_t)srcW * srcH * sizeof(float));
-            cudaError_t e2 = cudaMalloc(reinterpret_cast<void**>(&s.d_guideBGRA[writeBuf]),
-                                         (size_t)srcH * srcStride);
-            cudaError_t e3 = cudaMalloc(reinterpret_cast<void**>(&s.d_guideLR[writeBuf]),
-                                         (size_t)mw * mh * sizeof(float));
-            cudaError_t e4 = cudaMalloc(reinterpret_cast<void**>(&s.d_dilateTmp[writeBuf]),
-                                         (size_t)srcW * srcH * sizeof(float));
-            cudaError_t e5 = cudaMallocHost(reinterpret_cast<void**>(&s.h_jbuOut[writeBuf]),
-                                             (size_t)srcW * srcH * sizeof(float));
-            allocOK = !(e1 || e2 || e3 || e4 || e5);
+
+            cudaError_t e1 =
+                cudaMalloc(
+                    reinterpret_cast<void**>(
+                        &s.d_depthHR[writeBuf]),
+                    (size_t)srcW * srcH * sizeof(float));
+
+            cudaError_t e2 =
+                cudaMalloc(
+                    reinterpret_cast<void**>(
+                        &s.d_guideBGRA[writeBuf]),
+                    (size_t)srcH * srcStride);
+
+            cudaError_t e3 =
+                cudaMalloc(
+                    reinterpret_cast<void**>(
+                        &s.d_guideLR[writeBuf]),
+                    (size_t)mw * mh * sizeof(float));
+
+            cudaError_t e4 =
+                cudaMalloc(
+                    reinterpret_cast<void**>(
+                        &s.d_dilateTmp[writeBuf]),
+                    (size_t)srcW * srcH * sizeof(float));
+
+            cudaError_t e5 =
+                cudaMallocHost(
+                    reinterpret_cast<void**>(
+                        &s.h_jbuOut[writeBuf]),
+                    (size_t)srcW * srcH * sizeof(float));
+
+            allocOK =
+                !(e1 || e2 || e3 || e4 || e5);
+
             if (!allocOK) {
-                LOG_ERR("CUDA upscale alloc failed slot=", writeBuf,
-                        " (", e1, " ", e2, " ", e3, " ", e4, " ", e5, ")");
-                cudaFree(s.d_depthHR[writeBuf]);    s.d_depthHR[writeBuf]   = nullptr;
-                cudaFree(s.d_guideBGRA[writeBuf]);  s.d_guideBGRA[writeBuf] = nullptr;
-                cudaFree(s.d_guideLR[writeBuf]);    s.d_guideLR[writeBuf]   = nullptr;
-                cudaFree(s.d_dilateTmp[writeBuf]);  s.d_dilateTmp[writeBuf] = nullptr;
+                LOG_ERR(
+                    "CUDA upscale alloc failed slot=",
+                    writeBuf,
+                    " (", e1,
+                    " ", e2,
+                    " ", e3,
+                    " ", e4,
+                    " ", e5, ")");
+
+                cudaFree(s.d_depthHR[writeBuf]);
+                s.d_depthHR[writeBuf] = nullptr;
+
+                cudaFree(s.d_guideBGRA[writeBuf]);
+                s.d_guideBGRA[writeBuf] = nullptr;
+
+                cudaFree(s.d_guideLR[writeBuf]);
+                s.d_guideLR[writeBuf] = nullptr;
+
+                cudaFree(s.d_dilateTmp[writeBuf]);
+                s.d_dilateTmp[writeBuf] = nullptr;
+
                 if (s.h_jbuOut[writeBuf]) {
-                    cudaFreeHost(s.h_jbuOut[writeBuf]); s.h_jbuOut[writeBuf] = nullptr;
+                    cudaFreeHost(s.h_jbuOut[writeBuf]);
+                    s.h_jbuOut[writeBuf] = nullptr;
                 }
-                s.jbuHrW[writeBuf] = s.jbuHrH[writeBuf] = 0;
-                s.glrW[writeBuf]   = s.glrH[writeBuf]   = 0;
+
+                s.jbuHrW[writeBuf] = 0;
+                s.jbuHrH[writeBuf] = 0;
+                s.glrW[writeBuf]   = 0;
+                s.glrH[writeBuf]   = 0;
             } else {
-                s.jbuHrW[writeBuf] = srcW; s.jbuHrH[writeBuf] = srcH;
-                s.glrW[writeBuf]   = mw;   s.glrH[writeBuf]   = mh;
+                s.jbuHrW[writeBuf] = srcW;
+                s.jbuHrH[writeBuf] = srcH;
+                s.glrW[writeBuf]   = mw;
+                s.glrH[writeBuf]   = mh;
             }
         }
+
         if (allocOK) {
-            cudaGetLastError(); // clear any sticky error from async enqueueV3
+            cudaGetLastError();
 
-            // Guide upload only needed for JBU/WMF (Bilinear ignores RGB).
-            if (wantJBU || wantWMF) {
-                cudaMemcpyAsync(s.d_guideBGRA[writeBuf], srcData,
-                                (size_t)srcH * srcStride,
-                                cudaMemcpyHostToDevice, s.jbuStream);
-                // Signal ofStream that guideBGRA[writeBuf] is ready
-                cudaEventRecord(s.guideUpDone, s.jbuStream);
-            }
-
-            // sigma_s=1.2 (LR-space spatial), sigma_c=0.25 (full-RGB sum-of-
-            // squares colour distance), radius=3 — tuned for full-RGB JBU.
-            // WMF scales radius/sigma_s with depthDilate too (not just
-            // dilateBias): biasing which bin wins within a FIXED tiny
-            // radius barely moves the edge at all, since there's nothing
-            // farther away competing for the win. Reach must grow with the
-            // slider for the effect to be visible, matching what users
-            // expect from "Edge Dilate".
-            if (wantJBU) {
-                jbu_cuda(d_outSlice, mw, mh,
-                         s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
-                         s.d_depthHR[writeBuf], 1.2f, 0.25f, 3,
-                         s.d_guideLR[writeBuf], s.jbuStream);
-            } else if (wantWMF) {
-                // WMF's histogram binning assumes depth is already in [0,1].
-                // Unlike every CPU call site (Estimate()/PostprocessDepth()
-                // normalise before calling JBUResize/WMFResize), the raw TRT
-                // model output (d_outSlice) is NOT bounded to [0,1] — depth
-                // models commonly emit an arbitrary relative-depth scale.
-                // Without this, almost every sample's bin index clamps to
-                // bin 0 or bin (BINS-1), collapsing the mode to one extreme
-                // and the output to near-solid black/white. JBU doesn't need
-                // this: it's a pure linear weighted average, so any input
-                // scale is fixed up correctly by the existing post-hoc
-                // full-image normalise in the collect phase below.
-                // d_guideLR is otherwise unused by WMF, so it doubles as the
-                // normalised-depth scratch buffer here (already mw*mh-sized).
-                normalize_depth_cuda(d_outSlice, mw * mh,
-                                     s.d_minmax, s.d_guideLR[writeBuf],
-                                     s.jbuStream);
-                // flipDepth passed directly: this runs BEFORE the flip
-                // (applied later, on CPU, in the collect phase), so the
-                // bias direction must reflect PRE-flip polarity — same
-                // requirement as gpu_dilate's `flipped` param below.
-                wmf_cuda(s.d_guideLR[writeBuf], mw, mh,
-                         s.d_guideBGRA[writeBuf], srcW, srcH, srcStride,
-                         s.d_depthHR[writeBuf], 1.2f, 0.25f, 3,
-                         nullptr, s.jbuStream);
-            } else {
-                // Bilinear — cheapest kernel, no guide/colour weighting.
-                bilinear_cuda(d_outSlice, mw, mh,
-                             s.d_depthHR[writeBuf], srcW, srcH, s.jbuStream);
-            }
-
-            // Skipped for WMF — its own dilateBias (above) already grows
-            // the foreground natively within its RGB-guided neighbourhood;
-            // stacking this separable box-filter dilate on top tends to
-            // look blockier on an already-sharp WMF edge.
+            // ── Guide upload ─────────────────────────────────────────────────
             //
-            // IMPORTANT (flip ordering): this runs BEFORE flipDepth is
-            // applied (that happens later, on CPU, in the collect phase
-            // below) — so we must tell gpu_dilate the data's PRE-flip
-            // polarity via `flipped` so it expands the side that will end
-            // up being "near" AFTER the flip, not before. Dilating before
-            // flip with the wrong polarity makes foreground edges visually
-            // SHRINK instead of expand once flipped.
-            if (depthDilate > 0) {
-                // All modes use the same separable max-dilation (gpu_dilate).
-                // wmf_dilate_cuda's nearest-neighbour boundary shift produced
-                // no cleaner result than the standard max-filter, so retired.
-                gpu_dilate(s.d_depthHR[writeBuf], s.d_dilateTmp[writeBuf],
-                           s.d_depthHR[writeBuf], srcW, srcH,
-                           depthDilate, depthEdgeThresh, flipDepth, s.jbuStream);
+            // NvOF also needs the guide, even when Bilinear is selected.
+            // Therefore upload it whenever JBU, WMF, or NvOF needs it.
+            if (wantJBU || wantWMF || wantNvOF) {
+                cudaMemcpyAsync(
+                    s.d_guideBGRA[writeBuf],
+                    srcData,
+                    (size_t)srcH * srcStride,
+                    cudaMemcpyHostToDevice,
+                    s.jbuStream);
+
+                // ofStream will wait on this event before using the guide.
+                cudaEventRecord(
+                    s.guideUpDone,
+                    s.jbuStream);
             }
-            cudaMemcpyAsync(s.h_jbuOut[writeBuf], s.d_depthHR[writeBuf],
-                            (size_t)srcW * srcH * sizeof(float),
-                            cudaMemcpyDeviceToHost, s.jbuStream);
-            s.bufJBU[writeBuf] = true;   // "GPU upscale was used for this slot"
+
+            // ── JBU ──────────────────────────────────────────────────────────
+            if (wantJBU) {
+                jbu_cuda(
+                    d_outSlice,
+                    mw,
+                    mh,
+                    s.d_guideBGRA[writeBuf],
+                    srcW,
+                    srcH,
+                    srcStride,
+                    s.d_depthHR[writeBuf],
+                    1.2f,
+                    0.25f,
+                    3,
+                    s.d_guideLR[writeBuf],
+                    s.jbuStream);
+            }
+
+            // ── WMF ──────────────────────────────────────────────────────────
+            else if (wantWMF) {
+                // WMF expects depth in [0,1].
+                normalize_depth_cuda(
+                    d_outSlice,
+                    mw * mh,
+                    s.d_minmax,
+                    s.d_guideLR[writeBuf],
+                    s.jbuStream);
+
+                wmf_cuda(
+                    s.d_guideLR[writeBuf],
+                    mw,
+                    mh,
+                    s.d_guideBGRA[writeBuf],
+                    srcW,
+                    srcH,
+                    srcStride,
+                    s.d_depthHR[writeBuf],
+                    1.2f,
+                    0.25f,
+                    3,
+                    nullptr,
+                    s.jbuStream);
+            }
+
+            // ── Bilinear ─────────────────────────────────────────────────────
+            else {
+                bilinear_cuda(
+                    d_outSlice,
+                    mw,
+                    mh,
+                    s.d_depthHR[writeBuf],
+                    srcW,
+                    srcH,
+                    s.jbuStream);
+            }
+
+            // ── Optional depth dilation ──────────────────────────────────────
+            if (depthDilate > 0) {
+                gpu_dilate(
+                    s.d_depthHR[writeBuf],
+                    s.d_dilateTmp[writeBuf],
+                    s.d_depthHR[writeBuf],
+                    srcW,
+                    srcH,
+                    depthDilate,
+                    depthEdgeThresh,
+                    flipDepth,
+                    s.jbuStream);
+            }
+
+            // ── Read back upscaled depth ──────────────────────────────────────
+            cudaMemcpyAsync(
+                s.h_jbuOut[writeBuf],
+                s.d_depthHR[writeBuf],
+                (size_t)srcW * srcH * sizeof(float),
+                cudaMemcpyDeviceToHost,
+                s.jbuStream);
+
+            s.bufJBU[writeBuf] = true;
             gpuUpscaleActive = true;
         }
     }
-    if (!gpuUpscaleActive) {
-        // Rare fallback: GPU buffer allocation failed (e.g. CUDA OOM). Read
-        // back model-res data and let the collect phase's CPU PostprocessDepth
-        // do a plain bilinear resize instead of erroring the whole frame.
-        cudaMemcpyAsync(s.h_output[writeBuf], d_outSlice,
-                        (size_t)mw * mh * sizeof(float),
-                        cudaMemcpyDeviceToHost, s.jbuStream);
+
+    // ── NvOF depth interpolation ─────────────────────────────────────────────
+    //
+    // IMPORTANT:
+    // This block is intentionally AFTER allocation and guide upload.
+    //
+    // Dependencies:
+    //
+    //   guideUpDone -> current guide exists on GPU
+    //   inferDone   -> current depth exists on GPU
+    //
+    // Both are GPU-side waits. No CPU synchronization occurs here.
+    //
+    if (wantNvOF) {
+        if (!s.d_guideBGRA[writeBuf]) {
+            LOG_WARN(
+                "NvOF: guide buffer unavailable for slot=",
+                writeBuf);
+        } else {
+            cudaStreamWaitEvent(
+                s.ofStream,
+                s.guideUpDone,
+                0);
+
+            cudaStreamWaitEvent(
+                s.ofStream,
+                s.inferDone[writeBuf],
+                0);
+
+            nvof_prepare_slot(
+                s.nvof,
+                writeBuf,
+                s.d_guideBGRA[writeBuf],
+                srcW,
+                srcH,
+                srcStride,
+                d_outSlice,
+                nullptr,
+                mw,
+                mh,
+                s.ofStream);
+
+            // The first inference establishes the previous frame.
+            // No interpolation is attempted until a second depth frame
+            // has successfully been prepared.
+            if (s.nvofHasPrev) {
+                const bool flowOK =
+                    nvof_execute(
+                        s.nvof,
+                        s.nvofPrevSlot,
+                        writeBuf,
+                        s.ofStream);
+
+                if (flowOK) {
+                    // pipeIdx is incremented below, so at this point:
+                    //
+                    //   pipeIdx=0 -> first inference
+                    //   pipeIdx=1 -> second inference
+                    //
+                    // Therefore pipeIdx - 1 is the number of interpolation
+                    // intervals available during startup.
+                    const int nInterp =
+                        std::min(
+                            std::max(s.pipeIdx - 1, 0),
+                            s.MAX_OF);
+
+                    for (int k = 1; k <= nInterp; ++k) {
+                        const float t =
+                            (float)k /
+                            (float)(nInterp + 1);
+
+                        nvof_warp(
+                            s.nvof,
+                            s.nvofPrevSlot,
+                            writeBuf,
+                            s.d_warpBuf[k - 1],
+                            t,
+                            s.ofStream);
+
+                        cudaMemcpyAsync(
+                            s.h_warpBuf[k - 1],
+                            s.d_warpBuf[k - 1],
+                            (size_t)mw * mh * sizeof(float),
+                            cudaMemcpyDeviceToHost,
+                            s.ofStream);
+                    }
+                }
+            }
+
+            // Signals both NvOF completion and all warp D2H copies.
+            cudaEventRecord(
+                s.ofDone,
+                s.ofStream);
+
+            // The CPU later synchronizes jbuDone. Make sure that event
+            // cannot complete until NvOF and its host readbacks are done.
+            cudaStreamWaitEvent(
+                s.jbuStream,
+                s.ofDone,
+                0);
+        }
     }
 
-    // Record event and advance pipeline index
-    cudaEventRecord(s.jbuDone[writeBuf], s.jbuStream);
+    // ── jbuStream waits for inference ────────────────────────────────────────
+    //
+    // This is GPU-side; it does not block the CPU.
+    //
+    cudaStreamWaitEvent(
+        s.jbuStream,
+        s.inferDone[writeBuf],
+        0);
+
+    // Record the completed GPU work for this slot.
+    cudaEventRecord(
+        s.jbuDone[writeBuf],
+        s.jbuStream);
+
+    // Advance pipeline index only after all work for this frame has
+    // been queued.
     ++s.pipeIdx;
 
-    // ── Collect THIS frame's result (sync on writeBuf = zero lag) ────────────
-    // We wait for the current slot's GPU work rather than a previous frame's.
-    // inferStream (inference) and jbuStream (JBU/readback) still run in parallel
-    // within the frame, so GPU utilisation is unchanged.
-    cudaEventSynchronize(s.jbuDone[writeBuf]);
+    // ── Collect THIS frame's result ──────────────────────────────────────────
+    //
+    // NOTE:
+    // This is intentionally a CPU synchronization. It guarantees that
+    // h_jbuOut and, when NvOF is active, h_warpBuf are ready before we
+    // access them below.
+    //
+    cudaEventSynchronize(
+        s.jbuDone[writeBuf]);
 
-    const int  rsrcW = s.bufSrcW[writeBuf];
-    const int  rsrcH = s.bufSrcH[writeBuf];
-    const int  rmw   = s.bufMW[writeBuf];
-    const int  rmh   = s.bufMH[writeBuf];
-    const bool rJBU  = s.bufJBU[writeBuf];
+    const int rsrcW =
+        s.bufSrcW[writeBuf];
 
-    std::vector<float> out((size_t)rsrcW * rsrcH);
-    if (rJBU && s.h_jbuOut[writeBuf]) {
-        const float* raw = s.h_jbuOut[writeBuf];
-        const int    N   = rsrcW * rsrcH;
-        float mn = raw[0], mx = raw[0];
+    const int rsrcH =
+        s.bufSrcH[writeBuf];
+
+    const int rmw =
+        s.bufMW[writeBuf];
+
+    const int rmh =
+        s.bufMH[writeBuf];
+
+    const bool rJBU =
+        s.bufJBU[writeBuf];
+
+    std::vector<float> out(
+        (size_t)rsrcW * rsrcH);
+
+    if (rJBU &&
+        s.h_jbuOut[writeBuf]) {
+
+        const float* raw =
+            s.h_jbuOut[writeBuf];
+
+        const int N =
+            rsrcW * rsrcH;
+
+        float mn = raw[0];
+        float mx = raw[0];
+
         for (int i = 1; i < N; ++i) {
-            if (raw[i] < mn) mn = raw[i];
-            if (raw[i] > mx) mx = raw[i];
+            if (raw[i] < mn)
+                mn = raw[i];
+
+            if (raw[i] > mx)
+                mx = raw[i];
         }
-        const float range = (mx - mn) > 1e-6f ? (mx - mn) : 1e-6f;
+
+        const float range =
+            (mx - mn) > 1e-6f
+                ? (mx - mn)
+                : 1e-6f;
+
         for (int i = 0; i < N; ++i) {
-            const float v = (raw[i] - mn) / range;
-            out[i] = flipDepth ? 1.f - v : v;
+            const float v =
+                (raw[i] - mn) / range;
+
+            out[i] =
+                flipDepth
+                    ? 1.f - v
+                    : v;
         }
     } else {
-        // GPU upscale disabled (Bilinear selected) or buffer alloc failed —
-        // either way, model-res data needs a plain resize. Pass Bilinear
-        // explicitly here rather than upscaleMode: if JBU/WMF was requested
-        // but its GPU buffers failed to allocate, we still want a graceful
-        // bilinear fallback rather than erroring the whole frame.
-        PostprocessDepth(s.h_output[writeBuf], rmw, rmh, rsrcW, rsrcH,
-                         flipDepth, out, nullptr, 0, DepthUpscaleMode::Bilinear,
-                         depthDilate, depthEdgeThresh);
+        // GPU upscale disabled or allocation failed.
+        // Fall back to CPU bilinear processing.
+        PostprocessDepth(
+            s.h_output[writeBuf],
+            rmw,
+            rmh,
+            rsrcW,
+            rsrcH,
+            flipDepth,
+            out,
+            nullptr,
+            0,
+            DepthUpscaleMode::Bilinear,
+            depthDilate,
+            depthEdgeThresh);
     }
 
-    if (!m_da3StreamMode && smoothAlpha > 0.f && smoothAlpha < 1.f)
-        TemporalSmooth(out, smoothAlpha);
+    // ── Temporal smoothing ───────────────────────────────────────────────────
+    if (!m_da3StreamMode &&
+        smoothAlpha > 0.f &&
+        smoothAlpha < 1.f) {
+        TemporalSmooth(
+            out,
+            smoothAlpha);
+    }
 
-    result.data   = std::move(out);
-    result.width  = rsrcW;
-    result.height = rsrcH;
-    result.prevInferFrameNo = s.nvofPrevFrameNo;
-    // Collect interpolated LR depths from NvOF warp (if available)
-    if (s.nvof && nvof_available(s.nvof) && s.nvofHasPrev) {
-        int nInterp = std::min(s.pipeIdx, s.MAX_OF); // pipeIdx≥1 here
-        result.interpData.resize(nInterp);
-        for (int k=0; k<nInterp; ++k) {
-            auto& fr = result.interpData[k];
-            fr.depth.assign(s.h_warpBuf[k], s.h_warpBuf[k]+(size_t)mw*mh);
-            fr.rawW=mw; fr.rawH=mh;
+    // ── Return current depth result ──────────────────────────────────────────
+    result.data =
+        std::move(out);
+
+    result.width =
+        rsrcW;
+
+    result.height =
+        rsrcH;
+
+    result.prevInferFrameNo =
+        s.nvofPrevFrameNo;
+
+    // ── Collect interpolated LR depths ───────────────────────────────────────
+    //
+    // Only collect interpolation after a valid previous depth frame existed.
+    // nInterp matches the number of frames actually scheduled above.
+    //
+    if (wantNvOF &&
+        s.nvofHasPrev) {
+
+        const int nInterp =
+            std::min(
+                std::max(s.pipeIdx - 2, 0),
+                s.MAX_OF);
+
+        if (nInterp > 0) {
+            result.interpData.resize(nInterp);
+
+            for (int k = 0; k < nInterp; ++k) {
+                auto& fr =
+                    result.interpData[k];
+
+                fr.depth.assign(
+                    s.h_warpBuf[k],
+                    s.h_warpBuf[k] +
+                        (size_t)mw * mh);
+
+                fr.rawW =
+                    mw;
+
+                fr.rawH =
+                    mh;
+            }
         }
     }
-    // Update NvOF state for next iteration
-    s.nvofHasPrev = true; s.nvofPrevSlot = writeBuf;
+
+    // ── Update NvOF state for next iteration ──────────────────────────────────
+    //
+    // The current successfully prepared depth becomes the previous frame
+    // for the next depth inference.
+    //
+    s.nvofHasPrev =
+        true;
+
+    s.nvofPrevSlot =
+        writeBuf;
+
     return S_OK;
 }
 
